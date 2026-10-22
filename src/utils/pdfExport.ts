@@ -1,6 +1,6 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Transaction, Warga } from '../types';
+import { Transaction, Warga, PengumumanRT } from '../types';
 
 export const exportRekapTahunanPDF = (
   transactions: Transaction[],
@@ -258,4 +258,137 @@ export const exportPengeluaranPDF = (
   doc.text('( Bapak Bambang S. )', 160, signY + 25, { align: 'center' });
 
   doc.save(`Laporan_Pengeluaran_Kas_RT08_RW05_${tahun}.pdf`);
+};
+
+/**
+ * Generates an official Formal Indonesian Announcement Letter (Surat Edaran RT)
+ */
+export const exportSuratPengumumanPDF = (pengumuman: PengumumanRT) => {
+  const doc = new jsPDF({
+    orientation: 'portrait',
+    unit: 'mm',
+    format: 'a4',
+  });
+
+  // Top header border
+  doc.setFillColor(11, 93, 63);
+  doc.rect(0, 0, 210, 7, 'F');
+
+  // Letterhead (Kop Surat Resmi)
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(14);
+  doc.setTextColor(11, 93, 63);
+  doc.text('PENGURUS RUKUN TETANGGA 08 RUKUN WARGA 05', 105, 20, { align: 'center' });
+
+  doc.setFontSize(12);
+  doc.setTextColor(30, 30, 30);
+  doc.text('DESA KOTAYASA KECAMATAN SUMBANG KABUPATEN BANYUMAS', 105, 26, { align: 'center' });
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(100, 100, 100);
+  doc.text('Alamat: RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas Kode Pos 53183', 105, 31, { align: 'center' });
+
+  // Double line kop surat
+  doc.setDrawColor(11, 93, 63);
+  doc.setLineWidth(0.9);
+  doc.line(18, 34, 192, 34);
+  doc.setLineWidth(0.3);
+  doc.line(18, 35.5, 192, 35.5);
+
+  // Metadata Surat (Nomor, Lampiran, Perihal, Tanggal)
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(30, 30, 30);
+
+  const cleanId = pengumuman.id.replace(/[^0-9]/g, '') || '01';
+  const noSurat = `0${cleanId}/EDR/RT08-RW05/X/2026`;
+
+  doc.text(`Nomor     : ${noSurat}`, 20, 44);
+  doc.text('Lampiran : -', 20, 50);
+  doc.text(`Perihal     : PENGUMUMAN - ${pengumuman.judul.toUpperCase()}`, 20, 56);
+
+  doc.text(`Kotayasa, ${pengumuman.tanggal || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, 140, 44);
+
+  // Kepada Yth
+  doc.text('Kepada Yth.', 20, 66);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Seluruh Warga RT 08 RW 05', 20, 71);
+  doc.setFont('helvetica', 'normal');
+  doc.text('Desa Kotayasa, Kec. Sumbang', 20, 76);
+  doc.text('di Tempat', 20, 81);
+
+  // Salam Pembuka
+  doc.text('Assalamu’alaikum Warahmatullahi Wabarakatuh,', 20, 91);
+  doc.text('Salam sejahtera untuk kita semua.', 20, 96);
+
+  // Isi Surat
+  const pembuka = 'Sehubungan dengan agenda kemaslahatan dan ketertiban lingkungan di wilayah RT 08 RW 05 Desa Kotayasa, melalui surat ini Pengurus RT menyampaikan pemberitahuan sebagai berikut:';
+  const splitPembuka = doc.splitTextToSize(pembuka, 170);
+  doc.text(splitPembuka, 20, 104);
+
+  // Kotak Penegasan Pengumuman
+  doc.setFillColor(243, 249, 245);
+  doc.roundedRect(20, 116, 170, 48, 3, 3, 'F');
+  doc.setDrawColor(11, 93, 63);
+  doc.roundedRect(20, 116, 170, 48, 3, 3, 'D');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.setTextColor(11, 93, 63);
+  doc.text(pengumuman.judul, 25, 124);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9.5);
+  doc.setTextColor(40, 40, 40);
+  const splitIsi = doc.splitTextToSize(pengumuman.isi, 160);
+  doc.text(splitIsi, 25, 131);
+
+  // Kategori & Status Penting
+  doc.setFont('helvetica', 'italic');
+  doc.setFontSize(8.5);
+  doc.setTextColor(80, 80, 80);
+  doc.text(`Kategori: ${pengumuman.kategori} ${pengumuman.penting ? '• [PEMBERITAHUAN PENTING]' : ''}`, 25, 158);
+
+  // Penutup
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(30, 30, 30);
+  const penutup = 'Demikian surat pengumuman ini kami sampaikan. Atas perhatian, dukungan, dan kerja sama yang baik dari seluruh warga RT 08 RW 05, kami ucapkan terima kasih yang sebesar-besarnya.';
+  const splitPenutup = doc.splitTextToSize(penutup, 170);
+  doc.text(splitPenutup, 20, 174);
+
+  doc.text('Wassalamu’alaikum Warahmatullahi Wabarakatuh.', 20, 190);
+
+  // Tanda Tangan & Stempel Digital
+  const signY = 202;
+  doc.text('Pengurus RT 08 RW 05 Desa Kotayasa', 130, signY);
+  doc.text('Ketua RT 08,', 130, signY + 6);
+
+  // Stempel Digital Bulat RT 08 RW 05
+  doc.setDrawColor(11, 93, 63);
+  doc.setLineWidth(0.6);
+  doc.circle(138, signY + 22, 13);
+  doc.circle(138, signY + 22, 11.5);
+
+  doc.setFontSize(5.5);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(11, 93, 63);
+  doc.text('RUKUN TETANGGA 08', 138, signY + 16, { align: 'center' });
+  doc.text('★ RW 05 ★', 138, signY + 22, { align: 'center' });
+  doc.text('DESA KOTAYASA', 138, signY + 28, { align: 'center' });
+
+  // Nama Terang
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(20, 20, 20);
+  doc.text('Bapak Suwardi', 130, signY + 38);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.5);
+  doc.setTextColor(80, 80, 80);
+  doc.text(`Tembusan: Ketua RW 05 Desa Kotayasa`, 20, signY + 45);
+
+  // Save the PDF
+  const safeTitle = pengumuman.judul.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
+  doc.save(`Surat_Pengumuman_RT08_${safeTitle}.pdf`);
 };

@@ -10,6 +10,7 @@ import {
   Home,
   Check,
   UserCheck,
+  Camera,
 } from 'lucide-react';
 import { Warga } from '../types';
 
@@ -60,8 +61,8 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
           onClick={onOpenWargaModal}
           className="flex items-center gap-2 rounded-xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#084831] transition-all cursor-pointer"
         >
-          <Plus size={16} strokeWidth={2.5} />
-          <span>+ Tambah Warga Baru</span>
+          <Camera size={16} />
+          <span>+ Tambah Warga / Foto KK</span>
         </button>
       </div>
 

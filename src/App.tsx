@@ -30,6 +30,8 @@ import { HouseLogo, LeafIcon } from './components/HouseLogo';
 import { TransactionModal } from './components/TransactionModal';
 import { WargaModal } from './components/WargaModal';
 import { LoginModal } from './components/LoginModal';
+import { PengumumanModal } from './components/PengumumanModal';
+import { FloatingNotification } from './components/FloatingNotification';
 import { AuthUser, Transaction, Warga, PengumumanRT } from './types';
 
 // Views
@@ -43,11 +45,10 @@ import { DataWargaView } from './views/DataWargaView';
 import { LaporanView } from './views/LaporanView';
 import { PengaturanView } from './views/PengaturanView';
 import { DasborWargaView } from './views/DasborWargaView';
+import { PengumumanView } from './views/PengumumanView';
 
 export default function App() {
   // Authentication State
-  // Default to Admin so the reviewer can immediately inspect all administration features,
-  // with quick toggle to Warga view or Login modal!
   const [currentUser, setCurrentUser] = useState<AuthUser | null>({
     role: 'admin',
     username: 'Admin',
@@ -66,11 +67,11 @@ export default function App() {
   const [isTxModalOpen, setIsTxModalOpen] = useState<boolean>(false);
   const [txModalType, setTxModalType] = useState<'masuk' | 'keluar' | 'kematian'>('masuk');
   const [isWargaModalOpen, setIsWargaModalOpen] = useState<boolean>(false);
+  const [isPengumumanModalOpen, setIsPengumumanModalOpen] = useState<boolean>(false);
 
   // Initial State: STRICTLY EMPTY AS REQUESTED (all nominals Rp 0, 0 transactions, 0 KK)
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [wargaList, setWargaList] = useState<Warga[]>([
-    // Providing default resident slots so user/warga can immediately select when logging in as warga
     { id: 'w1', no: 1, nama: 'Ahmad Fauzi', noRumah: '01', rt: '08', jenisKelamin: 'Laki-laki', jumlahJiwa: 4, statusIuran: 'Sudah' },
     { id: 'w2', no: 2, nama: 'Siti Aminah', noRumah: '02', rt: '08', jenisKelamin: 'Perempuan', jumlahJiwa: 3, statusIuran: 'Sudah' },
     { id: 'w3', no: 3, nama: 'Budi Santoso', noRumah: '03', rt: '08', jenisKelamin: 'Laki-laki', jumlahJiwa: 5, statusIuran: 'Belum' },
@@ -88,7 +89,7 @@ export default function App() {
       judul: 'Kerja Bakti Lingkungan & Pembersihan Saluran Air',
       tanggal: '18 Okt 2026',
       kategori: 'Kegiatan',
-      isi: 'Diberitahukan kepada seluruh warga RT 08 RW 05, kerja bakti massal akan dilaksanakan pada hari Minggu pagi pukul 07.00 WIB. Titik kumpul di depan pos kamling RT 08. Mohon membawa perlengkapan kebersihan.',
+      isi: 'Diberitahukan kepada seluruh warga RT 08 RW 05, kerja bakti massal akan dilaksanakan pada hari Minggu pagi pukul 07.00 WIB. Titik kumpul di depan pos kamling RT 08. Mohon membawa cangkul/sabit.',
       penulis: 'Ketua RT 08 (Bpk. Suwardi)',
       penting: true,
     },
@@ -105,10 +106,13 @@ export default function App() {
       judul: 'Pembaruan Jadwal Ronda Malam / Siskamling',
       tanggal: '05 Okt 2026',
       kategori: 'Keamanan',
-      isi: 'Jadwal ronda malam warga laki-laki dewasa telah diperbarui dan ditempel di Pos Ronda RT 08. Dimohon hadir tepat waktu pukul 22.00 WIB demi menjaga ketentraman lingkungan.',
+      isi: 'Jadwal ronda malam warga laki-laki dewasa telah diperbarui dan ditempel di Pos Ronda RT 08. Dimohon hadir tepat waktu pukul 22.00 WIB demi menjaga ketentraman lingkungan bersama.',
       penulis: 'Seksi Keamanan RT 08',
     },
   ]);
+
+  // Floating notification state (initialized with first announcement to showcase the floating banner!)
+  const [floatingAnnouncement, setFloatingAnnouncement] = useState<PengumumanRT | null>(pengumumanList[0]);
 
   // Sample data loader for optional simulation demo
   const handleLoadSample = () => {
@@ -192,7 +196,7 @@ export default function App() {
     setTransactions((prev) => [newTx, ...prev]);
   };
 
-  // Add Resident (Admin only)
+  // Add Resident (Admin only - supports OCR and Manual)
   const handleSaveWarga = (w: Omit<Warga, 'id' | 'no'>) => {
     const newW: Warga = {
       ...w,
@@ -216,6 +220,17 @@ export default function App() {
   // Delete resident (Admin only)
   const handleDeleteWarga = (id: string) => {
     setWargaList((prev) => prev.filter((w) => w.id !== id));
+  };
+
+  // Create Announcement (Admin only)
+  const handleSavePengumuman = (p: Omit<PengumumanRT, 'id'>) => {
+    const newP: PengumumanRT = {
+      ...p,
+      id: 'p' + Date.now(),
+    };
+    setPengumumanList((prev) => [newP, ...prev]);
+    // Pop floating notification on application!
+    setFloatingAnnouncement(newP);
   };
 
   // Balance calculations
@@ -259,10 +274,6 @@ export default function App() {
     setCurrentView('beranda');
   };
 
-  const handleLogout = () => {
-    setIsLoginModalOpen(true);
-  };
-
   // Define navigation items based on Role
   const isAdmin = currentUser?.role === 'admin';
 
@@ -274,12 +285,14 @@ export default function App() {
     { id: 'kas-kematian', label: 'Kas Kematian', icon: <Heart size={18} fill="currentColor" /> },
     { id: 'status-iuran', label: 'Status Iuran', icon: <CalendarCheck size={18} /> },
     { id: 'data-warga', label: 'Data Warga', icon: <Users size={18} /> },
+    { id: 'pengumuman', label: 'Pengumuman & WA', icon: <Megaphone size={18} /> },
     { id: 'laporan', label: 'Laporan & PDF', icon: <FileText size={18} /> },
     { id: 'pengaturan', label: 'Pengaturan RT', icon: <Settings size={18} /> },
   ];
 
   const wargaNavItems = [
     { id: 'dasbor-warga', label: 'Dasbor Tagihan Saya', icon: <User size={18} /> },
+    { id: 'pengumuman', label: 'Warta Pengumuman', icon: <Megaphone size={18} /> },
     { id: 'laporan', label: 'Laporan & Unduh PDF', icon: <FileText size={18} /> },
   ];
 
@@ -287,6 +300,16 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-[#F4F7F5] text-slate-800 font-sans">
+      {/* FLOATING NOTIFICATION BANNER */}
+      <FloatingNotification
+        announcement={floatingAnnouncement}
+        onClose={() => setFloatingAnnouncement(null)}
+        onOpenDetail={(p) => {
+          setCurrentView('pengumuman');
+          setFloatingAnnouncement(null);
+        }}
+      />
+
       {/* SIDEBAR NAVIGATION (Desktop & Drawer Mobile) */}
       <aside
         className={`fixed inset-y-0 left-0 z-50 flex w-72 flex-col justify-between bg-gradient-to-b from-[#094A32] via-[#0B5D3F] to-[#073F2B] p-5 text-white shadow-2xl transition-transform duration-300 lg:static lg:translate-x-0 ${
@@ -482,6 +505,18 @@ export default function App() {
               </button>
             </div>
 
+            {/* Admin-only Button: Buat Pengumuman & WA */}
+            {isAdmin && (
+              <button
+                onClick={() => setIsPengumumanModalOpen(true)}
+                className="flex items-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 px-3.5 py-2 text-xs font-bold text-white shadow-xs active:scale-95 transition-all cursor-pointer"
+                title="Buat Pengumuman Baru & Kirim WhatsApp / Download PDF"
+              >
+                <Megaphone size={15} />
+                <span className="hidden sm:inline">Pengumuman & WA</span>
+              </button>
+            )}
+
             {/* Admin-only Button: Catat Transaksi */}
             {isAdmin && (
               <button
@@ -493,7 +528,7 @@ export default function App() {
               >
                 <Plus size={15} strokeWidth={2.5} />
                 <span className="hidden sm:inline">+ Catat Kas</span>
-                <span className="sm:hidden">Catat</span>
+                <span className="sm:hidden">Kas</span>
               </button>
             )}
 
@@ -515,12 +550,28 @@ export default function App() {
           <div className="mx-auto max-w-7xl">
             {/* WARGA VIEW: Only Debt Status and RT Announcements, Read-Only */}
             {!isAdmin ? (
-              <DasborWargaView
-                currentUser={currentUser!}
-                wargaList={wargaList}
-                transactions={transactions}
-                pengumumanList={pengumumanList}
-              />
+              currentView === 'pengumuman' ? (
+                <PengumumanView
+                  pengumumanList={pengumumanList}
+                  isAdmin={false}
+                  onOpenCreateModal={() => {}}
+                  onDeletePengumuman={() => {}}
+                  onBack={() => setCurrentView('dasbor-warga')}
+                />
+              ) : currentView === 'laporan' ? (
+                <LaporanView
+                  transactions={transactions}
+                  wargaList={wargaList}
+                  onBack={() => setCurrentView('dasbor-warga')}
+                />
+              ) : (
+                <DasborWargaView
+                  currentUser={currentUser!}
+                  wargaList={wargaList}
+                  transactions={transactions}
+                  pengumumanList={pengumumanList}
+                />
+              )
             ) : (
               /* ADMIN VIEWS: Full Administrative Capabilities */
               <>
@@ -534,6 +585,7 @@ export default function App() {
                       setIsTxModalOpen(true);
                     }}
                     onOpenWargaModal={() => setIsWargaModalOpen(true)}
+                    onOpenPengumumanModal={() => setIsPengumumanModalOpen(true)}
                   />
                 )}
 
@@ -599,6 +651,16 @@ export default function App() {
                   />
                 )}
 
+                {currentView === 'pengumuman' && (
+                  <PengumumanView
+                    pengumumanList={pengumumanList}
+                    isAdmin={true}
+                    onOpenCreateModal={() => setIsPengumumanModalOpen(true)}
+                    onDeletePengumuman={(id) => setPengumumanList((prev) => prev.filter((p) => p.id !== id))}
+                    onBack={() => setCurrentView('beranda')}
+                  />
+                )}
+
                 {currentView === 'laporan' && (
                   <LaporanView
                     transactions={transactions}
@@ -638,12 +700,21 @@ export default function App() {
         />
       )}
 
-      {/* Resident (Warga) Modal (Admin Only) */}
+      {/* Resident (Warga) Modal with OCR / Photo KK (Admin Only) */}
       {isAdmin && (
         <WargaModal
           isOpen={isWargaModalOpen}
           onClose={() => setIsWargaModalOpen(false)}
           onSave={handleSaveWarga}
+        />
+      )}
+
+      {/* Pengumuman Modal (Admin Only) */}
+      {isAdmin && (
+        <PengumumanModal
+          isOpen={isPengumumanModalOpen}
+          onClose={() => setIsPengumumanModalOpen(false)}
+          onSave={handleSavePengumuman}
         />
       )}
     </div>

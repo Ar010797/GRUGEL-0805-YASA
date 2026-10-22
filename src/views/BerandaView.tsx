@@ -17,6 +17,7 @@ import {
   Settings,
   HelpCircle,
   Inbox,
+  Megaphone,
 } from 'lucide-react';
 import { HouseLogo, LeafIcon } from '../components/HouseLogo';
 import { GreetingVillageIllustration } from '../components/VillageLandscape';
@@ -28,6 +29,7 @@ interface BerandaViewProps {
   onNavigate: (view: string) => void;
   onOpenTxModal: (type?: 'masuk' | 'keluar' | 'kematian') => void;
   onOpenWargaModal: () => void;
+  onOpenPengumumanModal?: () => void;
 }
 
 export const BerandaView: React.FC<BerandaViewProps> = ({
@@ -36,6 +38,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
   onNavigate,
   onOpenTxModal,
   onOpenWargaModal,
+  onOpenPengumumanModal,
 }) => {
   // Calculate real balances
   const totalMasuk = transactions
@@ -177,7 +180,15 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
                 className="flex items-center gap-2 rounded-xl bg-emerald-900/60 px-4 py-2.5 text-xs font-bold text-emerald-200 border border-emerald-700/40 hover:bg-emerald-800/80 active:scale-95 transition-all cursor-pointer"
               >
                 <Users size={16} />
-                <span>Tambah Warga</span>
+                <span>+ Warga (Scan KK)</span>
+              </button>
+
+              <button
+                onClick={() => onOpenPengumumanModal ? onOpenPengumumanModal() : onNavigate('pengumuman')}
+                className="flex items-center gap-2 rounded-xl bg-amber-400 px-4 py-2.5 text-xs font-bold text-slate-900 shadow-sm hover:bg-amber-300 active:scale-95 transition-all cursor-pointer"
+              >
+                <Megaphone size={16} />
+                <span>+ Buat Pengumuman & WA</span>
               </button>
             </div>
           </div>

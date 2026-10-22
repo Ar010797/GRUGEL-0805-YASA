@@ -13,10 +13,12 @@ import {
   Clock,
   Heart,
   Users,
+  Share2,
 } from 'lucide-react';
 import { AuthUser, Transaction, Warga, PengumumanRT } from '../types';
 import { LeafIcon } from '../components/HouseLogo';
-import { exportRekapTahunanPDF, exportPengeluaranPDF } from '../utils/pdfExport';
+import { exportRekapTahunanPDF, exportPengeluaranPDF, exportSuratPengumumanPDF } from '../utils/pdfExport';
+import { kirimWhatsAppPengumuman } from '../utils/whatsappShare';
 
 interface DasborWargaViewProps {
   currentUser: AuthUser;
@@ -332,6 +334,27 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
                 {item.penting && (
                   <span className="font-bold text-amber-700">★ Penting</span>
                 )}
+              </div>
+
+              {/* Action buttons: Kirim WA & Download Surat PDF */}
+              <div className="mt-3 pt-2 border-t border-slate-200/50 flex items-center justify-between gap-2">
+                <button
+                  onClick={() => kirimWhatsAppPengumuman(item)}
+                  className="flex items-center gap-1 rounded-lg bg-[#25D366]/15 hover:bg-[#25D366]/25 px-2.5 py-1 text-[10px] font-bold text-emerald-900 transition-colors cursor-pointer"
+                  title="Bagikan ke WhatsApp"
+                >
+                  <Share2 size={11} />
+                  <span>Kirim WA</span>
+                </button>
+
+                <button
+                  onClick={() => exportSuratPengumumanPDF(item)}
+                  className="flex items-center gap-1 rounded-lg bg-[#0B5D3F] hover:bg-[#084831] px-2.5 py-1 text-[10px] font-bold text-white transition-colors cursor-pointer"
+                  title="Unduh PDF Surat Pengumuman Resmi RT 08"
+                >
+                  <Download size={11} />
+                  <span>Surat PDF</span>
+                </button>
               </div>
             </div>
           ))}
