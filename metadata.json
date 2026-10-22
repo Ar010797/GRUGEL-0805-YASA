@@ -1,0 +1,6 @@
+{
+  "name": "Mockup UI/UX Kas Warga RT 08 RW 05 Desa Kotayasa",
+  "description": "Mockup presentasi desain antarmuka 7 layar mobile app pengelolaan kas warga RT 08 RW 05 Desa Kotayasa dengan panel fitur unggulan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
