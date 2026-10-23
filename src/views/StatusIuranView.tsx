@@ -10,10 +10,11 @@ import {
   ChevronRight,
   Filter,
 } from 'lucide-react';
-import { Warga } from '../types';
+import { Warga, PengaturanKas } from '../types';
 
 interface StatusIuranViewProps {
   wargaList: Warga[];
+  pengaturanKas?: PengaturanKas;
   onToggleStatus: (id: string) => void;
   onOpenWargaModal: () => void;
   onBack: () => void;
@@ -21,6 +22,7 @@ interface StatusIuranViewProps {
 
 export const StatusIuranView: React.FC<StatusIuranViewProps> = ({
   wargaList,
+  pengaturanKas,
   onToggleStatus,
   onOpenWargaModal,
   onBack,
@@ -67,6 +69,20 @@ export const StatusIuranView: React.FC<StatusIuranViewProps> = ({
           <span>+ Tambah Data Warga</span>
         </button>
       </div>
+
+      {pengaturanKas && (
+        <div className="rounded-2xl bg-white p-4 border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <div>
+            <span className="font-bold text-slate-800">Besaran Iuran Bulan Berjalan (Auto-Hitung Tahunan &divide; 12):</span>
+            <p className="text-slate-500 mt-0.5">
+              Jimpitan Rp {pengaturanKas.nominalJimpitanBulanan.toLocaleString('id-ID')}/bln (dari Rp {pengaturanKas.nominalJimpitanTahunan.toLocaleString('id-ID')}/thn) + Kas Kematian Rp {pengaturanKas.nominalKematianBulanan.toLocaleString('id-ID')}/bln (dari Rp {pengaturanKas.nominalKematianTahunan.toLocaleString('id-ID')}/thn)
+            </p>
+          </div>
+          <div className="rounded-xl bg-[#E8F5EE] px-3.5 py-2 font-extrabold text-[#0B5D3F] border border-emerald-200 shrink-0 text-center">
+            Rp {(pengaturanKas.nominalJimpitanBulanan + pengaturanKas.nominalKematianBulanan).toLocaleString('id-ID')} / bulan / KK
+          </div>
+        </div>
+      )}
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

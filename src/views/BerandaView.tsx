@@ -18,6 +18,7 @@ import {
   HelpCircle,
   Inbox,
   Megaphone,
+  History,
 } from 'lucide-react';
 import { HouseLogo, LeafIcon } from '../components/HouseLogo';
 import { GreetingVillageIllustration } from '../components/VillageLandscape';
@@ -30,6 +31,7 @@ interface BerandaViewProps {
   onOpenTxModal: (type?: 'masuk' | 'keluar' | 'kematian') => void;
   onOpenWargaModal: () => void;
   onOpenPengumumanModal?: () => void;
+  onOpenSaldoAwalModal?: () => void;
 }
 
 export const BerandaView: React.FC<BerandaViewProps> = ({
@@ -39,6 +41,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
   onOpenTxModal,
   onOpenWargaModal,
   onOpenPengumumanModal,
+  onOpenSaldoAwalModal,
 }) => {
   // Calculate real balances
   const totalMasuk = transactions
@@ -190,6 +193,17 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
                 <Megaphone size={16} />
                 <span>+ Buat Pengumuman & WA</span>
               </button>
+
+              {onOpenSaldoAwalModal && (
+                <button
+                  onClick={onOpenSaldoAwalModal}
+                  className="flex items-center gap-2 rounded-xl bg-emerald-950/70 px-4 py-2.5 text-xs font-bold text-emerald-200 border border-emerald-600/40 hover:bg-emerald-900 active:scale-95 transition-all cursor-pointer"
+                  title="Pencatatan sisa kas terdahulu yang belum dimasukkan ke aplikasi"
+                >
+                  <History size={16} />
+                  <span>+ Kas Masa Lalu</span>
+                </button>
+              )}
             </div>
           </div>
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   LayoutDashboard,
   Wallet,
@@ -24,6 +24,10 @@ import {
   Megaphone,
   Download,
   AlertCircle,
+  HandHeart,
+  FileArchive,
+  KeyRound,
+  ShieldAlert,
 } from 'lucide-react';
 
 import { HouseLogo, LeafIcon } from './components/HouseLogo';
@@ -31,8 +35,20 @@ import { TransactionModal } from './components/TransactionModal';
 import { WargaModal } from './components/WargaModal';
 import { LoginModal } from './components/LoginModal';
 import { PengumumanModal } from './components/PengumumanModal';
+import { SaldoAwalModal } from './components/SaldoAwalModal';
+import { PinLockModal } from './components/PinLockModal';
+import { LupaPasswordModal } from './components/LupaPasswordModal';
 import { FloatingNotification } from './components/FloatingNotification';
-import { AuthUser, Transaction, Warga, PengumumanRT } from './types';
+import {
+  AuthUser,
+  Transaction,
+  Warga,
+  PengumumanRT,
+  PengaturanKas,
+  BantuanPemerintah,
+  DokumenPdfWarga,
+} from './types';
+import { isPengumumanExpired } from './utils/security';
 
 // Views
 import { BerandaView } from './views/BerandaView';
@@ -46,6 +62,9 @@ import { LaporanView } from './views/LaporanView';
 import { PengaturanView } from './views/PengaturanView';
 import { DasborWargaView } from './views/DasborWargaView';
 import { PengumumanView } from './views/PengumumanView';
+import { BantuanPemerintahView } from './views/BantuanPemerintahView';
+import { DokumenPdfWargaView } from './views/DokumenPdfWargaView';
+import { KebijakanPrivasiView } from './views/KebijakanPrivasiView';
 
 export default function App() {
   // Authentication State
@@ -53,9 +72,40 @@ export default function App() {
     role: 'admin',
     username: 'Admin',
     nama: 'Administrator RT 08 RW 05',
+    isPinAuthenticated: true,
   });
 
   const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
+  const [isLupaPasswordOpen, setIsLupaPasswordOpen] = useState<boolean>(false);
+
+  // App Lock (6 Digit PIN)
+  const [currentPin, setCurrentPin] = useState<string>('123456');
+  const [isPinLocked, setIsPinLocked] = useState<boolean>(false);
+
+  // Inactivity Auto-Logout (5 Minutes = 300,000 ms)
+  const [lastActivity, setLastActivity] = useState<number>(Date.now());
+  const [inactivityNotice, setInactivityNotice] = useState<boolean>(false);
+
+  useEffect(() => {
+    const recordActivity = () => setLastActivity(Date.now());
+    const events = ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart'];
+    events.forEach((ev) => window.addEventListener(ev, recordActivity));
+
+    const checkInterval = setInterval(() => {
+      // 5 minutes inactivity
+      if (Date.now() - lastActivity > 5 * 60 * 1000) {
+        if (!isPinLocked) {
+          setIsPinLocked(true);
+          setInactivityNotice(true);
+        }
+      }
+    }, 10000);
+
+    return () => {
+      events.forEach((ev) => window.removeEventListener(ev, recordActivity));
+      clearInterval(checkInterval);
+    };
+  }, [lastActivity, isPinLocked]);
 
   // Navigation active tab
   const [currentView, setCurrentView] = useState<string>('beranda');
@@ -68,123 +118,297 @@ export default function App() {
   const [txModalType, setTxModalType] = useState<'masuk' | 'keluar' | 'kematian'>('masuk');
   const [isWargaModalOpen, setIsWargaModalOpen] = useState<boolean>(false);
   const [isPengumumanModalOpen, setIsPengumumanModalOpen] = useState<boolean>(false);
+  const [isSaldoAwalModalOpen, setIsSaldoAwalModalOpen] = useState<boolean>(false);
 
-  // Initial State: STRICTLY EMPTY AS REQUESTED (all nominals Rp 0, 0 transactions, 0 KK)
+  // System Configuration (Jimpitan Tahunan -> Auto Bulanan, Kas Kematian, Kontak RT)
+  const [pengaturanKas, setPengaturanKas] = useState<PengaturanKas>({
+    nominalJimpitanTahunan: 300000,
+    nominalJimpitanBulanan: 25000,
+    nominalKematianTahunan: 120000,
+    nominalKematianBulanan: 10000,
+    saldoAwalKasUmum: 0,
+    saldoAwalKasKematian: 0,
+    keteranganSaldoAwal: 'Sisa Kas RT Periode Lalu (Pindahan Buku Manual)',
+    tanggalSaldoAwal: '2026-01-01',
+    kontakKetuaRT: { nama: 'Bpk. Suwardi', telp: '0812-3456-7890' },
+    kontakBendahara: { nama: 'Bpk. Bambang S.', telp: '0813-9876-5432' },
+  });
+
+  // Transactions State
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+
+  // Registered Residents (with 16 digit No KK & full family members)
   const [wargaList, setWargaList] = useState<Warga[]>([
-    { id: 'w1', no: 1, nama: 'Ahmad Fauzi', noRumah: '01', rt: '08', jenisKelamin: 'Laki-laki', jumlahJiwa: 4, statusIuran: 'Sudah' },
-    { id: 'w2', no: 2, nama: 'Siti Aminah', noRumah: '02', rt: '08', jenisKelamin: 'Perempuan', jumlahJiwa: 3, statusIuran: 'Sudah' },
-    { id: 'w3', no: 3, nama: 'Budi Santoso', noRumah: '03', rt: '08', jenisKelamin: 'Laki-laki', jumlahJiwa: 5, statusIuran: 'Belum' },
-    { id: 'w4', no: 4, nama: 'Rina Lestari', noRumah: '04', rt: '08', jenisKelamin: 'Perempuan', jumlahJiwa: 2, statusIuran: 'Sudah' },
-    { id: 'w5', no: 5, nama: 'Agus Setiawan', noRumah: '05', rt: '08', jenisKelamin: 'Laki-laki', jumlahJiwa: 4, statusIuran: 'Belum' },
-    { id: 'w6', no: 6, nama: 'Nurhayati', noRumah: '06', rt: '08', jenisKelamin: 'Perempuan', jumlahJiwa: 3, statusIuran: 'Sudah' },
-    { id: 'w7', no: 7, nama: 'Dedi Kurniawan', noRumah: '07', rt: '08', jenisKelamin: 'Laki-laki', jumlahJiwa: 4, statusIuran: 'Belum' },
-    { id: 'w8', no: 8, nama: 'Eka Pratama', noRumah: '08', rt: '08', jenisKelamin: 'Laki-laki', jumlahJiwa: 3, statusIuran: 'Sudah' },
+    {
+      id: 'w1',
+      no: 1,
+      nama: 'Ahmad Fauzi',
+      noKK: '3302140508000001',
+      noRumah: '01',
+      rt: '08',
+      rw: '05',
+      alamat: 'Jalan Kenanga No. 01, RT 08 RW 05 Desa Kotayasa',
+      jenisKelamin: 'Laki-laki',
+      jumlahJiwa: 4,
+      statusIuran: 'Sudah',
+      anggotaKeluarga: [
+        { nik: '3302141503790001', nama: 'Ahmad Fauzi', hubungan: 'Kepala Keluarga', tempatLahir: 'Banyumas', tanggalLahir: '1979-03-15', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'PNS', statusPerkawinan: 'Kawin' },
+        { nik: '3302144806820002', nama: 'Wahyuni Ningsih', hubungan: 'Istri', tempatLahir: 'Purwokerto', tanggalLahir: '1982-06-08', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Guru', statusPerkawinan: 'Kawin' },
+        { nik: '3302141010070003', nama: 'Fajar Nugraha', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2007-10-10', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Pelajar', statusPerkawinan: 'Belum Kawin' },
+        { nik: '3302145504120004', nama: 'Annisa Fitri', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2012-04-15', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Pelajar', statusPerkawinan: 'Belum Kawin' },
+      ],
+    },
+    {
+      id: 'w2',
+      no: 2,
+      nama: 'Siti Aminah',
+      noKK: '3302140508000002',
+      noRumah: '02',
+      rt: '08',
+      rw: '05',
+      alamat: 'Jalan Kenanga No. 02, RT 08 RW 05 Desa Kotayasa',
+      jenisKelamin: 'Perempuan',
+      jumlahJiwa: 3,
+      statusIuran: 'Sudah',
+      anggotaKeluarga: [
+        { nik: '3302145009750001', nama: 'Siti Aminah', hubungan: 'Kepala Keluarga', tempatLahir: 'Banyumas', tanggalLahir: '1975-09-10', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Pedagang', statusPerkawinan: 'Janda' },
+        { nik: '3302141208030002', nama: 'Dimas Aditya', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2003-08-12', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Mahasiswa', statusPerkawinan: 'Belum Kawin' },
+        { nik: '3302146102090003', nama: 'Laras Sekar', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2009-02-21', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Pelajar', statusPerkawinan: 'Belum Kawin' },
+      ],
+    },
+    {
+      id: 'w3',
+      no: 3,
+      nama: 'Budi Santoso',
+      noKK: '3302140508000003',
+      noRumah: '03',
+      rt: '08',
+      rw: '05',
+      alamat: 'Jalan Flamboyan No. 03, RT 08 RW 05 Desa Kotayasa',
+      jenisKelamin: 'Laki-laki',
+      jumlahJiwa: 5,
+      statusIuran: 'Belum',
+      anggotaKeluarga: [
+        { nik: '3302142207800001', nama: 'Budi Santoso', hubungan: 'Kepala Keluarga', tempatLahir: 'Banyumas', tanggalLahir: '1980-07-22', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Wiraswasta', statusPerkawinan: 'Kawin' },
+        { nik: '3302145311840002', nama: 'Dewi Sartika', hubungan: 'Istri', tempatLahir: 'Banyumas', tanggalLahir: '1984-11-13', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Ibu Rumah Tangga', statusPerkawinan: 'Kawin' },
+        { nik: '3302141505080003', nama: 'Bagus Pratama', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2008-05-15', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Pelajar', statusPerkawinan: 'Belum Kawin' },
+        { nik: '3302146409130004', nama: 'Salma Putri', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2013-09-24', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Pelajar', statusPerkawinan: 'Belum Kawin' },
+        { nik: '3302141804550005', nama: 'Mbah Karyo', hubungan: 'Orang Tua', tempatLahir: 'Banyumas', tanggalLahir: '1955-04-18', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Pensiunan', statusPerkawinan: 'Kawin' },
+      ],
+    },
+    {
+      id: 'w4',
+      no: 4,
+      nama: 'Rina Lestari',
+      noKK: '3302140508000004',
+      noRumah: '04',
+      rt: '08',
+      rw: '05',
+      alamat: 'Jalan Flamboyan No. 04, RT 08 RW 05 Desa Kotayasa',
+      jenisKelamin: 'Perempuan',
+      jumlahJiwa: 2,
+      statusIuran: 'Sudah',
+    },
+    {
+      id: 'w5',
+      no: 5,
+      nama: 'Agus Setiawan',
+      noKK: '3302140508000005',
+      noRumah: '05',
+      rt: '08',
+      rw: '05',
+      alamat: 'Jalan Mawar No. 05, RT 08 RW 05 Desa Kotayasa',
+      jenisKelamin: 'Laki-laki',
+      jumlahJiwa: 4,
+      statusIuran: 'Belum',
+    },
   ]);
 
-  // Announcements from RT
+  // Announcements from RT (each has a tanggalBerakhir / expiry date)
   const [pengumumanList, setPengumumanList] = useState<PengumumanRT[]>([
     {
       id: 'p1',
       judul: 'Kerja Bakti Lingkungan & Pembersihan Saluran Air',
       tanggal: '18 Okt 2026',
+      tanggalBerakhir: '2026-11-20',
       kategori: 'Kegiatan',
       isi: 'Diberitahukan kepada seluruh warga RT 08 RW 05, kerja bakti massal akan dilaksanakan pada hari Minggu pagi pukul 07.00 WIB. Titik kumpul di depan pos kamling RT 08. Mohon membawa cangkul/sabit.',
       penulis: 'Ketua RT 08 (Bpk. Suwardi)',
       penting: true,
+      tentang: 'Kerja Bakti Massal & Pembersihan Saluran Air',
+      hariTanggalAcara: 'Minggu, 25 Oktober 2026',
+      waktuAcara: '07.00 WIB s/d selesai',
+      tempatAcara: 'Pos Kamling RT 08',
     },
     {
       id: 'p2',
-      judul: 'Penarikan Iuran Kas & Kas Kematian Bulan Oktober',
+      judul: 'Penarikan Iuran Kas & Kas Kematian (Kain Mori)',
       tanggal: '10 Okt 2026',
+      tanggalBerakhir: '2026-11-30',
       kategori: 'Iuran',
-      isi: 'Penarikan iuran kas RT sebesar Rp 20.000 dan kas kematian Rp 10.000 (total Rp 30.000) mulai dikoordinasikan. Pembayaran dapat diserahkan langsung ke Bendahara atau melalui transfer kas.',
+      isi: 'Penarikan iuran jimpitan RT sebesar Rp 25.000 dan kas kematian Rp 10.000 (total Rp 35.000) mulai dikoordinasikan. Pembayaran dapat diserahkan langsung ke Bendahara atau melalui transfer kas.',
       penulis: 'Bendahara (Bpk. Bambang S.)',
-    },
-    {
-      id: 'p3',
-      judul: 'Pembaruan Jadwal Ronda Malam / Siskamling',
-      tanggal: '05 Okt 2026',
-      kategori: 'Keamanan',
-      isi: 'Jadwal ronda malam warga laki-laki dewasa telah diperbarui dan ditempel di Pos Ronda RT 08. Dimohon hadir tepat waktu pukul 22.00 WIB demi menjaga ketentraman lingkungan bersama.',
-      penulis: 'Seksi Keamanan RT 08',
+      tentang: 'Penarikan Iuran Kas RT & Kas Kematian',
+      hariTanggalAcara: '10 - 25 Setiap Bulan',
+      waktuAcara: '19.30 - 21.00 WIB',
+      tempatAcara: 'Rumah Bendahara RT 08',
     },
   ]);
 
-  // Floating notification state (initialized with first announcement to showcase the floating banner!)
-  const [floatingAnnouncement, setFloatingAnnouncement] = useState<PengumumanRT | null>(pengumumanList[0]);
+  // Active announcements (filtered by expiration date)
+  const activeAnnouncements = pengumumanList.filter((p) => !isPengumumanExpired(p.tanggalBerakhir));
+
+  // Read notifications memory (floating alert will dismiss and NEVER show again once clicked/closed)
+  const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
+  const [floatingAnnouncement, setFloatingAnnouncement] = useState<PengumumanRT | null>(null);
+
+  useEffect(() => {
+    // Show newest unread announcement if available
+    const unread = activeAnnouncements.find((p) => !readNotificationIds.includes(p.id));
+    if (unread && !floatingAnnouncement) {
+      setFloatingAnnouncement(unread);
+    }
+  }, [activeAnnouncements, readNotificationIds]);
+
+  const handleDismissFloating = (idToDismiss?: string) => {
+    const id = idToDismiss || floatingAnnouncement?.id;
+    if (id) {
+      setReadNotificationIds((prev) => Array.from(new Set([...prev, id])));
+    }
+    setFloatingAnnouncement(null);
+  };
+
+  // Government Aid Data (KHUSUS ADMIN - 100% Tersembunyi dari Warga)
+  const [bantuanList, setBantuanList] = useState<BantuanPemerintah[]>([
+    {
+      id: 'b1',
+      jenisBantuan: 'BPNT',
+      namaPenerima: 'Budi Santoso',
+      noKK: '3302140508000003',
+      nominalAtauBarang: 'Rp 600.000 / Tahap',
+      tanggal: '2026-10-15',
+      status: 'Sudah Disalurkan',
+      sumberDana: 'Kemensos RI',
+      keterangan: 'Penyaluran sembako & pangan non tunai via Bank Himbara',
+    },
+    {
+      id: 'b2',
+      jenisBantuan: 'Sembako Beras',
+      namaPenerima: 'Agus Setiawan',
+      noKK: '3302140508000005',
+      nominalAtauBarang: 'Beras Bulog 10 Kg + Minyak 2L',
+      tanggal: '2026-10-18',
+      status: 'Sudah Disalurkan',
+      sumberDana: 'Cadangan Pangan Desa Kotayasa',
+      keterangan: 'Penyaluran langsung di Balai Desa Kotayasa',
+    },
+  ]);
+
+  // Document PDF Archive (KHUSUS ADMIN - 100% Tersembunyi dari Warga)
+  const [dokumenList, setDokumenList] = useState<DokumenPdfWarga[]>([
+    {
+      id: 'doc1',
+      judul: 'Rekapitulasi Data Sensus Kependudukan RT 08 RW 05 Tahun 2026',
+      namaFile: 'Data_Sensus_Warga_RT08_RW05_2026.pdf',
+      ukuranKb: 342,
+      tanggalUpload: '2026-10-01',
+      kategori: 'Data Sensus Warga RT',
+      keterangan: 'Pemutakhiran data sensus door-to-door pengurus RT',
+    },
+  ]);
+
+  // Handlers for Government Aid
+  const handleAddBantuan = (b: Omit<BantuanPemerintah, 'id'>) => {
+    setBantuanList((prev) => [{ ...b, id: 'b' + Date.now() }, ...prev]);
+  };
+
+  const handleUpdateStatusBantuan = (id: string, newStatus: BantuanPemerintah['status']) => {
+    setBantuanList((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, status: newStatus } : item))
+    );
+  };
+
+  const handleDeleteBantuan = (id: string) => {
+    setBantuanList((prev) => prev.filter((b) => b.id !== id));
+  };
+
+  // Handlers for PDF Documents
+  const handleUploadDokumen = (doc: Omit<DokumenPdfWarga, 'id'>) => {
+    setDokumenList((prev) => [{ ...doc, id: 'doc' + Date.now() }, ...prev]);
+  };
+
+  const handleDeleteDokumen = (id: string) => {
+    setDokumenList((prev) => prev.filter((d) => d.id !== id));
+  };
 
   // Sample data loader for optional simulation demo
   const handleLoadSample = () => {
     setTransactions([
-      {
-        id: '1',
-        tanggal: '2026-10-12',
-        kategori: 'Iuran Warga',
-        keterangan: 'Iuran Warga Periode Aktif (10 KK)',
-        nominal: 200000,
-        tipe: 'masuk',
-        namaWarga: 'Ahmad Fauzi dkk',
-      },
-      {
-        id: '2',
-        tanggal: '2026-10-10',
-        kategori: 'Iuran Warga',
-        keterangan: 'Iuran Warga (8 KK)',
-        nominal: 150000,
-        tipe: 'masuk',
-        namaWarga: 'Siti Aminah dkk',
-      },
-      {
-        id: '3',
-        tanggal: '2026-10-08',
-        kategori: 'Iuran Warga',
-        keterangan: 'Iuran Warga (12 KK)',
-        nominal: 200000,
-        tipe: 'masuk',
-        namaWarga: 'Budi Santoso dkk',
-      },
-      {
-        id: '4',
-        tanggal: '2026-10-05',
-        kategori: 'Donasi',
-        keterangan: 'Donasi Kegiatan Bersih Desa',
-        nominal: 500000,
-        tipe: 'masuk',
-        namaWarga: 'H. Darsono',
-      },
-      {
-        id: '5',
-        tanggal: '2026-10-02',
-        kategori: 'Iuran Warga',
-        keterangan: 'Iuran Warga (6 KK)',
-        nominal: 100000,
-        tipe: 'masuk',
-        namaWarga: 'Rina Lestari dkk',
-      },
-      {
-        id: '6',
-        tanggal: '2026-10-10',
-        kategori: 'Kegiatan RT',
-        keterangan: 'Kerja Bakti & Konsumsi Warga',
-        nominal: 250000,
-        tipe: 'keluar',
-        namaWarga: 'Seksi Kebersihan',
-      },
-      {
-        id: '7',
-        tanggal: '2026-10-04',
-        kategori: 'Operasional',
-        keterangan: 'Perbaikan Lampu Jalan Gang 2',
-        nominal: 180000,
-        tipe: 'keluar',
-        namaWarga: 'Bapak Dedi',
-      },
+      { id: '1', tanggal: '2026-10-12', kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan Periode Aktif', nominal: 250000, tipe: 'masuk', namaWarga: 'Ahmad Fauzi' },
+      { id: '2', tanggal: '2026-10-10', kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan & Kas Kematian', nominal: 350000, tipe: 'masuk', namaWarga: 'Siti Aminah' },
+      { id: '3', tanggal: '2026-10-08', kategori: 'Kas Kematian', keterangan: 'Pengadaan Kain Mori & Perlengkapan Jenazah', nominal: 200000, tipe: 'keluar', namaWarga: 'Bendahara Kas' },
     ]);
   };
 
   const handleResetEmpty = () => {
     setTransactions([]);
+    setPengaturanKas((prev) => ({
+      ...prev,
+      saldoAwalKasUmum: 0,
+      saldoAwalKasKematian: 0,
+    }));
+  };
+
+  const handleUpdatePengaturan = (newSetting: Partial<PengaturanKas>) => {
+    setPengaturanKas((prev) => ({ ...prev, ...newSetting }));
+  };
+
+  const handleSaveSaldoAwal = (
+    kasUmum: number,
+    kasKematian: number,
+    keterangan: string,
+    tanggal: string
+  ) => {
+    setPengaturanKas((prev) => ({
+      ...prev,
+      saldoAwalKasUmum: kasUmum,
+      saldoAwalKasKematian: kasKematian,
+      keteranganSaldoAwal: keterangan,
+      tanggalSaldoAwal: tanggal,
+    }));
+
+    setTransactions((prev) => {
+      const nonSaldoAwal = prev.filter((t) => !t.isSaldoAwal);
+      const newSaldoTxs: Transaction[] = [];
+
+      if (kasUmum > 0) {
+        newSaldoTxs.push({
+          id: 'saldo-awal-umum-' + Date.now(),
+          tanggal: tanggal || '2026-01-01',
+          kategori: 'Saldo Awal / Pindahan Kas Lalu',
+          keterangan: `Saldo Kas Umum Masa Lalu: ${keterangan}`,
+          nominal: kasUmum,
+          tipe: 'masuk',
+          namaWarga: 'Pindahan Kas Masa Lalu',
+          isSaldoAwal: true,
+        });
+      }
+
+      if (kasKematian > 0) {
+        newSaldoTxs.push({
+          id: 'saldo-awal-kematian-' + Date.now(),
+          tanggal: tanggal || '2026-01-01',
+          kategori: 'Kas Kematian',
+          keterangan: `Saldo Kas Kematian Masa Lalu: ${keterangan}`,
+          nominal: kasKematian,
+          tipe: 'kematian',
+          namaWarga: 'Pindahan Kas Kematian Lalu',
+          isSaldoAwal: true,
+        });
+      }
+
+      return [...newSaldoTxs, ...nonSaldoAwal];
+    });
   };
 
   // Add Transaction (Admin only)
@@ -229,20 +453,9 @@ export default function App() {
       id: 'p' + Date.now(),
     };
     setPengumumanList((prev) => [newP, ...prev]);
-    // Pop floating notification on application!
+    // Pop floating notification with sound!
     setFloatingAnnouncement(newP);
   };
-
-  // Balance calculations
-  const totalMasuk = transactions
-    .filter((t) => t.tipe === 'masuk')
-    .reduce((acc, t) => acc + t.nominal, 0);
-
-  const totalKeluar = transactions
-    .filter((t) => t.tipe === 'keluar')
-    .reduce((acc, t) => acc + t.nominal, 0);
-
-  const saldoKas = totalMasuk - totalKeluar;
 
   // Handle Login
   const handleLoginSuccess = (user: AuthUser) => {
@@ -254,13 +467,15 @@ export default function App() {
     }
   };
 
-  // Switch role quickly
+  // Quick switch between Admin and Resident for convenience
   const handleSwitchToWarga = () => {
     setCurrentUser({
       role: 'warga',
       username: 'Budi Santoso',
       nama: 'Budi Santoso',
+      noKK: '3302140508000003',
       wargaId: 'w3',
+      isPinAuthenticated: true,
     });
     setCurrentView('dasbor-warga');
   };
@@ -270,53 +485,79 @@ export default function App() {
       role: 'admin',
       username: 'Admin',
       nama: 'Administrator RT 08 RW 05',
+      isPinAuthenticated: true,
     });
     setCurrentView('beranda');
   };
 
-  // Define navigation items based on Role
   const isAdmin = currentUser?.role === 'admin';
 
-  const adminNavItems = [
+  interface NavItem {
+    id: string;
+    label: string;
+    icon: React.ReactNode;
+    badge?: string;
+  }
+
+  // Strict Navigation Items based on Role
+  const adminNavItems: NavItem[] = [
     { id: 'beranda', label: 'Beranda Kas', icon: <LayoutDashboard size={18} /> },
     { id: 'kas-warga', label: 'Kas Warga', icon: <Wallet size={18} /> },
     { id: 'kas-masuk', label: 'Kas Masuk', icon: <ArrowUp size={18} strokeWidth={2.5} /> },
     { id: 'kas-keluar', label: 'Kas Keluar', icon: <ArrowDown size={18} strokeWidth={2.5} /> },
-    { id: 'kas-kematian', label: 'Kas Kematian', icon: <Heart size={18} fill="currentColor" /> },
+    { id: 'kas-kematian', label: 'Kas Kematian (Mori)', icon: <Heart size={18} fill="currentColor" /> },
     { id: 'status-iuran', label: 'Status Iuran', icon: <CalendarCheck size={18} /> },
-    { id: 'data-warga', label: 'Data Warga', icon: <Users size={18} /> },
+    { id: 'data-warga', label: 'Data Warga (KK OCR)', icon: <Users size={18} /> },
+    { id: 'bantuan-pemerintah', label: 'Bantuan Pemerintah', icon: <HandHeart size={18} />, badge: 'Rahasia' },
+    { id: 'dokumen-pdf', label: 'Arsip PDF Warga', icon: <FileArchive size={18} />, badge: 'Admin' },
     { id: 'pengumuman', label: 'Pengumuman & WA', icon: <Megaphone size={18} /> },
     { id: 'laporan', label: 'Laporan & PDF', icon: <FileText size={18} /> },
-    { id: 'pengaturan', label: 'Pengaturan RT', icon: <Settings size={18} /> },
+    { id: 'pengaturan', label: 'Pengaturan & PIN', icon: <Settings size={18} /> },
+    { id: 'kebijakan-privasi', label: 'Kebijakan Privasi', icon: <ShieldCheck size={18} /> },
   ];
 
-  const wargaNavItems = [
-    { id: 'dasbor-warga', label: 'Dasbor Tagihan Saya', icon: <User size={18} /> },
+  const wargaNavItems: NavItem[] = [
+    { id: 'dasbor-warga', label: 'Data Keluarga & Iuran', icon: <User size={18} /> },
     { id: 'pengumuman', label: 'Warta Pengumuman', icon: <Megaphone size={18} /> },
-    { id: 'laporan', label: 'Laporan & Unduh PDF', icon: <FileText size={18} /> },
+    { id: 'laporan', label: 'Laporan Kas RT', icon: <FileText size={18} /> },
+    { id: 'pengaturan', label: 'Ubah PIN Akun', icon: <Settings size={18} /> },
+    { id: 'kebijakan-privasi', label: 'Kebijakan Privasi', icon: <ShieldCheck size={18} /> },
   ];
 
-  const currentNavItems = isAdmin ? adminNavItems : wargaNavItems;
+  const currentNavItems: NavItem[] = isAdmin ? adminNavItems : wargaNavItems;
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-[#F4F7F5] text-slate-800 font-sans">
-      {/* FLOATING NOTIFICATION BANNER */}
+      {/* 6-DIGIT PIN APP LOCK SCREEN */}
+      <PinLockModal
+        isOpen={isPinLocked}
+        currentUser={currentUser}
+        currentPin={currentPin}
+        onUnlockSuccess={() => {
+          setIsPinLocked(false);
+          setInactivityNotice(false);
+        }}
+        pengaturanKas={pengaturanKas}
+        onOpenHelp={() => setIsLupaPasswordOpen(true)}
+      />
+
+      {/* FLOATING NOTIFICATION BANNER (Auto-dismisses & marks as read) */}
       <FloatingNotification
         announcement={floatingAnnouncement}
-        onClose={() => setFloatingAnnouncement(null)}
+        onClose={() => handleDismissFloating()}
         onOpenDetail={(p) => {
           setCurrentView('pengumuman');
-          setFloatingAnnouncement(null);
+          handleDismissFloating(p.id);
         }}
       />
 
-      {/* SIDEBAR NAVIGATION (Desktop & Drawer Mobile) */}
+      {/* SIDEBAR NAVIGATION */}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-72 flex-col justify-between bg-gradient-to-b from-[#094A32] via-[#0B5D3F] to-[#073F2B] p-5 text-white shadow-2xl transition-transform duration-300 lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col justify-between bg-gradient-to-b from-[#094A32] via-[#0B5D3F] to-[#073F2B] p-5 text-white shadow-2xl transition-transform duration-300 lg:static lg:translate-x-0 ${
           isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div>
+        <div className="overflow-y-auto no-scrollbar">
           {/* Header Brand */}
           <div className="flex items-center justify-between border-b border-emerald-800/80 pb-5">
             <div className="flex items-center gap-3">
@@ -335,7 +576,7 @@ export default function App() {
 
             <button
               onClick={() => setIsSidebarOpen(false)}
-              className="lg:hidden flex h-8 w-8 items-center justify-center rounded-lg hover:bg-white/10 text-emerald-100"
+              className="lg:hidden flex h-8 w-8 items-center justify-center rounded-lg hover:bg-white/10 text-emerald-100 cursor-pointer"
             >
               <X size={18} />
             </button>
@@ -348,24 +589,45 @@ export default function App() {
                 {isAdmin ? 'Akun Pengurus / Admin' : 'Akun Warga RT'}
               </span>
               <span
-                className={`rounded-full px-2 py-0.5 text-[9px] font-bold ${
-                  isAdmin ? 'bg-amber-400 text-slate-900' : 'bg-emerald-300 text-emerald-950'
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-extrabold ${
+                  isAdmin
+                    ? 'bg-amber-400/90 text-slate-900'
+                    : 'bg-emerald-300/90 text-emerald-950'
                 }`}
               >
-                {isAdmin ? 'Akses Input' : 'Hanya Lihat'}
+                {isAdmin ? 'ADMIN' : 'WARGA'}
               </span>
             </div>
-            <p className="text-sm font-extrabold text-white truncate">
+            <p className="text-sm font-bold truncate text-white">
               {currentUser?.nama || 'Tamu'}
             </p>
-            <div className="mt-2 pt-2 border-t border-white/10 flex items-center justify-between text-[11px]">
-              <span className="text-emerald-200/90">Saldo Kas RT:</span>
-              <span className="font-extrabold text-white">Rp {saldoKas.toLocaleString('id-ID')}</span>
+            {currentUser?.noKK && (
+              <p className="text-[10px] font-mono text-emerald-200 mt-0.5">
+                KK: {currentUser.noKK}
+              </p>
+            )}
+
+            {/* Quick Switch Button */}
+            <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between">
+              <button
+                onClick={isAdmin ? handleSwitchToWarga : handleSwitchToAdmin}
+                className="text-[11px] font-semibold text-emerald-200 hover:text-white underline cursor-pointer"
+              >
+                {isAdmin ? 'Uji Mode Warga &rarr;' : 'Uji Mode Admin &rarr;'}
+              </button>
+              <button
+                onClick={() => setIsPinLocked(true)}
+                className="flex items-center gap-1 text-[10px] font-bold text-emerald-200 hover:text-white cursor-pointer"
+                title="Kunci Aplikasi Sekarang"
+              >
+                <Lock size={11} />
+                <span>Kunci PIN</span>
+              </button>
             </div>
           </div>
 
-          {/* Navigation Links */}
-          <nav className="mt-5 space-y-1 overflow-y-auto no-scrollbar max-h-[calc(100vh-360px)]">
+          {/* Navigation Items */}
+          <nav className="mt-5 space-y-1">
             {currentNavItems.map((item) => {
               const isActive = currentView === item.id;
               return (
@@ -375,184 +637,121 @@ export default function App() {
                     setCurrentView(item.id);
                     setIsSidebarOpen(false);
                   }}
-                  className={`flex w-full items-center gap-3 rounded-xl px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
+                  className={`w-full flex items-center justify-between rounded-xl px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
                     isActive
                       ? 'bg-white text-[#0B5D3F] shadow-sm'
-                      : 'text-emerald-100/90 hover:bg-white/10 hover:text-white'
+                      : 'text-emerald-100 hover:bg-white/10 hover:text-white'
                   }`}
                 >
-                  <span className={isActive ? 'text-[#0B5D3F]' : 'text-emerald-200'}>
-                    {item.icon}
-                  </span>
-                  <span>{item.label}</span>
+                  <div className="flex items-center gap-3">
+                    <span className={isActive ? 'text-[#0B5D3F]' : 'text-emerald-300'}>
+                      {item.icon}
+                    </span>
+                    <span>{item.label}</span>
+                  </div>
+
+                  {item.badge && (
+                    <span className="rounded-md bg-rose-500/80 px-1.5 py-0.5 text-[9px] font-black text-white uppercase">
+                      {item.badge}
+                    </span>
+                  )}
                 </button>
               );
             })}
           </nav>
         </div>
 
-        {/* Sidebar Footer with Login / Switch Role */}
-        <div className="border-t border-emerald-800/80 pt-4 space-y-2">
-          {/* Switch Role Fast Buttons */}
-          <div className="flex items-center gap-1.5">
-            {isAdmin ? (
-              <button
-                onClick={handleSwitchToWarga}
-                className="flex-1 flex items-center justify-center gap-1 rounded-xl bg-white/10 py-2 px-2 text-[10px] font-bold text-emerald-100 hover:bg-white/20 transition-all cursor-pointer"
-                title="Coba Masuk sebagai Warga (Read-Only)"
-              >
-                <User size={13} />
-                <span>Simulasi Warga</span>
-              </button>
-            ) : (
-              <button
-                onClick={handleSwitchToAdmin}
-                className="flex-1 flex items-center justify-center gap-1 rounded-xl bg-amber-400 py-2 px-2 text-[10px] font-bold text-slate-900 hover:bg-amber-300 transition-all cursor-pointer"
-                title="Masuk sebagai Admin RT (Akses Input)"
-              >
-                <ShieldCheck size={13} />
-                <span>Masuk Admin</span>
-              </button>
-            )}
-
-            <button
-              onClick={() => setIsLoginModalOpen(true)}
-              className="flex items-center justify-center rounded-xl bg-white/10 p-2 text-emerald-100 hover:bg-white/20 transition-all cursor-pointer"
-              title="Menu Login / Ganti Akun"
-            >
-              <LogOut size={14} />
-            </button>
-          </div>
-
-          <div className="rounded-xl bg-black/15 p-2.5 text-center border border-white/5">
-            <div className="flex items-center justify-center gap-1.5 text-[10px] font-bold text-emerald-200">
-              <LeafIcon size={12} />
-              <span>Transparan & Akuntabel</span>
-            </div>
-            <p className="text-[9px] text-emerald-300/70 italic">
-              RT 08 RW 05 Desa Kotayasa
-            </p>
-          </div>
+        {/* Sidebar Footer */}
+        <div className="border-t border-emerald-800/80 pt-4">
+          <button
+            onClick={() => setIsLoginModalOpen(true)}
+            className="w-full flex items-center justify-center gap-2 rounded-xl bg-white/10 hover:bg-white/15 px-3 py-2 text-xs font-bold text-white transition-all cursor-pointer"
+          >
+            <LogOut size={14} />
+            <span>Ganti Akun / Keluar</span>
+          </button>
         </div>
       </aside>
 
-      {/* Backdrop for mobile drawer */}
-      {isSidebarOpen && (
-        <div
-          onClick={() => setIsSidebarOpen(false)}
-          className="fixed inset-0 z-40 bg-black/50 backdrop-blur-xs lg:hidden"
-        />
-      )}
-
-      {/* MAIN SCREEN AREA */}
-      <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Top Navbar */}
-        <header className="sticky top-0 z-30 flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white/95 px-4 lg:px-8 shadow-xs backdrop-blur-sm">
+      {/* MAIN VIEW CONTENT AREA */}
+      <div className="flex-1 flex flex-col h-full overflow-hidden">
+        {/* Top Header Bar */}
+        <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 lg:px-8">
           <div className="flex items-center gap-3">
             <button
               onClick={() => setIsSidebarOpen(true)}
-              className="lg:hidden flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 text-slate-700 hover:bg-slate-200 cursor-pointer"
+              className="lg:hidden flex h-9 w-9 items-center justify-center rounded-xl bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors cursor-pointer"
             >
               <Menu size={20} />
             </button>
-            
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-sm lg:text-base font-extrabold text-[#0B5D3F]">
-                  RT 08 RW 05 Desa Kotayasa
-                </h2>
-                <span
-                  className={`hidden sm:inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                    isAdmin
-                      ? 'bg-amber-100 text-amber-900 border border-amber-300'
-                      : 'bg-emerald-100 text-emerald-900 border border-emerald-300'
-                  }`}
-                >
-                  {isAdmin ? 'Admin RT (Akses Input Administrasi)' : 'Akun Warga (Hanya Melihat)'}
-                </span>
-              </div>
-              <p className="hidden sm:block text-[11px] text-slate-400">
-                Kecamatan Sumbang, Kabupaten Banyumas
+              <h2 className="text-sm font-extrabold text-slate-900">
+                {currentNavItems.find((n) => n.id === currentView)?.label || 'Aplikasi Kas Warga'}
+              </h2>
+              <p className="text-[11px] text-slate-500 hidden sm:block">
+                RT 08 RW 05 Desa Kotayasa &bull; {isAdmin ? 'Mode Pengurus RT' : 'Mode Warga Pribadi'}
               </p>
             </div>
           </div>
 
-          {/* Quick Header Actions & Role Switcher */}
-          <div className="flex items-center gap-2.5">
-            {/* Quick Toggle Sample Data vs Empty (Rp 0) */}
-            <div className="hidden md:flex items-center gap-1.5 rounded-xl bg-slate-100 p-1 border border-slate-200 text-xs">
-              <button
-                onClick={handleResetEmpty}
-                className={`rounded-lg px-2.5 py-1 text-[11px] font-bold transition-all cursor-pointer ${
-                  transactions.length === 0
-                    ? 'bg-white text-[#0B5D3F] shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-                title="Status kas awal kosong (Rp 0)"
-              >
-                Data Kas: Rp 0
-              </button>
-              <button
-                onClick={handleLoadSample}
-                className={`rounded-lg px-2.5 py-1 text-[11px] font-bold transition-all cursor-pointer ${
-                  transactions.length > 0
-                    ? 'bg-[#0B5D3F] text-white shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-                title="Isi contoh data simulasi transaksi"
-              >
-                Data Contoh
-              </button>
-            </div>
+          {/* Quick Header Actions */}
+          <div className="flex items-center gap-2">
+            {/* Lock PIN button */}
+            <button
+              onClick={() => setIsPinLocked(true)}
+              className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 cursor-pointer"
+              title="Kunci Layar (PIN 6 Digit)"
+            >
+              <Lock size={14} className="text-[#0B5D3F]" />
+              <span className="hidden sm:inline">Kunci PIN</span>
+            </button>
 
-            {/* Admin-only Button: Buat Pengumuman & WA */}
+            {/* Admin only: Buat Pengumuman */}
             {isAdmin && (
               <button
                 onClick={() => setIsPengumumanModalOpen(true)}
-                className="flex items-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 px-3.5 py-2 text-xs font-bold text-white shadow-xs active:scale-95 transition-all cursor-pointer"
-                title="Buat Pengumuman Baru & Kirim WhatsApp / Download PDF"
+                className="flex items-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 px-3.5 py-1.5 text-xs font-bold text-white shadow-xs active:scale-95 transition-all cursor-pointer"
+                title="Buat Pengumuman Resmi & WA"
               >
-                <Megaphone size={15} />
+                <Megaphone size={14} />
                 <span className="hidden sm:inline">Pengumuman & WA</span>
               </button>
             )}
 
-            {/* Admin-only Button: Catat Transaksi */}
+            {/* Admin only: Catat Kas */}
             {isAdmin && (
               <button
                 onClick={() => {
                   setTxModalType('masuk');
                   setIsTxModalOpen(true);
                 }}
-                className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] px-3.5 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"
+                className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] px-3.5 py-1.5 text-xs font-bold text-white shadow-xs hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"
               >
-                <Plus size={15} strokeWidth={2.5} />
+                <Plus size={14} strokeWidth={2.5} />
                 <span className="hidden sm:inline">+ Catat Kas</span>
                 <span className="sm:hidden">Kas</span>
               </button>
             )}
 
-            {/* Login / Ganti Akun Button */}
+            {/* Login / Ganti Akun */}
             <button
               onClick={() => setIsLoginModalOpen(true)}
-              className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:border-emerald-300 hover:bg-emerald-50/50 transition-all cursor-pointer"
+              className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-emerald-50 transition-all cursor-pointer"
             >
-              <Lock size={14} className="text-[#0B5D3F]" />
-              <span className="hidden sm:inline">
-                {currentUser ? 'Ganti Akun' : 'Masuk'}
-              </span>
+              <User size={14} className="text-[#0B5D3F]" />
+              <span className="hidden sm:inline">Ganti Akun</span>
             </button>
           </div>
         </header>
 
-        {/* Scrollable Main Content Container */}
+        {/* Scrollable Content Container */}
         <main className="flex-1 overflow-y-auto p-4 lg:p-8 no-scrollbar">
           <div className="mx-auto max-w-7xl">
-            {/* WARGA VIEW: Only Debt Status and RT Announcements, Read-Only */}
+            {/* ROLE: WARGA VIEW (Strictly their family data) */}
             {!isAdmin ? (
               currentView === 'pengumuman' ? (
                 <PengumumanView
-                  pengumumanList={pengumumanList}
+                  pengumumanList={activeAnnouncements}
                   isAdmin={false}
                   onOpenCreateModal={() => {}}
                   onDeletePengumuman={() => {}}
@@ -564,16 +763,32 @@ export default function App() {
                   wargaList={wargaList}
                   onBack={() => setCurrentView('dasbor-warga')}
                 />
+              ) : currentView === 'pengaturan' ? (
+                <PengaturanView
+                  pengaturanKas={pengaturanKas}
+                  currentUser={currentUser}
+                  currentPin={currentPin}
+                  onUpdatePin={(pin) => setCurrentPin(pin)}
+                  onUpdatePengaturan={handleUpdatePengaturan}
+                  onOpenSaldoAwalModal={() => {}}
+                  onOpenPrivacyPolicy={() => setCurrentView('kebijakan-privasi')}
+                  onResetEmpty={() => {}}
+                  onLoadSample={() => {}}
+                  onBack={() => setCurrentView('dasbor-warga')}
+                />
+              ) : currentView === 'kebijakan-privasi' ? (
+                <KebijakanPrivasiView onBack={() => setCurrentView('dasbor-warga')} />
               ) : (
                 <DasborWargaView
                   currentUser={currentUser!}
                   wargaList={wargaList}
                   transactions={transactions}
-                  pengumumanList={pengumumanList}
+                  pengumumanList={activeAnnouncements}
+                  pengaturanKas={pengaturanKas}
                 />
               )
             ) : (
-              /* ADMIN VIEWS: Full Administrative Capabilities */
+              /* ROLE: ADMIN VIEWS */
               <>
                 {currentView === 'beranda' && (
                   <BerandaView
@@ -586,6 +801,7 @@ export default function App() {
                     }}
                     onOpenWargaModal={() => setIsWargaModalOpen(true)}
                     onOpenPengumumanModal={() => setIsPengumumanModalOpen(true)}
+                    onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
                   />
                 )}
 
@@ -596,6 +812,7 @@ export default function App() {
                       setTxModalType(type || 'masuk');
                       setIsTxModalOpen(true);
                     }}
+                    onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
                     onBack={() => setCurrentView('beranda')}
                   />
                 )}
@@ -625,10 +842,12 @@ export default function App() {
                 {currentView === 'kas-kematian' && (
                   <KasKematianView
                     transactions={transactions}
+                    pengaturanKas={pengaturanKas}
                     onOpenTxModal={() => {
                       setTxModalType('kematian');
                       setIsTxModalOpen(true);
                     }}
+                    onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
                     onBack={() => setCurrentView('beranda')}
                   />
                 )}
@@ -636,6 +855,7 @@ export default function App() {
                 {currentView === 'status-iuran' && (
                   <StatusIuranView
                     wargaList={wargaList}
+                    pengaturanKas={pengaturanKas}
                     onToggleStatus={handleToggleWargaStatus}
                     onOpenWargaModal={() => setIsWargaModalOpen(true)}
                     onBack={() => setCurrentView('beranda')}
@@ -645,15 +865,36 @@ export default function App() {
                 {currentView === 'data-warga' && (
                   <DataWargaView
                     wargaList={wargaList}
+                    bantuanList={bantuanList}
                     onOpenWargaModal={() => setIsWargaModalOpen(true)}
                     onDeleteWarga={handleDeleteWarga}
                     onBack={() => setCurrentView('beranda')}
                   />
                 )}
 
+                {currentView === 'bantuan-pemerintah' && (
+                  <BantuanPemerintahView
+                    bantuanList={bantuanList}
+                    wargaList={wargaList}
+                    onAddBantuan={handleAddBantuan}
+                    onUpdateStatus={handleUpdateStatusBantuan}
+                    onDeleteBantuan={handleDeleteBantuan}
+                    onBack={() => setCurrentView('beranda')}
+                  />
+                )}
+
+                {currentView === 'dokumen-pdf' && (
+                  <DokumenPdfWargaView
+                    dokumenList={dokumenList}
+                    onUploadDokumen={handleUploadDokumen}
+                    onDeleteDokumen={handleDeleteDokumen}
+                    onBack={() => setCurrentView('beranda')}
+                  />
+                )}
+
                 {currentView === 'pengumuman' && (
                   <PengumumanView
-                    pengumumanList={pengumumanList}
+                    pengumumanList={activeAnnouncements}
                     isAdmin={true}
                     onOpenCreateModal={() => setIsPengumumanModalOpen(true)}
                     onDeletePengumuman={(id) => setPengumumanList((prev) => prev.filter((p) => p.id !== id))}
@@ -665,16 +906,28 @@ export default function App() {
                   <LaporanView
                     transactions={transactions}
                     wargaList={wargaList}
+                    bantuanList={bantuanList}
                     onBack={() => setCurrentView('beranda')}
                   />
                 )}
 
                 {currentView === 'pengaturan' && (
                   <PengaturanView
+                    pengaturanKas={pengaturanKas}
+                    currentUser={currentUser}
+                    currentPin={currentPin}
+                    onUpdatePin={(pin) => setCurrentPin(pin)}
+                    onUpdatePengaturan={handleUpdatePengaturan}
+                    onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
+                    onOpenPrivacyPolicy={() => setCurrentView('kebijakan-privasi')}
                     onResetEmpty={handleResetEmpty}
                     onLoadSample={handleLoadSample}
                     onBack={() => setCurrentView('beranda')}
                   />
+                )}
+
+                {currentView === 'kebijakan-privasi' && (
+                  <KebijakanPrivasiView onBack={() => setCurrentView('beranda')} />
                 )}
               </>
             )}
@@ -688,6 +941,14 @@ export default function App() {
         onClose={() => setIsLoginModalOpen(false)}
         onLoginSuccess={handleLoginSuccess}
         wargaList={wargaList}
+        onOpenLupaPassword={() => setIsLupaPasswordOpen(true)}
+      />
+
+      {/* Lupa Password Modal */}
+      <LupaPasswordModal
+        isOpen={isLupaPasswordOpen}
+        onClose={() => setIsLupaPasswordOpen(false)}
+        pengaturanKas={pengaturanKas}
       />
 
       {/* Transaction Modal (Admin Only) */}
@@ -715,6 +976,16 @@ export default function App() {
           isOpen={isPengumumanModalOpen}
           onClose={() => setIsPengumumanModalOpen(false)}
           onSave={handleSavePengumuman}
+        />
+      )}
+
+      {/* Saldo Masa Lalu Modal (Admin Only) */}
+      {isAdmin && (
+        <SaldoAwalModal
+          isOpen={isSaldoAwalModalOpen}
+          onClose={() => setIsSaldoAwalModalOpen(false)}
+          pengaturanKas={pengaturanKas}
+          onSaveSaldoAwal={handleSaveSaldoAwal}
         />
       )}
     </div>

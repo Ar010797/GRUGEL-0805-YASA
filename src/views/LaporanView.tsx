@@ -1,17 +1,19 @@
 import React from 'react';
-import { ArrowLeft, FileText, Download, Printer, ShieldCheck, CheckCircle2, ArrowDown } from 'lucide-react';
-import { Transaction, Warga } from '../types';
-import { exportRekapTahunanPDF, exportPengeluaranPDF } from '../utils/pdfExport';
+import { ArrowLeft, FileText, Download, Printer, ShieldCheck, CheckCircle2, ArrowDown, Users } from 'lucide-react';
+import { Transaction, Warga, BantuanPemerintah } from '../types';
+import { exportRekapTahunanPDF, exportPengeluaranPDF, exportDataWargaPerKK_PDF } from '../utils/pdfExport';
 
 interface LaporanViewProps {
   transactions: Transaction[];
   wargaList: Warga[];
+  bantuanList?: BantuanPemerintah[];
   onBack: () => void;
 }
 
 export const LaporanView: React.FC<LaporanViewProps> = ({
   transactions,
   wargaList,
+  bantuanList = [],
   onBack,
 }) => {
   const totalMasuk = transactions
@@ -56,21 +58,31 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
           {/* Download Rekap Tahunan PDF */}
           <button
             onClick={() => exportRekapTahunanPDF(transactions, wargaList, '2026')}
-            className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#084831] transition-all cursor-pointer"
+            className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] px-3.5 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#084831] transition-all cursor-pointer"
             title="Download Dokumen PDF Rekapitulasi Tahunan Lengkap"
           >
-            <Download size={15} />
-            <span>Download PDF Rekap Tahunan</span>
+            <Download size={14} />
+            <span>PDF Rekap Tahunan</span>
+          </button>
+
+          {/* Download PDF Data Warga Per KK & Bansos */}
+          <button
+            onClick={() => exportDataWargaPerKK_PDF(wargaList, bantuanList)}
+            className="flex items-center gap-1.5 rounded-xl bg-emerald-800 px-3.5 py-2 text-xs font-bold text-white shadow-xs hover:bg-emerald-900 transition-all cursor-pointer"
+            title="Download Dokumen PDF Data Seluruh Warga Per Kartu Keluarga Lengkap dengan Bantuan Sosial"
+          >
+            <Users size={14} />
+            <span>PDF Data Warga Per-KK</span>
           </button>
 
           {/* Download Rekap Pengeluaran PDF */}
           <button
             onClick={() => exportPengeluaranPDF(transactions, '2026')}
-            className="flex items-center gap-1.5 rounded-xl bg-[#EF4444] px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#DC2626] transition-all cursor-pointer"
+            className="flex items-center gap-1.5 rounded-xl bg-[#EF4444] px-3.5 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#DC2626] transition-all cursor-pointer"
             title="Download Dokumen PDF Khusus Pengeluaran Kas"
           >
-            <Download size={15} />
-            <span>Download PDF Pengeluaran</span>
+            <Download size={14} />
+            <span>PDF Pengeluaran</span>
           </button>
 
           <button

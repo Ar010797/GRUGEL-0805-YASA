@@ -1,22 +1,29 @@
 import React, { useState } from 'react';
-import { ArrowLeft, Heart, Plus, Search, ShieldCheck } from 'lucide-react';
-import { Transaction } from '../types';
+import { ArrowLeft, Heart, Plus, Search, ShieldCheck, History, Info, Sparkles, Layers } from 'lucide-react';
+import { Transaction, PengaturanKas } from '../types';
 
 interface KasKematianViewProps {
   transactions: Transaction[];
+  pengaturanKas?: PengaturanKas;
   onOpenTxModal: () => void;
+  onOpenSaldoAwalModal?: () => void;
   onBack: () => void;
 }
 
 export const KasKematianView: React.FC<KasKematianViewProps> = ({
   transactions,
+  pengaturanKas,
   onOpenTxModal,
+  onOpenSaldoAwalModal,
   onBack,
 }) => {
   const kematianList = transactions.filter((t) => t.tipe === 'kematian');
   const totalKematian = kematianList.reduce((acc, t) => acc + t.nominal, 0);
 
   const formatRupiah = (val: number) => 'Rp ' + val.toLocaleString('id-ID');
+
+  const iuranBulan = pengaturanKas?.nominalKematianBulanan || 10000;
+  const iuranTahun = pengaturanKas?.nominalKematianTahunan || (iuranBulan * 12); // Rp 120.000
 
   return (
     <div className="space-y-6">
@@ -30,17 +37,55 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
           </button>
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Kas Kematian & Duka</h1>
-            <p className="text-xs text-slate-500">Dana sosial santunan duka untuk keluarga warga yang berduka</p>
+            <p className="text-xs text-slate-500">
+              Dana gotong royong warga RT 08 untuk pengadaan kain mori, pemulasaraan, dan santunan duka
+            </p>
           </div>
         </div>
 
-        <button
-          onClick={onOpenTxModal}
-          className="flex items-center gap-2 rounded-xl bg-[#F43F5E] px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#E11D48] transition-all cursor-pointer"
-        >
-          <Plus size={16} strokeWidth={2.5} />
-          <span>+ Catat Santunan Duka</span>
-        </button>
+        <div className="flex items-center gap-2">
+          {onOpenSaldoAwalModal && (
+            <button
+              onClick={onOpenSaldoAwalModal}
+              className="flex items-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 px-3.5 py-2.5 text-xs font-bold text-rose-800 hover:bg-rose-100 transition-all cursor-pointer"
+              title="Input Sisa Kas Kematian Masa Lalu"
+            >
+              <History size={15} />
+              <span>+ Input Kas Masa Lalu</span>
+            </button>
+          )}
+
+          <button
+            onClick={onOpenTxModal}
+            className="flex items-center gap-2 rounded-xl bg-[#F43F5E] px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#E11D48] transition-all cursor-pointer"
+          >
+            <Plus size={16} strokeWidth={2.5} />
+            <span>+ Catat Santunan Duka</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Banner Penjelasan Khusus Kas Kematian (Kain Mori & Pemakaman) */}
+      <div className="rounded-3xl bg-gradient-to-r from-rose-500 via-rose-600 to-pink-600 p-6 text-white shadow-md">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="max-w-2xl">
+            <span className="text-[10px] font-bold uppercase tracking-wider bg-white/20 px-2.5 py-0.5 rounded-full">
+              Fungsi & Peruntukan Kas Kematian
+            </span>
+            <h2 className="text-lg font-black mt-1">
+              Bantuan Perlengkapan Jenazah, Kain Mori, & Santunan Duka
+            </h2>
+            <p className="mt-1.5 text-xs text-rose-100 leading-relaxed">
+              Kas kematian dibayarkan oleh setiap Kepala Keluarga (KK) dengan pilihan skema: <strong>sebulan sekali ({formatRupiah(iuranBulan)})</strong> atau <strong>setahun sekali ({formatRupiah(iuranTahun)})</strong>. Dana ini siap sedia kapan pun dibutuhkan warga untuk membeli kain kafan mori komplit, minyak wangi, kapas, pemandian jenazah, serta santunan langsung ke keluarga duka.
+            </p>
+          </div>
+
+          <div className="rounded-2xl bg-white/15 p-4 backdrop-blur-xs border border-white/20 shrink-0 text-left md:text-right">
+            <span className="text-[10px] text-rose-200 uppercase font-semibold block">Besaran Setahun Penuh</span>
+            <p className="text-2xl font-black text-white">{formatRupiah(iuranTahun)}</p>
+            <span className="text-[11px] text-rose-100">per Kepala Keluarga / Tahun</span>
+          </div>
+        </div>
       </div>
 
       {/* Summary */}
@@ -51,7 +96,7 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
               <Heart size={24} fill="currentColor" />
             </div>
             <div>
-              <span className="text-xs font-semibold text-rose-200">Total Kas Kematian</span>
+              <span className="text-xs font-semibold text-rose-200">Total Kas Kematian Tersedia</span>
               <p className="text-2xl font-extrabold">{formatRupiah(totalKematian)}</p>
             </div>
           </div>
@@ -69,8 +114,8 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
 
         <div className="rounded-2xl bg-white p-5 border border-slate-200/80 shadow-xs flex items-center justify-between">
           <div>
-            <span className="text-xs font-semibold text-slate-400">Alokasi Standar per Warga</span>
-            <p className="text-base font-bold text-slate-800 mt-1">Rp 500.000 / Duka</p>
+            <span className="text-xs font-semibold text-slate-400">Alokasi Standar per Duka</span>
+            <p className="text-base font-bold text-slate-800 mt-1">Rp 500.000 + Mori</p>
           </div>
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-50 text-[#0B5D3F]">
             <ShieldCheck size={18} />
@@ -89,12 +134,14 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
             <p className="mt-1 max-w-sm text-xs text-slate-500 leading-relaxed">
               Alhamdulillah, belum ada catatan santunan kematian yang dikeluarkan untuk periode ini. Kas kematian tetap dicadangkan secara aman.
             </p>
-            <button
-              onClick={onOpenTxModal}
-              className="mt-4 rounded-xl bg-[#F43F5E] px-4 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#E11D48] transition-all cursor-pointer"
-            >
-              + Catat Santunan Duka
-            </button>
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                onClick={onOpenTxModal}
+                className="rounded-xl bg-[#F43F5E] px-4 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#E11D48] transition-all cursor-pointer"
+              >
+                + Catat Santunan Duka
+              </button>
+            </div>
           </div>
         ) : (
           <table className="w-full text-left text-xs">

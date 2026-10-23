@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { ShieldCheck, User, Lock, KeyRound, AlertCircle, CheckCircle2, ChevronRight, X } from 'lucide-react';
-import { AuthUser, Warga } from '../types';
+import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard } from 'lucide-react';
+import { AuthUser, Warga, PengaturanKas } from '../types';
 import { HouseLogo } from './HouseLogo';
 
 interface LoginModalProps {
@@ -8,6 +8,7 @@ interface LoginModalProps {
   onClose: () => void;
   onLoginSuccess: (user: AuthUser) => void;
   wargaList: Warga[];
+  onOpenLupaPassword: () => void;
 }
 
 export const LoginModal: React.FC<LoginModalProps> = ({
@@ -15,16 +16,18 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onClose,
   onLoginSuccess,
   wargaList,
+  onOpenLupaPassword,
 }) => {
   const [activeTab, setActiveTab] = useState<'admin' | 'warga'>('admin');
-  
+
   // Admin form
   const [adminUsername, setAdminUsername] = useState('Admin');
   const [adminPassword, setAdminPassword] = useState('rt08rw05');
   const [adminError, setAdminError] = useState('');
 
-  // Warga form
-  const [wargaName, setWargaName] = useState('');
+  // Warga form: Username = Nama Asli, Password = Nomor KK (16 digit)
+  const [wargaUsername, setWargaUsername] = useState('');
+  const [wargaPasswordKK, setWargaPasswordKK] = useState('');
   const [wargaError, setWargaError] = useState('');
 
   if (!isOpen) return null;
@@ -41,6 +44,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         role: 'admin',
         username: 'Admin',
         nama: 'Administrator RT 08 RW 05',
+        isPinAuthenticated: false,
       });
       onClose();
     } else {
@@ -52,48 +56,55 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     e.preventDefault();
     setWargaError('');
 
-    const searchName = wargaName.trim();
-    if (!searchName) {
-      setWargaError('Silakan masukkan nama warga Anda');
+    const name = wargaUsername.trim();
+    const noKKInput = wargaPasswordKK.trim().replace(/\s+/g, '');
+
+    if (!name) {
+      setWargaError('Silakan masukkan Nama Asli Kepala Keluarga sesuai Kartu Keluarga.');
       return;
     }
 
-    // Match with resident list or allow direct name
-    const foundWarga = wargaList.find(
-      (w) => w.nama.toLowerCase() === searchName.toLowerCase()
-    );
+    if (!noKKInput) {
+      setWargaError('Silakan masukkan Password (Nomor KK 16 digit).');
+      return;
+    }
 
-    if (foundWarga) {
+    // Match with resident list by name and No KK
+    const matched = wargaList.find((w) => {
+      const matchName = w.nama.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(w.nama.toLowerCase());
+      // Check No KK match
+      const matchKK = w.noKK ? w.noKK === noKKInput : false;
+      return matchName && matchKK;
+    });
+
+    if (matched) {
       onLoginSuccess({
         role: 'warga',
-        username: foundWarga.nama,
-        nama: foundWarga.nama,
-        wargaId: foundWarga.id,
-      });
-      onClose();
-    } else if (wargaList.length === 0) {
-      // If list is empty, allow resident login with custom name
-      onLoginSuccess({
-        role: 'warga',
-        username: searchName,
-        nama: searchName,
+        username: matched.nama,
+        nama: matched.nama,
+        noKK: matched.noKK,
+        wargaId: matched.id,
+        isPinAuthenticated: false,
       });
       onClose();
     } else {
-      // Name not found in list
-      setWargaError(`Nama "${searchName}" belum terdaftar di data warga RT 08. Silakan pilih dari nama yang tercantum di bawah.`);
+      // Check if name exists but KK is wrong
+      const nameOnly = wargaList.find((w) =>
+        w.nama.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(w.nama.toLowerCase())
+      );
+
+      if (nameOnly) {
+        setWargaError(`Nomor KK untuk warga "${nameOnly.nama}" tidak sesuai. Pastikan 16 digit No KK sudah benar.`);
+      } else {
+        setWargaError(`Data warga "${name}" dengan No KK tersebut tidak ditemukan. Silakan hubungi Admin RT untuk verifikasi.`);
+      }
     }
   };
 
-  const handleSelectWargaQuick = (w: Warga) => {
-    setWargaName(w.nama);
-    onLoginSuccess({
-      role: 'warga',
-      username: w.nama,
-      nama: w.nama,
-      wargaId: w.id,
-    });
-    onClose();
+  // Quick select helper for demo convenience
+  const handleQuickSelectWarga = (w: Warga) => {
+    setWargaUsername(w.nama);
+    setWargaPasswordKK(w.noKK);
   };
 
   return (
@@ -103,7 +114,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         <div className="relative bg-gradient-to-r from-[#0B5D3F] to-[#06442D] px-6 pt-6 pb-5 text-white">
           <button
             onClick={onClose}
-            className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full bg-white/10 hover:bg-white/20 transition-colors"
+            className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full bg-white/10 hover:bg-white/20 transition-colors cursor-pointer"
           >
             <X size={18} />
           </button>
@@ -114,7 +125,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             </div>
             <div>
               <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-200">
-                Portal Masuk Akun
+                Sistem Login Dua Peran
               </span>
               <h2 className="text-lg font-extrabold tracking-tight">RT 08 RW 05 Desa Kotayasa</h2>
             </div>
@@ -146,7 +157,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             }`}
           >
             <User size={16} />
-            <span>Login Warga</span>
+            <span>Login Warga (No KK)</span>
           </button>
         </div>
 
@@ -156,114 +167,148 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             /* ADMIN LOGIN FORM */
             <form onSubmit={handleAdminSubmit} className="space-y-4">
               <div className="rounded-2xl bg-[#E8F5EE] p-3 text-xs text-[#0B5D3F] border border-emerald-200/80">
-                <p className="font-bold">Akses Penuh Pengurus / Admin RT:</p>
+                <p className="font-bold">Akses Penuh Pengurus RT:</p>
                 <p className="text-[11px] text-emerald-800 mt-0.5">
-                  Berfungsi mencatat kas masuk, kas keluar, kas kematian, kelola data warga, dan update status iuran.
-                </p>
-                <p className="mt-2 text-[11px] font-mono bg-white/70 py-1 px-2 rounded-lg border border-emerald-300">
-                  User: <strong>Admin</strong> • Sandi: <strong>rt08rw05</strong>
+                  Mencatat kas masuk/keluar, kas kematian, upload foto KK, data bantuan pemerintah, dan pengumuman warga.
                 </p>
               </div>
 
               {adminError && (
-                <div className="flex items-center gap-2 rounded-xl bg-rose-50 p-3 text-xs font-medium text-rose-700 border border-rose-200">
+                <div className="flex items-center gap-2 rounded-xl bg-rose-50 p-3 text-xs font-semibold text-rose-700 border border-rose-200">
                   <AlertCircle size={16} className="shrink-0" />
                   <span>{adminError}</span>
                 </div>
               )}
 
               <div>
-                <label className="text-xs font-bold text-slate-700 block mb-1">Username Admin</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Username Admin
+                </label>
                 <div className="relative">
-                  <User size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                    <User size={16} />
+                  </div>
                   <input
                     type="text"
                     required
                     value={adminUsername}
                     onChange={(e) => setAdminUsername(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-medium"
                     placeholder="Admin"
-                    className="w-full rounded-xl border border-slate-300 py-2.5 pl-10 pr-3 text-sm font-semibold text-slate-800 focus:border-[#0B5D3F] focus:outline-hidden"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="text-xs font-bold text-slate-700 block mb-1">Password</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Password Admin
+                </label>
                 <div className="relative">
-                  <Lock size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                    <KeyRound size={16} />
+                  </div>
                   <input
                     type="password"
                     required
                     value={adminPassword}
                     onChange={(e) => setAdminPassword(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-mono"
                     placeholder="rt08rw05"
-                    className="w-full rounded-xl border border-slate-300 py-2.5 pl-10 pr-3 text-sm font-semibold text-slate-800 focus:border-[#0B5D3F] focus:outline-hidden"
                   />
                 </div>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Akun awal: Username: <strong className="text-slate-600">Admin</strong>, Password: <strong className="text-slate-600">rt08rw05</strong>
+                </p>
               </div>
 
               <button
                 type="submit"
-                className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#0B5D3F] py-3 text-xs font-bold text-white shadow-md hover:bg-[#084831] transition-all cursor-pointer"
+                className="w-full rounded-xl bg-[#0B5D3F] py-3 text-sm font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"
               >
-                <KeyRound size={16} />
-                <span>Masuk sebagai Admin RT</span>
+                Masuk Sebagai Admin
               </button>
             </form>
           ) : (
             /* WARGA LOGIN FORM */
             <form onSubmit={handleWargaSubmit} className="space-y-4">
-              <div className="rounded-2xl bg-amber-50 p-3 text-xs text-amber-900 border border-amber-200">
-                <p className="font-bold">Akses Warga RT 08 (Hanya Melihat / Read-Only):</p>
+              <div className="rounded-2xl bg-amber-50 p-3 text-xs text-amber-900 border border-amber-200/80">
+                <p className="font-bold">Privasi Warga Terlindungi (Sesuai UU PDP):</p>
                 <p className="text-[11px] text-amber-800 mt-0.5">
-                  Warga dapat melihat sisa tagihan/kekurangan kas masing-masing akun, histori iuran, dan informasi/pengumuman resmi dari RT.
+                  Warga hanya dapat melihat data keluarganya sendiri berdasarkan Nomor Kartu Keluarga (16 digit).
                 </p>
               </div>
 
               {wargaError && (
-                <div className="flex items-center gap-2 rounded-xl bg-rose-50 p-3 text-xs font-medium text-rose-700 border border-rose-200">
+                <div className="flex items-center gap-2 rounded-xl bg-rose-50 p-3 text-xs font-semibold text-rose-700 border border-rose-200">
                   <AlertCircle size={16} className="shrink-0" />
                   <span>{wargaError}</span>
                 </div>
               )}
 
               <div>
-                <label className="text-xs font-bold text-slate-700 block mb-1">
-                  Nama Warga (Sesuai tercantum di data KK)
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Username (Nama Asli Sesuai KK)
                 </label>
                 <div className="relative">
-                  <User size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                    <User size={16} />
+                  </div>
                   <input
                     type="text"
                     required
-                    value={wargaName}
-                    onChange={(e) => setWargaName(e.target.value)}
-                    placeholder="Ketik nama Anda (Contoh: Ahmad Fauzi)"
-                    className="w-full rounded-xl border border-slate-300 py-2.5 pl-10 pr-3 text-sm font-semibold text-slate-800 focus:border-[#0B5D3F] focus:outline-hidden"
+                    value={wargaUsername}
+                    onChange={(e) => setWargaUsername(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-medium"
+                    placeholder="Contoh: Budi Santoso"
                   />
                 </div>
               </div>
 
-              {/* Quick Select Warga if data is available */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Password (Nomor Kartu Keluarga — 16 Digit)
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                    <CreditCard size={16} />
+                  </div>
+                  <input
+                    type="password"
+                    maxLength={16}
+                    required
+                    value={wargaPasswordKK}
+                    onChange={(e) => setWargaPasswordKK(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-mono tracking-wider"
+                    placeholder="3302140508000001"
+                  />
+                </div>
+                <div className="mt-1 flex items-center justify-between text-[11px]">
+                  <span className="text-slate-400">Harus 16 digit angka</span>
+                  <button
+                    type="button"
+                    onClick={onOpenLupaPassword}
+                    className="font-bold text-[#0B5D3F] hover:underline cursor-pointer"
+                  >
+                    Lupa Password? Hubungi Admin
+                  </button>
+                </div>
+              </div>
+
+              {/* Quick Select Pill for demo testing */}
               {wargaList.length > 0 && (
-                <div>
-                  <span className="text-[11px] font-semibold text-slate-500 block mb-1.5">
-                    Atau langsung pilih nama warga yang terdaftar:
-                  </span>
-                  <div className="max-h-36 overflow-y-auto space-y-1.5 rounded-xl border border-slate-200 p-1.5 no-scrollbar">
-                    {wargaList.map((w) => (
+                <div className="pt-2">
+                  <p className="text-[11px] font-bold text-slate-500 mb-1.5">
+                    Pilih Cepat Akun Warga Terdaftar (Contoh Uji Coba):
+                  </p>
+                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto no-scrollbar p-1 bg-slate-50 rounded-xl border border-slate-100">
+                    {wargaList.slice(0, 5).map((w) => (
                       <button
                         key={w.id}
                         type="button"
-                        onClick={() => handleSelectWargaQuick(w)}
-                        className="w-full flex items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs hover:bg-[#E8F5EE] transition-colors cursor-pointer group"
+                        onClick={() => handleQuickSelectWarga(w)}
+                        className="rounded-lg bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 border border-slate-200 hover:border-emerald-400 hover:text-[#0B5D3F] transition-all cursor-pointer"
                       >
-                        <span className="font-medium text-slate-700 group-hover:text-[#0B5D3F]">
-                          {w.nama} (Rumah {w.noRumah})
-                        </span>
-                        <span className="text-[10px] font-bold text-slate-400 group-hover:text-[#0B5D3F]">
-                          Masuk &rarr;
-                        </span>
+                        {w.nama}
                       </button>
                     ))}
                   </div>
@@ -272,13 +317,24 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
               <button
                 type="submit"
-                className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#0B5D3F] py-3 text-xs font-bold text-white shadow-md hover:bg-[#084831] transition-all cursor-pointer"
+                className="w-full rounded-xl bg-[#0B5D3F] py-3 text-sm font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"
               >
-                <span>Masuk ke Dasbor Warga</span>
-                <ChevronRight size={16} />
+                Masuk Sebagai Warga
               </button>
             </form>
           )}
+
+          {/* Footer security note */}
+          <div className="mt-5 pt-4 border-t border-slate-100 text-center">
+            <button
+              type="button"
+              onClick={onOpenLupaPassword}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+            >
+              <HelpCircle size={14} />
+              <span>Butuh Bantuan Akun atau Reset PIN? Hubungi Pengurus RT</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

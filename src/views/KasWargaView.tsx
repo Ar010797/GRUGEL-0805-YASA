@@ -9,6 +9,7 @@ import {
   Filter,
   Inbox,
   ArrowLeft,
+  History,
 } from 'lucide-react';
 import { LeafIcon } from '../components/HouseLogo';
 import { Transaction } from '../types';
@@ -16,12 +17,14 @@ import { Transaction } from '../types';
 interface KasWargaViewProps {
   transactions: Transaction[];
   onOpenTxModal: (type?: 'masuk' | 'keluar' | 'kematian') => void;
+  onOpenSaldoAwalModal?: () => void;
   onBack: () => void;
 }
 
 export const KasWargaView: React.FC<KasWargaViewProps> = ({
   transactions,
   onOpenTxModal,
+  onOpenSaldoAwalModal,
   onBack,
 }) => {
   const [activeTab, setActiveTab] = useState<'semua' | 'masuk' | 'keluar' | 'kematian'>('semua');
@@ -68,13 +71,26 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
           </div>
         </div>
 
-        <button
-          onClick={() => onOpenTxModal('masuk')}
-          className="flex items-center gap-2 rounded-xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#084831] transition-all cursor-pointer"
-        >
-          <Plus size={16} strokeWidth={2.5} />
-          <span>+ Catat Transaksi Baru</span>
-        </button>
+        <div className="flex items-center gap-2">
+          {onOpenSaldoAwalModal && (
+            <button
+              onClick={onOpenSaldoAwalModal}
+              className="flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3.5 py-2.5 text-xs font-bold text-[#0B5D3F] hover:bg-emerald-100 transition-all cursor-pointer"
+              title="Input Sisa Kas Masa Lalu yang belum masuk"
+            >
+              <History size={15} />
+              <span>+ Input Kas Masa Lalu</span>
+            </button>
+          )}
+
+          <button
+            onClick={() => onOpenTxModal('masuk')}
+            className="flex items-center gap-2 rounded-xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#084831] transition-all cursor-pointer"
+          >
+            <Plus size={16} strokeWidth={2.5} />
+            <span>+ Catat Transaksi Baru</span>
+          </button>
+        </div>
       </div>
 
       {/* Main Balances */}
