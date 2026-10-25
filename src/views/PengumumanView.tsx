@@ -13,7 +13,7 @@ import {
   FileText,
   Printer,
 } from 'lucide-react';
-import { PengumumanRT } from '../types';
+import { PengumumanRT, PengaturanKas } from '../types';
 import { kirimWhatsAppPengumuman, salinTeksPengumuman } from '../utils/whatsappShare';
 import { exportSuratPengumumanPDF } from '../utils/pdfExport';
 
@@ -23,6 +23,7 @@ interface PengumumanViewProps {
   onOpenCreateModal: () => void;
   onDeletePengumuman: (id: string) => void;
   onBack: () => void;
+  pengaturanKas?: PengaturanKas;
 }
 
 export const PengumumanView: React.FC<PengumumanViewProps> = ({
@@ -31,7 +32,18 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
   onOpenCreateModal,
   onDeletePengumuman,
   onBack,
+  pengaturanKas,
 }) => {
+  const profilRT = pengaturanKas?.profilRT;
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
+  const judulKop = profilRT?.judulKopSurat || `PENGURUS RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
+  const alamatKop = profilRT?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} ${profilRT?.kodePos || '53183'}`;
+  const namaKetua = pengaturanKas?.kontakKetuaRT?.nama || 'Bpk. Suwardi';
+
   const [filterCategory, setFilterCategory] = useState<string>('Semua');
   const [search, setSearch] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -281,19 +293,19 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
 
             {/* Scrollable Letter Body replicating Official Document */}
             <div className="overflow-y-auto p-6 sm:p-8 space-y-4 no-scrollbar font-sans text-slate-800 bg-white">
-              {/* KOP RESMI DOKUMEN */}
+              {/* KOP RESMI DOKUMEN OTOMATIS SESUAI PROFIL RT */}
               <div className="text-center pb-3">
                 <p className="text-xs sm:text-sm font-bold uppercase tracking-wider text-slate-800">
-                  PEMERINTAH KABUPATEN BANYUMAS
+                  PEMERINTAH {kabStr.toUpperCase()}
                 </p>
                 <p className="text-xs sm:text-sm font-bold uppercase tracking-wider text-slate-800">
-                  KECAMATAN SUMBANG &bull; DESA KOTAYASA
+                  {kecStr.toUpperCase()} &bull; {desaStr.toUpperCase()}
                 </p>
                 <h2 className="text-sm sm:text-base font-black uppercase text-[#0B5D3F] mt-1">
-                  PENGURUS RUKUN TETANGGA 08 RUKUN WARGA 05
+                  {judulKop.toUpperCase()} {desaStr.toUpperCase()}
                 </h2>
                 <p className="text-[10px] text-slate-500 mt-1">
-                  Sekretariat: RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas 53183 | Layanan Warga: 0812-3456-7890
+                  {alamatKop}
                 </p>
                 {/* Double Border Line Kop */}
                 <div className="h-[2px] bg-[#0B5D3F] mt-3 w-full" />
@@ -303,20 +315,20 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
               {/* Metadata Surat */}
               <div className="flex flex-col sm:flex-row justify-between text-xs text-slate-700 gap-2 pt-2">
                 <div className="space-y-0.5">
-                  <p>Nomor&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: 01/EDR/RT08-RW05/X/2026</p>
+                  <p>Nomor&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: 0{selectedSurat.id.replace(/\D/g, '') || '01'}/EDR/RT{rtStr}-RW{rwStr}/X/2026</p>
                   <p>Lampiran : -</p>
                   <p>Perihal&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: <strong className="text-slate-900">PENGUMUMAN - {selectedSurat.judul.toUpperCase()}</strong></p>
                 </div>
                 <div className="text-left sm:text-right">
-                  <p>Kotayasa, {selectedSurat.tanggal}</p>
+                  <p>{desaStr}, {selectedSurat.tanggal}</p>
                 </div>
               </div>
 
               {/* Kepada Yth */}
               <div className="text-xs text-slate-700 pt-2 space-y-0.5">
                 <p>Kepada Yth.</p>
-                <p className="font-bold text-slate-900">Bapak/Ibu/Sdr Seluruh Warga RT 08 RW 05</p>
-                <p>Desa Kotayasa, Kec. Sumbang</p>
+                <p className="font-bold text-slate-900">Bapak/Ibu/Sdr Seluruh Warga RT {rtStr} RW {rwStr}</p>
+                <p>{desaStr}, {kecStr}</p>
                 <p>di Tempat</p>
               </div>
 
@@ -324,7 +336,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
               <div className="text-xs leading-relaxed space-y-3 pt-2 text-slate-700">
                 <p className="italic">Assalamu’alaikum Warahmatullahi Wabarakatuh,</p>
                 <p>
-                  Sehubungan dengan agenda kemaslahatan dan ketertiban lingkungan di wilayah RT 08 RW 05 Desa Kotayasa, melalui surat edaran resmi ini Pengurus RT memberitahukan kepada seluruh warga perihal kegiatan sebagai berikut:
+                  Sehubungan dengan agenda kemaslahatan dan ketertiban lingkungan di wilayah RT {rtStr} RW {rwStr} {desaStr}, melalui surat edaran resmi ini Pengurus RT memberitahukan kepada seluruh warga perihal kegiatan sebagai berikut:
                 </p>
 
                 {/* Kotak Pengumuman */}
@@ -334,27 +346,27 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
                 </div>
 
                 <p>
-                  Demikian surat pengumuman resmi ini kami sampaikan. Atas perhatian, kesadaran, dan kerja sama yang baik dari seluruh warga RT 08 RW 05 Desa Kotayasa, kami ucapkan terima kasih yang sebesar-besarnya.
+                  Demikian surat pengumuman resmi ini kami sampaikan. Atas perhatian, kesadaran, dan kerja sama yang baik dari seluruh warga RT {rtStr} RW {rwStr} {desaStr}, kami ucapkan terima kasih yang sebesar-besarnya.
                 </p>
                 <p className="italic">Wassalamu’alaikum Warahmatullahi Wabarakatuh.</p>
               </div>
 
-              {/* Tanda Tangan & Stempel */}
+              {/* Tanda Tangan & Stempel Sesuai RT */}
               <div className="pt-4 flex justify-end">
                 <div className="text-center w-56 relative">
-                  <p className="text-xs text-slate-700">Pengurus RT 08 RW 05 Desa Kotayasa</p>
-                  <p className="text-xs font-bold text-slate-900">Ketua RT 08,</p>
+                  <p className="text-xs text-slate-700">Pengurus RT {rtStr} RW {rwStr} {desaStr}</p>
+                  <p className="text-xs font-bold text-slate-900">Ketua RT {rtStr},</p>
 
                   {/* Stempel Visual Digital */}
                   <div className="my-2 flex justify-center">
                     <div className="h-16 w-16 rounded-full border-2 border-dashed border-[#0B5D3F] flex flex-col items-center justify-center p-1 text-[#0B5D3F] rotate-[-8deg] opacity-85">
-                      <span className="text-[7px] font-black uppercase">RT 08 RW 05</span>
-                      <span className="text-[6px] font-bold">★ KOTAYASA ★</span>
-                      <span className="text-[6px] font-semibold">BANYUMAS</span>
+                      <span className="text-[7px] font-black uppercase">RT {rtStr} RW {rwStr}</span>
+                      <span className="text-[6px] font-bold">★ {desaStr.toUpperCase()} ★</span>
+                      <span className="text-[6px] font-semibold">{kabStr.toUpperCase()}</span>
                     </div>
                   </div>
 
-                  <p className="text-xs font-bold underline text-slate-900">Bapak Suwardi</p>
+                  <p className="text-xs font-bold underline text-slate-900">{namaKetua}</p>
                 </div>
               </div>
             </div>
@@ -377,7 +389,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
                   <span>Kirim ke WA Warga</span>
                 </button>
                 <button
-                  onClick={() => exportSuratPengumumanPDF(selectedSurat)}
+                  onClick={() => exportSuratPengumumanPDF(selectedSurat, profilRT, namaKetua)}
                   className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] px-4 py-2 text-xs font-bold text-white shadow-xs cursor-pointer"
                 >
                   <Download size={13} />

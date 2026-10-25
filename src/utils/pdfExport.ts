@@ -1,17 +1,26 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Transaction, Warga, PengumumanRT, BantuanPemerintah } from '../types';
+import { Transaction, Warga, PengumumanRT, BantuanPemerintah, ProfilRT } from '../types';
 
 export const exportRekapTahunanPDF = (
   transactions: Transaction[],
   wargaList: Warga[],
-  tahun: string = '2026'
+  tahun: string = '2026',
+  profilRT?: ProfilRT
 ) => {
   const doc = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',
     format: 'a4',
   });
+
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
+  const judulKop = profilRT?.judulKopSurat || `RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
+  const alamatKop = profilRT?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} ${profilRT?.kodePos || '53183'}`;
 
   const totalMasuk = transactions
     .filter((t) => t.tipe === 'masuk')
@@ -29,23 +38,23 @@ export const exportRekapTahunanPDF = (
 
   const formatRp = (val: number) => 'Rp ' + val.toLocaleString('id-ID');
 
-  // Letterhead / Kop Surat
+  // Letterhead / Kop Surat Otomatis Sesuai RT yang Dikelola
   doc.setFillColor(11, 93, 63); // Dark green #0B5D3F
   doc.rect(0, 0, 210, 8, 'F');
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(14);
   doc.setTextColor(11, 93, 63);
-  doc.text('RUKUN TETANGGA 08 RUKUN WARGA 05', 105, 20, { align: 'center' });
+  doc.text(judulKop.toUpperCase(), 105, 20, { align: 'center' });
 
-  doc.setFontSize(12);
+  doc.setFontSize(11);
   doc.setTextColor(40, 40, 40);
-  doc.text('DESA KOTAYASA, KECAMATAN SUMBANG, KABUPATEN BANYUMAS', 105, 26, { align: 'center' });
+  doc.text(`${desaStr.toUpperCase()}, ${kecStr.toUpperCase()}, ${kabStr.toUpperCase()}`, 105, 26, { align: 'center' });
 
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
+  doc.setFontSize(8.5);
   doc.setTextColor(100, 100, 100);
-  doc.text('Sekretariat: RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas 53183', 105, 31, { align: 'center' });
+  doc.text(alamatKop, 105, 31, { align: 'center' });
 
   doc.setDrawColor(11, 93, 63);
   doc.setLineWidth(1);
@@ -261,38 +270,51 @@ export const exportPengeluaranPDF = (
 };
 
 /**
- * Generates an official Formal Indonesian Announcement Letter (Surat Edaran Resmi RT 08 RW 05)
- * With authentic Kop Surat, Double-Line separator, letter number, digital stamp, and signatures.
+ * Generates an official Formal Indonesian Announcement Letter (Surat Edaran Resmi)
+ * With authentic Kop Surat, Double-Line separator, letter number, digital stamp, and signatures matching the managed RT.
  */
-export const exportSuratPengumumanPDF = (pengumuman: PengumumanRT) => {
+export const exportSuratPengumumanPDF = (
+  pengumuman: PengumumanRT,
+  profilRT?: ProfilRT,
+  namaKetuaRT?: string
+) => {
   const doc = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',
     format: 'a4',
   });
 
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
+  const judulKop = profilRT?.judulKopSurat || `PENGURUS RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
+  const alamatKop = profilRT?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} Kode Pos ${profilRT?.kodePos || '53183'}`;
+  const ketuaName = namaKetuaRT || 'Bapak Suwardi';
+
   // Top header border strip
   doc.setFillColor(11, 93, 63);
   doc.rect(0, 0, 210, 6, 'F');
 
-  // Letterhead (KOP SURAT RESMI)
+  // Letterhead (KOP SURAT RESMI OTOMATIS SESUAI PROFIL RT)
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(11);
+  doc.setFontSize(10.5);
   doc.setTextColor(30, 30, 30);
-  doc.text('PEMERINTAH KABUPATEN BANYUMAS', 105, 15, { align: 'center' });
+  doc.text(`PEMERINTAH ${kabStr.toUpperCase()}`, 105, 15, { align: 'center' });
 
-  doc.setFontSize(11);
+  doc.setFontSize(10.5);
   doc.setTextColor(30, 30, 30);
-  doc.text('KECAMATAN SUMBANG - DESA KOTAYASA', 105, 20, { align: 'center' });
+  doc.text(`${kecStr.toUpperCase()} - ${desaStr.toUpperCase()}`, 105, 20, { align: 'center' });
 
-  doc.setFontSize(14);
+  doc.setFontSize(13.5);
   doc.setTextColor(11, 93, 63);
-  doc.text('PENGURUS RUKUN TETANGGA 08 RUKUN WARGA 05', 105, 27, { align: 'center' });
+  doc.text(judulKop.toUpperCase(), 105, 27, { align: 'center' });
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.5);
   doc.setTextColor(90, 90, 90);
-  doc.text('Sekretariat: RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas Kode Pos 53183 | WA: 0812-3456-7890', 105, 32, { align: 'center' });
+  doc.text(alamatKop, 105, 32, { align: 'center' });
 
   // Double horizontal line (Garis Ganda Kop Surat)
   doc.setDrawColor(11, 93, 63);
@@ -307,21 +329,21 @@ export const exportSuratPengumumanPDF = (pengumuman: PengumumanRT) => {
   doc.setTextColor(30, 30, 30);
 
   const cleanId = pengumuman.id.replace(/[^0-9]/g, '') || '01';
-  const noSurat = `0${cleanId}/EDR/RT08-RW05/X/2026`;
+  const noSurat = `0${cleanId}/EDR/RT${rtStr}-RW${rwStr}/X/2026`;
 
   doc.text(`Nomor     : ${noSurat}`, 20, 44);
   doc.text('Lampiran : -', 20, 49);
   doc.text(`Perihal     : PENGUMUMAN - ${pengumuman.judul.toUpperCase()}`, 20, 54);
 
   const tglSurat = pengumuman.tanggal || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
-  doc.text(`Kotayasa, ${tglSurat}`, 140, 44);
+  doc.text(`${desaStr}, ${tglSurat}`, 135, 44);
 
   // Kepada Yth
   doc.text('Kepada Yth.', 20, 64);
   doc.setFont('helvetica', 'bold');
-  doc.text('Bapak/Ibu/Sdr Seluruh Warga RT 08 RW 05', 20, 69);
+  doc.text(`Bapak/Ibu/Sdr Seluruh Warga RT ${rtStr} RW ${rwStr}`, 20, 69);
   doc.setFont('helvetica', 'normal');
-  doc.text('Desa Kotayasa, Kec. Sumbang', 20, 74);
+  doc.text(`${desaStr}, ${kecStr}`, 20, 74);
   doc.text('di Tempat', 20, 79);
 
   // Salam Pembuka
@@ -329,7 +351,7 @@ export const exportSuratPengumumanPDF = (pengumuman: PengumumanRT) => {
   doc.text('Salam sejahtera bagi kita semua.', 20, 94);
 
   // Isi Pengantar Surat
-  const pembuka = 'Sehubungan dengan agenda kemaslahatan, ketertiban, dan kebersamaan warga di lingkungan RT 08 RW 05 Desa Kotayasa, melalui surat edaran resmi ini kami sampaikan pemberitahuan penting sebagai berikut:';
+  const pembuka = `Sehubungan dengan agenda kemaslahatan, ketertiban, dan kebersamaan warga di lingkungan RT ${rtStr} RW ${rwStr} ${desaStr}, melalui surat edaran resmi ini kami sampaikan pemberitahuan penting sebagai berikut:`;
   const splitPembuka = doc.splitTextToSize(pembuka, 170);
   doc.text(splitPembuka, 20, 102);
 
@@ -351,7 +373,7 @@ export const exportSuratPengumumanPDF = (pengumuman: PengumumanRT) => {
     doc.setTextColor(40, 40, 40);
     doc.text(`• Hari / Tanggal    : ${pengumuman.hariTanggalAcara || 'Sesuai jadwal'}`, 25, 130);
     doc.text(`• Waktu Pelaksanaan: ${pengumuman.waktuAcara || 'Waktu setempat'}`, 25, 136);
-    doc.text(`• Tempat / Lokasi  : ${pengumuman.tempatAcara || 'Wilayah RT 08 RW 05'}`, 25, 142);
+    doc.text(`• Tempat / Lokasi  : ${pengumuman.tempatAcara || `Wilayah RT ${rtStr} RW ${rwStr}`}`, 25, 142);
     if (pengumuman.keteranganTambahan) {
       doc.text(`• Catatan Khusus  : ${pengumuman.keteranganTambahan}`, 25, 148);
     }
@@ -380,14 +402,14 @@ export const exportSuratPengumumanPDF = (pengumuman: PengumumanRT) => {
 
   doc.text('Wassalamu’alaikum Warahmatullahi Wabarakatuh.', 20, 192);
 
-  // Tanda Tangan & Stempel Digital
+  // Tanda Tangan & Stempel Digital Sesuai RT
   const signY = 205;
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9.5);
-  doc.text('Pengurus RT 08 RW 05 Desa Kotayasa', 130, signY);
-  doc.text('Ketua RT 08,', 130, signY + 6);
+  doc.text(`Pengurus RT ${rtStr} RW ${rwStr} ${desaStr}`, 130, signY);
+  doc.text(`Ketua RT ${rtStr},`, 130, signY + 6);
 
-  // Stempel Digital Bulat RT 08 RW 05
+  // Stempel Digital Bulat Otomatis
   doc.setDrawColor(11, 93, 63);
   doc.setLineWidth(0.6);
   doc.circle(140, signY + 22, 13);
@@ -396,27 +418,27 @@ export const exportSuratPengumumanPDF = (pengumuman: PengumumanRT) => {
   doc.setFontSize(5.5);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(11, 93, 63);
-  doc.text('RUKUN TETANGGA 08', 140, signY + 16, { align: 'center' });
-  doc.text('★ RW 05 ★', 140, signY + 22, { align: 'center' });
-  doc.text('DESA KOTAYASA', 140, signY + 28, { align: 'center' });
+  doc.text(`RUKUN TETANGGA ${rtStr}`, 140, signY + 16, { align: 'center' });
+  doc.text(`★ RW ${rwStr} ★`, 140, signY + 22, { align: 'center' });
+  doc.text(desaStr.toUpperCase(), 140, signY + 28, { align: 'center' });
 
   // Nama Terang
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(20, 20, 20);
-  doc.text('Bapak Suwardi', 130, signY + 38);
+  doc.text(ketuaName, 130, signY + 38);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
   doc.setTextColor(100, 100, 100);
-  doc.text('Tembusan: Ketua RW 05 Desa Kotayasa', 20, signY + 44);
+  doc.text(`Tembusan: Ketua RW ${rwStr} ${desaStr}`, 20, signY + 44);
 
   // Footer note
   doc.setFontSize(7.5);
   doc.setTextColor(140, 140, 140);
-  doc.text('Surat resmi ini diterbitkan secara sah melalui Sistem Informasi RT 08 RW 05 Desa Kotayasa', 105, 285, { align: 'center' });
+  doc.text(`Surat resmi ini diterbitkan secara sah melalui Sistem Informasi RT ${rtStr} RW ${rwStr} ${desaStr}`, 105, 285, { align: 'center' });
 
   const safeTitle = pengumuman.judul.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
-  doc.save(`Surat_Pengumuman_RT08_${safeTitle}.pdf`);
+  doc.save(`Surat_Pengumuman_RT${rtStr}_${safeTitle}.pdf`);
 };
 
 /**
@@ -425,13 +447,22 @@ export const exportSuratPengumumanPDF = (pengumuman: PengumumanRT) => {
  */
 export const exportDataWargaPerKK_PDF = (
   wargaList: Warga[],
-  bantuanList: BantuanPemerintah[] = []
+  bantuanList: BantuanPemerintah[] = [],
+  profilRT?: ProfilRT
 ) => {
   const doc = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',
     format: 'a4',
   });
+
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
+  const judulKop = profilRT?.judulKopSurat || `PENGURUS RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
+  const alamatKop = profilRT?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} ${profilRT?.kodePos || '53183'}`;
 
   const pageWidth = 210;
   const pageHeight = 297;
@@ -446,19 +477,19 @@ export const exportDataWargaPerKK_PDF = (
     d.setFont('helvetica', 'bold');
     d.setFontSize(10);
     d.setTextColor(40, 40, 40);
-    d.text('PEMERINTAH KABUPATEN BANYUMAS', pageWidth / 2, 14, { align: 'center' });
+    d.text(`PEMERINTAH ${kabStr.toUpperCase()}`, pageWidth / 2, 14, { align: 'center' });
 
     d.setFontSize(10);
-    d.text('KECAMATAN SUMBANG - DESA KOTAYASA', pageWidth / 2, 19, { align: 'center' });
+    d.text(`${kecStr.toUpperCase()} - ${desaStr.toUpperCase()}`, pageWidth / 2, 19, { align: 'center' });
 
     d.setFontSize(13);
     d.setTextColor(11, 93, 63);
-    d.text('PENGURUS RUKUN TETANGGA 08 RUKUN WARGA 05', pageWidth / 2, 25, { align: 'center' });
+    d.text(judulKop.toUpperCase(), pageWidth / 2, 25, { align: 'center' });
 
     d.setFont('helvetica', 'normal');
     d.setFontSize(8);
     d.setTextColor(90, 90, 90);
-    d.text('Sekretariat: RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas 53183 | Layanan: 0812-3456-7890', pageWidth / 2, 29.5, { align: 'center' });
+    d.text(alamatKop, pageWidth / 2, 29.5, { align: 'center' });
 
     d.setDrawColor(11, 93, 63);
     d.setLineWidth(1);

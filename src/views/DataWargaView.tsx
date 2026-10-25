@@ -209,8 +209,18 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
             </button>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs min-w-[650px]">
+          <div>
+            {/* Petunjuk Geser Layar HP untuk Responsivitas Mobile */}
+            <div className="sm:hidden flex items-center justify-between text-[11px] font-bold text-emerald-800 bg-[#E8F5EE] px-3.5 py-2 border-b border-emerald-200">
+              <span className="flex items-center gap-1.5">
+                <span className="text-sm font-black">&larr; &rarr;</span>
+                <span>Geser tabel ke samping untuk melihat seluruh data</span>
+              </span>
+              <span className="text-[10px] text-emerald-700 font-semibold">{filtered.length} KK</span>
+            </div>
+
+            <div className="overflow-x-auto touch-pan-x scrollbar-thin">
+              <table className="w-full text-left text-xs min-w-[780px]">
               <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200/80">
                 <tr>
                   <th className="py-3.5 px-4 text-center">No</th>
@@ -301,8 +311,9 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
               </tbody>
             </table>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+    </div>
 
       {/* MODAL DETAIL KARTU KELUARGA & BANTUAN PEMERINTAH (UNTUK ADMIN) */}
       {selectedWarga && (

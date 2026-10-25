@@ -41,7 +41,9 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   // Form State
-  const [jenisBantuan, setJenisBantuan] = useState<BantuanPemerintah['jenisBantuan']>('BPNT');
+  const [jenisBantuan, setJenisBantuan] = useState<string>('BPNT (Bantuan Pangan Non Tunai)');
+  const [isCustomJenis, setIsCustomJenis] = useState(false);
+  const [customJenisText, setCustomJenisText] = useState('');
   const [namaPenerima, setNamaPenerima] = useState('');
   const [noKK, setNoKK] = useState('');
   const [nik, setNik] = useState('');
@@ -68,8 +70,13 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
     e.preventDefault();
     if (!namaPenerima) return;
 
+    // Use custom manual name if selected or entered
+    const finalJenis = (isCustomJenis && customJenisText.trim())
+      ? customJenisText.trim()
+      : jenisBantuan;
+
     onAddBantuan({
-      jenisBantuan,
+      jenisBantuan: finalJenis,
       namaPenerima,
       noKK: noKK || '3302140805120001',
       nik,
@@ -85,7 +92,24 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
     setNamaPenerima('');
     setNoKK('');
     setNik('');
+    setIsCustomJenis(false);
+    setCustomJenisText('');
   };
+
+  // Collect all unique bantuan types (presets + custom ones present in dataset)
+  const allUniqueJenis = Array.from(
+    new Set([
+      'BPNT (Bantuan Pangan Non Tunai)',
+      'PKH (Program Keluarga Harapan)',
+      'Bansos Tunai / BLT Desa',
+      'Sembako Beras & Pangan',
+      'Bantuan Lansia Disabilitas',
+      'KIP / PIP Siswa',
+      'Bantuan RTLH (Bedah Rumah)',
+      'Bansos Minyak Goreng & Sembako',
+      ...bantuanList.map((b) => b.jenisBantuan),
+    ])
+  );
 
   // Filtered List
   const filtered = bantuanList.filter((b) => {
@@ -191,19 +215,18 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2 w-full md:w-auto">
-          {/* Filter Jenis */}
+          {/* Filter Jenis Bantuan (Dinamis dengan Bantuan Manual) */}
           <select
             value={filterJenis}
             onChange={(e) => setFilterJenis(e.target.value)}
-            className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 focus:border-[#0B5D3F] outline-hidden cursor-pointer"
+            className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 focus:border-[#0B5D3F] outline-hidden cursor-pointer max-w-[200px] truncate"
           >
-            <option value="semua">Semua Jenis Bantuan</option>
-            <option value="BPNT">BPNT (Non Tunai)</option>
-            <option value="PKH">PKH (Keluarga Harapan)</option>
-            <option value="Bansos Tunai / BLT Desa">BLT Desa / Tunai</option>
-            <option value="Sembako Beras">Sembako Beras</option>
-            <option value="Bantuan Lansia">Bantuan Lansia</option>
-            <option value="KIP / PIP">KIP / PIP Pendidikan</option>
+            <option value="semua">Semua Program Bantuan</option>
+            {allUniqueJenis.map((j) => (
+              <option key={j} value={j}>
+                {j}
+              </option>
+            ))}
           </select>
 
           {/* Filter Status */}
@@ -221,10 +244,19 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
         </div>
       </div>
 
+      {/* Petunjuk Geser Layar HP untuk Responsivitas Mobile */}
+      <div className="sm:hidden flex items-center justify-between text-[11px] font-bold text-emerald-800 bg-[#E8F5EE] px-3.5 py-2 rounded-2xl border border-emerald-200">
+        <span className="flex items-center gap-1.5">
+          <span>&larr; &rarr;</span>
+          <span>Geser tabel ke samping untuk melihat kolom lengkap</span>
+        </span>
+        <span className="text-[10px] text-emerald-700 font-semibold">{filtered.length} Data</span>
+      </div>
+
       {/* Table of Bantuan */}
       <div className="overflow-hidden rounded-3xl bg-white shadow-xs border border-slate-200">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
+        <div className="overflow-x-auto touch-pan-x">
+          <table className="w-full text-left text-xs min-w-[760px]">
             <thead className="bg-[#E8F5EE]/60 text-slate-700 border-b border-slate-200 font-bold uppercase tracking-wider text-[10px]">
               <tr>
                 <th className="px-5 py-3.5">Penerima Manfaat</th>
@@ -393,24 +425,67 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Jenis Program Bantuan
-                  </label>
-                  <select
-                    value={jenisBantuan}
-                    onChange={(e) => setJenisBantuan(e.target.value as any)}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-[#0B5D3F] focus:border-[#0B5D3F] outline-hidden cursor-pointer"
-                  >
-                    <option value="BPNT">BPNT (Bantuan Pangan Non Tunai)</option>
-                    <option value="PKH">PKH (Program Keluarga Harapan)</option>
-                    <option value="Bansos Tunai / BLT Desa">BLT Desa / Tunai</option>
-                    <option value="Sembako Beras">Sembako Beras & Pangan</option>
-                    <option value="Bantuan Lansia">Bantuan Lansia Disabilitas</option>
-                    <option value="KIP / PIP">KIP / PIP Siswa</option>
-                    <option value="Lainnya">Bantuan Lainnya</option>
-                  </select>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-bold text-slate-700">
+                      Jenis Program Bantuan
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsCustomJenis(!isCustomJenis);
+                        if (!isCustomJenis) {
+                          setCustomJenisText('');
+                        }
+                      }}
+                      className="text-[10px] font-bold text-[#0B5D3F] hover:underline cursor-pointer"
+                    >
+                      {isCustomJenis ? '&larr; Pilih Pilihan Cepat' : '+ Ketik Nama Manual'}
+                    </button>
+                  </div>
+
+                  {!isCustomJenis ? (
+                    <select
+                      value={jenisBantuan}
+                      onChange={(e) => {
+                        if (e.target.value === '__custom__') {
+                          setIsCustomJenis(true);
+                          setCustomJenisText('');
+                        } else {
+                          setJenisBantuan(e.target.value);
+                        }
+                      }}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-[#0B5D3F] focus:border-[#0B5D3F] outline-hidden cursor-pointer"
+                    >
+                      <option value="BPNT (Bantuan Pangan Non Tunai)">BPNT (Bantuan Pangan Non Tunai)</option>
+                      <option value="PKH (Program Keluarga Harapan)">PKH (Program Keluarga Harapan)</option>
+                      <option value="Bansos Tunai / BLT Desa">Bansos Tunai / BLT Desa</option>
+                      <option value="Sembako Beras & Pangan">Sembako Beras & Pangan</option>
+                      <option value="Bantuan Lansia Disabilitas">Bantuan Lansia Disabilitas</option>
+                      <option value="KIP / PIP Siswa">KIP / PIP Siswa</option>
+                      <option value="Bantuan RTLH (Bedah Rumah)">Bantuan RTLH (Bedah Rumah)</option>
+                      <option value="Bansos Minyak Goreng & Sembako">Bansos Minyak Goreng & Sembako</option>
+                      <option value="Bantuan Pangan Cadangan Beras (CPP)">Bantuan Pangan Cadangan Beras (CPP)</option>
+                      <option value="BLT Mitigasi Risiko Pangan / El Nino">BLT Mitigasi Risiko Pangan / El Nino</option>
+                      <option value="__custom__">+ Tulis Nama Program Lainnya (Ketik Manual)...</option>
+                    </select>
+                  ) : (
+                    <div className="space-y-1">
+                      <input
+                        type="text"
+                        required
+                        value={customJenisText}
+                        onChange={(e) => setCustomJenisText(e.target.value)}
+                        placeholder="Ketik nama program (misal: Bantuan Bedah Rumah RTLH, BLT El Nino, dll)"
+                        className="w-full rounded-xl border-2 border-emerald-500 bg-emerald-50/40 px-3 py-2 text-xs font-bold text-slate-900 focus:border-[#0B5D3F] outline-hidden placeholder:font-normal placeholder:text-slate-400"
+                        autoFocus
+                      />
+                      <p className="text-[10px] text-emerald-800 font-medium">
+                        Nama program bantuan manual akan tersimpan akurat & rapi.
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 <div>

@@ -1,60 +1,72 @@
 import React, { useState, useEffect } from 'react';
 import { X, Megaphone, Send, Check, Sparkles, Calendar, Clock, MapPin, FileText, RefreshCw } from 'lucide-react';
-import { PengumumanRT } from '../types';
+import { PengumumanRT, PengaturanKas } from '../types';
 
 interface PengumumanModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (p: Omit<PengumumanRT, 'id'>) => void;
+  pengaturanKas?: PengaturanKas;
 }
 
 export const PengumumanModal: React.FC<PengumumanModalProps> = ({
   isOpen,
   onClose,
   onSave,
+  pengaturanKas,
 }) => {
+  const profilRT = pengaturanKas?.profilRT;
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
+  const judulKop = profilRT?.judulKopSurat || `PENGURUS RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
+  const alamatKop = profilRT?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} ${profilRT?.kodePos || '53183'}`;
+  const namaKetua = pengaturanKas?.kontakKetuaRT?.nama || 'Bpk. Suwardi';
+
   // Preset topics for quick 1-click selection
   const presetTopik = [
     {
       topik: 'Kerja Bakti Massal & Bersih Lingkungan',
       kategori: 'Kegiatan' as const,
       waktu: '07.00 WIB s/d selesai',
-      tempat: 'Pos Kamling RT 08 & Sepanjang Jalan Gang',
+      tempat: `Pos Kamling RT ${rtStr} & Sepanjang Jalan Gang`,
       catatan: 'Membawa alat kerja bakti (cangkul, sabit, sapu lidi, dan karung sampah).',
     },
     {
-      topik: 'Penarikan Iuran Kas RT & Kas Kematian (Pembelian Kain Mori)',
+      topik: `Penarikan Iuran Kas RT & Kas Kematian (Pembelian Kain Mori)`,
       kategori: 'Iuran' as const,
       waktu: 'Pukul 19.30 - 21.00 WIB',
       tempat: 'Rumah Bapak Bendahara / Petugas Dasawisma',
-      catatan: 'Iuran Kas RT Rp 20.000 + Kas Kematian Rp 10.000 (dapat dibayarkan bulanan Rp 30.000 atau setahun langsung Rp 360.000).',
+      catatan: `Iuran Kas RT Rp 25.000 + Kas Kematian Rp 10.000 (dapat dibayar bulanan atau setahun langsung).`,
     },
     {
       topik: 'Santunan Duka & Pemulasaraan Jenazah Warga',
       kategori: 'Sosial' as const,
       waktu: 'Segera / Hari Ini',
       tempat: 'Rumah Duka Keluarga Almarhum',
-      catatan: 'Penyaluran santunan duka dan pengadaan kain mori serta perlengkapan pemakaman dari Kas Kematian RT 08.',
+      catatan: `Penyaluran santunan duka dan pengadaan kain mori serta perlengkapan pemakaman dari Kas Kematian RT ${rtStr}.`,
     },
     {
       topik: 'Pembaruan Jadwal Ronda Malam / Siskamling',
       kategori: 'Keamanan' as const,
       waktu: 'Pukul 22.00 - 04.00 WIB',
-      tempat: 'Pos Kamling RT 08 RW 05',
+      tempat: `Pos Kamling RT ${rtStr} RW ${rwStr}`,
       catatan: 'Daftar regu jaga telah diperbarui. Mohon hadir tepat waktu demi ketertiban bersama.',
     },
     {
       topik: 'Layanan Posyandu Balita & Posbindu Lansia',
       kategori: 'Sosial' as const,
       waktu: '08.30 - 11.30 WIB',
-      tempat: 'Balai Warga RT 08 RW 05',
+      tempat: `Balai Warga RT ${rtStr} RW ${rwStr}`,
       catatan: 'Membawa buku KIA/KMS. Tersedia timbang berat badan, imunisasi, dan PMT gizi seimbang.',
     },
     {
       topik: 'Rapat RT & Musyawarah Rembug Warga',
       kategori: 'Umum' as const,
       waktu: 'Pukul 20.00 WIB s/d selesai',
-      tempat: 'Kediaman Ketua RT 08 (Bpk. Suwardi)',
+      tempat: `Kediaman Ketua RT ${rtStr} (${namaKetua})`,
       catatan: 'Agenda: Laporan pertanggungjawaban kas dan perencanaan pembangunan sarana RT.',
     },
   ];
@@ -63,12 +75,12 @@ export const PengumumanModal: React.FC<PengumumanModalProps> = ({
   const [tentang, setTentang] = useState(presetTopik[0].topik);
   const [kategori, setKategori] = useState<'Kegiatan' | 'Iuran' | 'Keamanan' | 'Sosial' | 'Umum'>(presetTopik[0].kategori);
   
-  // Waktu & Tempat (Hanya ini yang diatur oleh Admin!)
+  // Waktu & Tempat
   const [hariTanggal, setHariTanggal] = useState('Minggu, 25 Oktober 2026');
   const [waktu, setWaktu] = useState(presetTopik[0].waktu);
   const [tempat, setTempat] = useState(presetTopik[0].tempat);
   const [catatan, setCatatan] = useState(presetTopik[0].catatan);
-  const [penulis, setPenulis] = useState('Ketua RT 08 (Bpk. Suwardi)');
+  const [penulis, setPenulis] = useState(`Ketua RT ${rtStr} (${namaKetua})`);
   const [penting, setPenting] = useState(true);
 
   // Tanggal berakhir (auto-expired pengumuman)
@@ -82,7 +94,7 @@ export const PengumumanModal: React.FC<PengumumanModalProps> = ({
 
   // Generate official letter body automatically based on "Tentang Apa" and "Waktu"
   const generateOfficialText = (t: string, ht: string, w: string, tmp: string, cat: string) => {
-    return `Sehubungan dengan agenda kemaslahatan dan ketertiban lingkungan di wilayah RT 08 RW 05 Desa Kotayasa, melalui surat edaran resmi ini Pengurus RT memberitahukan kepada seluruh warga perihal "${t}".
+    return `Sehubungan dengan agenda kemaslahatan dan ketertiban lingkungan di wilayah RT ${rtStr} RW ${rwStr} ${desaStr}, melalui surat edaran resmi ini Pengurus RT memberitahukan kepada seluruh warga perihal "${t}".
 
 Kegiatan/agenda tersebut akan dilaksanakan pada:
 • Hari / Tanggal : ${ht}
@@ -90,7 +102,7 @@ Kegiatan/agenda tersebut akan dilaksanakan pada:
 • Tempat / Lokasi : ${tmp}
 • Keterangan Khusus : ${cat || 'Partisipasi aktif seluruh warga sangat diharapkan.'}
 
-Mengingat pentingnya agenda ini bagi kenyamanan, keharmonisan, dan keterbukaan lingkungan RT 08 RW 05 Desa Kotayasa, dimohon kehadiran serta kerja sama yang baik dari seluruh kepala keluarga atau perwakilan warga.
+Mengingat pentingnya agenda ini bagi kenyamanan, keharmonisan, dan keterbukaan lingkungan RT ${rtStr} RW ${rwStr} ${desaStr}, dimohon kehadiran serta kerja sama yang baik dari seluruh kepala keluarga atau perwakilan warga.
 
 Demikian pengumuman resmi ini kami sampaikan. Atas perhatian, kesadaran, dan partisipasinya, kami ucapkan terima kasih yang sebesar-besarnya.`;
   };
@@ -100,7 +112,7 @@ Demikian pengumuman resmi ini kami sampaikan. Atas perhatian, kesadaran, dan par
     if (isAutoGenerated) {
       setIsiSurat(generateOfficialText(tentang, hariTanggal, waktu, tempat, catatan));
     }
-  }, [tentang, hariTanggal, waktu, tempat, catatan, isAutoGenerated]);
+  }, [tentang, hariTanggal, waktu, tempat, catatan, isAutoGenerated, rtStr, rwStr, desaStr]);
 
   const handleSelectPreset = (topikName: string) => {
     setSelectedPreset(topikName);
@@ -297,13 +309,13 @@ Demikian pengumuman resmi ini kami sampaikan. Atas perhatian, kesadaran, dan par
           {/* Pratinjau Kop Surat Resmi */}
           <div className="rounded-2xl bg-slate-50 p-3 border border-slate-200 text-center">
             <p className="text-[9px] font-black uppercase tracking-wider text-slate-500">
-              PEMERINTAH KABUPATEN BANYUMAS &bull; KECAMATAN SUMBANG
+              PEMERINTAH {kabStr.toUpperCase()} &bull; {kecStr.toUpperCase()}
             </p>
             <p className="text-xs font-black uppercase text-[#0B5D3F] mt-0.5">
-              RUKUN TETANGGA 08 RUKUN WARGA 05 DESA KOTAYASA
+              {judulKop.toUpperCase()} {desaStr.toUpperCase()}
             </p>
             <p className="text-[8px] text-slate-400 mt-0.5">
-              Sekretariat: RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas 53183
+              {alamatKop}
             </p>
             <div className="h-[1.5px] bg-[#0B5D3F] mt-1.5 w-full" />
             <div className="h-[0.5px] bg-[#0B5D3F] mt-[1.5px] w-full" />

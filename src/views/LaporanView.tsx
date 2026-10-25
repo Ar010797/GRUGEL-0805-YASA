@@ -8,6 +8,8 @@ interface LaporanViewProps {
   wargaList: Warga[];
   bantuanList?: BantuanPemerintah[];
   onBack: () => void;
+  pengaturanKas?: import('../types').PengaturanKas;
+  tahun?: number;
 }
 
 export const LaporanView: React.FC<LaporanViewProps> = ({
@@ -15,7 +17,15 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
   wargaList,
   bantuanList = [],
   onBack,
+  pengaturanKas,
+  tahun = 2026,
 }) => {
+  const profilRT = pengaturanKas?.profilRT;
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const tahunStr = String(tahun);
+
   const totalMasuk = transactions
     .filter((t) => t.tipe === 'masuk')
     .reduce((acc, t) => acc + t.nominal, 0);
@@ -50,14 +60,14 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
           </button>
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Laporan Kas & Rekapitulasi</h1>
-            <p className="text-xs text-slate-500">Transparansi Keuangan RT 08 RW 05 Desa Kotayasa</p>
+            <p className="text-xs text-slate-500">Transparansi Keuangan RT {rtStr} RW {rwStr} {desaStr}</p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           {/* Download Rekap Tahunan PDF */}
           <button
-            onClick={() => exportRekapTahunanPDF(transactions, wargaList, '2026')}
+            onClick={() => exportRekapTahunanPDF(transactions, wargaList, tahunStr, profilRT)}
             className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] px-3.5 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#084831] transition-all cursor-pointer"
             title="Download Dokumen PDF Rekapitulasi Tahunan Lengkap"
           >
@@ -67,7 +77,7 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
 
           {/* Download PDF Data Warga Per KK & Bansos */}
           <button
-            onClick={() => exportDataWargaPerKK_PDF(wargaList, bantuanList)}
+            onClick={() => exportDataWargaPerKK_PDF(wargaList, bantuanList, profilRT)}
             className="flex items-center gap-1.5 rounded-xl bg-emerald-800 px-3.5 py-2 text-xs font-bold text-white shadow-xs hover:bg-emerald-900 transition-all cursor-pointer"
             title="Download Dokumen PDF Data Seluruh Warga Per Kartu Keluarga Lengkap dengan Bantuan Sosial"
           >
@@ -77,7 +87,7 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
 
           {/* Download Rekap Pengeluaran PDF */}
           <button
-            onClick={() => exportPengeluaranPDF(transactions, '2026')}
+            onClick={() => exportPengeluaranPDF(transactions, tahunStr)}
             className="flex items-center gap-1.5 rounded-xl bg-[#EF4444] px-3.5 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#DC2626] transition-all cursor-pointer"
             title="Download Dokumen PDF Khusus Pengeluaran Kas"
           >

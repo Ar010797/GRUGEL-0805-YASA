@@ -172,53 +172,66 @@ export const StatusIuranView: React.FC<StatusIuranViewProps> = ({
             </button>
           </div>
         ) : (
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200/80">
-              <tr>
-                <th className="py-3.5 px-6">No</th>
-                <th className="py-3.5 px-6">Nama Kepala Keluarga</th>
-                <th className="py-3.5 px-6">No. Rumah</th>
-                <th className="py-3.5 px-6">RT</th>
-                <th className="py-3.5 px-6">Status Pembayaran</th>
-                <th className="py-3.5 px-6 text-right">Aksi Cepat</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filtered.map((w, index) => (
-                <tr key={w.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="py-3.5 px-6 text-slate-400 font-medium">{index + 1}</td>
-                  <td className="py-3.5 px-6 font-bold text-slate-800">{w.nama}</td>
-                  <td className="py-3.5 px-6 text-slate-600">Rumah {w.noRumah}</td>
-                  <td className="py-3.5 px-6 text-slate-500">RT {w.rt}</td>
-                  <td className="py-3.5 px-6">
-                    {w.statusIuran === 'Sudah' ? (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-bold text-emerald-700 border border-emerald-200">
-                        <Check size={12} strokeWidth={3} />
-                        Sudah Bayar
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-3 py-1 text-[11px] font-bold text-orange-600 border border-orange-200">
-                        <Clock size={12} />
-                        Belum Bayar
-                      </span>
-                    )}
-                  </td>
-                  <td className="py-3.5 px-6 text-right">
-                    <button
-                      onClick={() => onToggleStatus(w.id)}
-                      className={`rounded-lg px-3 py-1 text-[11px] font-bold transition-all cursor-pointer ${
-                        w.statusIuran === 'Sudah'
-                          ? 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                          : 'bg-[#10B981] text-white hover:bg-[#059669]'
-                      }`}
-                    >
-                      {w.statusIuran === 'Sudah' ? 'Tandai Belum' : 'Tandai Sudah Lunas'}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div>
+            {/* Petunjuk Geser Layar HP untuk Responsivitas Mobile */}
+            <div className="sm:hidden flex items-center justify-between text-[11px] font-bold text-emerald-800 bg-[#E8F5EE] px-3.5 py-2 border-b border-emerald-200">
+              <span className="flex items-center gap-1.5">
+                <span className="text-sm font-black">&larr; &rarr;</span>
+                <span>Geser tabel ke samping untuk melihat seluruh status</span>
+              </span>
+              <span className="text-[10px] text-emerald-700 font-semibold">{filtered.length} KK</span>
+            </div>
+
+            <div className="overflow-x-auto touch-pan-x scrollbar-thin">
+              <table className="w-full text-left text-xs min-w-[650px]">
+                <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200/80">
+                  <tr>
+                    <th className="py-3.5 px-6">No</th>
+                    <th className="py-3.5 px-6">Nama Kepala Keluarga</th>
+                    <th className="py-3.5 px-6">No. Rumah</th>
+                    <th className="py-3.5 px-6">RT</th>
+                    <th className="py-3.5 px-6">Status Pembayaran</th>
+                    <th className="py-3.5 px-6 text-right">Aksi Cepat</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filtered.map((w, index) => (
+                    <tr key={w.id} className="hover:bg-slate-50 transition-colors">
+                      <td className="py-3.5 px-6 text-slate-400 font-medium">{index + 1}</td>
+                      <td className="py-3.5 px-6 font-bold text-slate-800">{w.nama}</td>
+                      <td className="py-3.5 px-6 text-slate-600">Rumah {w.noRumah}</td>
+                      <td className="py-3.5 px-6 text-slate-500">RT {w.rt}</td>
+                      <td className="py-3.5 px-6">
+                        {w.statusIuran === 'Sudah' ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-bold text-emerald-700 border border-emerald-200">
+                            <Check size={12} strokeWidth={3} />
+                            Sudah Bayar
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-3 py-1 text-[11px] font-bold text-orange-600 border border-orange-200">
+                            <Clock size={12} />
+                            Belum Bayar
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-6 text-right">
+                        <button
+                          onClick={() => onToggleStatus(w.id)}
+                          className={`rounded-lg px-3 py-1 text-[11px] font-bold transition-all cursor-pointer ${
+                            w.statusIuran === 'Sudah'
+                              ? 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                              : 'bg-[#10B981] text-white hover:bg-[#059669]'
+                          }`}
+                        >
+                          {w.statusIuran === 'Sudah' ? 'Tandai Belum' : 'Tandai Sudah Lunas'}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         )}
       </div>
     </div>

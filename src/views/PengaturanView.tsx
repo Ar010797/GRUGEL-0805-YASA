@@ -17,6 +17,7 @@ import {
   User,
   CheckCircle2,
   AlertCircle,
+  Landmark,
 } from 'lucide-react';
 import { PengaturanKas, AuthUser } from '../types';
 
@@ -53,6 +54,20 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
     (pengaturanKas.nominalKematianTahunan || 120000).toString()
   );
 
+  // Profil Identitas RT & Kop Surat
+  const [namaRT, setNamaRT] = useState(pengaturanKas.profilRT?.namaRT || '08');
+  const [namaRW, setNamaRW] = useState(pengaturanKas.profilRT?.namaRW || '05');
+  const [desa, setDesa] = useState(pengaturanKas.profilRT?.desa || 'Desa Kotayasa');
+  const [kecamatan, setKecamatan] = useState(pengaturanKas.profilRT?.kecamatan || 'Kecamatan Sumbang');
+  const [kabupaten, setKabupaten] = useState(pengaturanKas.profilRT?.kabupaten || 'Kabupaten Banyumas');
+  const [kodePos, setKodePos] = useState(pengaturanKas.profilRT?.kodePos || '53183');
+  const [alamatSekretariat, setAlamatSekretariat] = useState(
+    pengaturanKas.profilRT?.alamatSekretariat || 'RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas 53183'
+  );
+  const [judulKopSurat, setJudulKopSurat] = useState(
+    pengaturanKas.profilRT?.judulKopSurat || 'PENGURUS RUKUN TETANGGA 08 RUKUN WARGA 05'
+  );
+
   // Kontak Pengurus RT
   const [namaKetuaRT, setNamaKetuaRT] = useState(pengaturanKas.kontakKetuaRT?.nama || 'Bpk. Suwardi');
   const [telpKetuaRT, setTelpKetuaRT] = useState(pengaturanKas.kontakKetuaRT?.telp || '0812-3456-7890');
@@ -86,6 +101,17 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
       nominalKematianBulanan: numKematianBulanan,
       kontakKetuaRT: { nama: namaKetuaRT, telp: telpKetuaRT },
       kontakBendahara: { nama: namaBendahara, telp: telpBendahara },
+      profilRT: {
+        namaRT,
+        namaRW,
+        desa,
+        kecamatan,
+        kabupaten,
+        kodePos,
+        alamatSekretariat,
+        judulKopSurat,
+        sebutanWilayah: `RT ${namaRT} RW ${namaRW} ${desa}`,
+      },
     });
     setSavedSettings(true);
     setTimeout(() => setSavedSettings(false), 2500);
@@ -272,7 +298,152 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
         </div>
       ) : (
         /* MODE ADMIN: PENGATURAN LENGKAP */
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="space-y-6">
+          {/* KARTU PROFIL RT & KOP SURAT RESMI */}
+          <div className="rounded-3xl bg-white p-6 shadow-xs border border-slate-200 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Landmark size={18} className="text-[#0B5D3F]" />
+                <span>Profil Rukun Tetangga (RT) & Format Kop Surat Otomatis</span>
+              </h2>
+              <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-2.5 py-0.5 rounded-full">
+                Kop Surat Resmi PDF
+              </span>
+            </div>
+
+            <p className="text-xs text-slate-500 leading-relaxed">
+              Sesuaikan identitas RT yang Anda kelola. Data ini otomatis digunakan untuk <strong>Kop Surat Edaran Resmi, Stempel Digital, Tanda Tangan, dan Export PDF</strong>.
+            </p>
+
+            {/* Form Fields Identitas RT */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div>
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">Nomor RT</label>
+                <input
+                  type="text"
+                  required
+                  value={namaRT}
+                  onChange={(e) => setNamaRT(e.target.value)}
+                  placeholder="08"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800 bg-slate-50 focus:bg-white focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">Nomor RW</label>
+                <input
+                  type="text"
+                  required
+                  value={namaRW}
+                  onChange={(e) => setNamaRW(e.target.value)}
+                  placeholder="05"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800 bg-slate-50 focus:bg-white focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+
+              <div className="col-span-2">
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">Nama Desa / Kelurahan</label>
+                <input
+                  type="text"
+                  required
+                  value={desa}
+                  onChange={(e) => setDesa(e.target.value)}
+                  placeholder="Desa Kotayasa"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800 bg-slate-50 focus:bg-white focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+
+              <div className="col-span-2">
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">Kecamatan</label>
+                <input
+                  type="text"
+                  required
+                  value={kecamatan}
+                  onChange={(e) => setKecamatan(e.target.value)}
+                  placeholder="Kecamatan Sumbang"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-800 bg-slate-50 focus:bg-white focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+
+              <div className="col-span-2">
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">Kabupaten / Kota</label>
+                <input
+                  type="text"
+                  required
+                  value={kabupaten}
+                  onChange={(e) => setKabupaten(e.target.value)}
+                  placeholder="Kabupaten Banyumas"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-800 bg-slate-50 focus:bg-white focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">Judul Instansi Kop Surat Resmi</label>
+                <input
+                  type="text"
+                  required
+                  value={judulKopSurat}
+                  onChange={(e) => setJudulKopSurat(e.target.value)}
+                  placeholder="PENGURUS RUKUN TETANGGA 08 RUKUN WARGA 05"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-[#0B5D3F] bg-slate-50 focus:bg-white focus:border-[#0B5D3F] outline-hidden uppercase"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">Kode Pos</label>
+                <input
+                  type="text"
+                  value={kodePos}
+                  onChange={(e) => setKodePos(e.target.value)}
+                  placeholder="53183"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 bg-slate-50 focus:bg-white focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="text-[11px] font-bold text-slate-700 block mb-1">Alamat Sekretariat / Pos Kamling RT</label>
+              <input
+                type="text"
+                required
+                value={alamatSekretariat}
+                onChange={(e) => setAlamatSekretariat(e.target.value)}
+                placeholder="RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas 53183"
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 bg-slate-50 focus:bg-white focus:border-[#0B5D3F] outline-hidden"
+              />
+            </div>
+
+            {/* Live Pratinjau Kop Surat Resmi */}
+            <div className="rounded-2xl bg-emerald-50/70 p-4 border border-emerald-200 text-center space-y-1">
+              <span className="text-[9px] font-black uppercase tracking-wider text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-md inline-block mb-1">
+                Pratinjau Kop Surat Resmi Terkini
+              </span>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-700">
+                PEMERINTAH {kabupaten.toUpperCase()} &bull; {kecamatan.toUpperCase()}
+              </p>
+              <p className="text-xs sm:text-sm font-black uppercase text-[#0B5D3F]">
+                {judulKopSurat.toUpperCase()} {desa.toUpperCase()}
+              </p>
+              <p className="text-[9px] text-slate-500">
+                {alamatSekretariat}
+              </p>
+              <div className="h-[1.5px] bg-[#0B5D3F] mt-1.5 w-full" />
+              <div className="h-[0.5px] bg-[#0B5D3F] mt-[1.5px] w-full" />
+            </div>
+
+            <button
+              type="button"
+              onClick={handleSaveTarif}
+              className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#0B5D3F] py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#084831] cursor-pointer"
+            >
+              <Save size={15} />
+              <span>Simpan Profil RT & Format Kop Surat</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* PANEL 1: PENGATURAN NOMINAL TAHUNAN & AUTO BULANAN */}
           <div className="space-y-6">
             <form onSubmit={handleSaveTarif} className="rounded-3xl bg-white p-6 shadow-xs border border-slate-200 space-y-4">
@@ -567,6 +738,7 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
             </div>
           </div>
         </div>
+      </div>
       )}
     </div>
   );
