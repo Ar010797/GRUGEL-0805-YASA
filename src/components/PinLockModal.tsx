@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldCheck, Lock, AlertTriangle, Delete, PhoneCall, HelpCircle, User, Sparkles } from 'lucide-react';
+import { ShieldCheck, Lock, AlertTriangle, Delete, PhoneCall, HelpCircle, User, Sparkles, Eye, EyeOff } from 'lucide-react';
 import { HouseLogo } from './HouseLogo';
 import { AuthUser, PengaturanKas } from '../types';
 
@@ -21,6 +21,7 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
   onOpenHelp,
 }) => {
   const [pinInput, setPinInput] = useState<string>('');
+  const [showPin, setShowPin] = useState<boolean>(false);
   const [errorCount, setErrorCount] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [lockoutSeconds, setLockoutSeconds] = useState<number>(0);
@@ -97,21 +98,36 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
           </div>
         )}
 
-        {/* PIN Dots (6 digits) */}
-        <div className="my-6 flex justify-center gap-3">
-          {[0, 1, 2, 3, 4, 5].map((idx) => {
-            const isFilled = idx < pinInput.length;
-            return (
-              <div
-                key={idx}
-                className={`h-4 w-4 rounded-full transition-all duration-200 ${
-                  isFilled
-                    ? 'scale-110 bg-[#0B5D3F] ring-4 ring-emerald-200'
-                    : 'bg-slate-200'
-                }`}
-              />
-            );
-          })}
+        {/* PIN Indicators (6 digits) */}
+        <div className="my-5 flex flex-col items-center gap-2.5">
+          <div className="flex justify-center gap-2.5">
+            {[0, 1, 2, 3, 4, 5].map((idx) => {
+              const isFilled = idx < pinInput.length;
+              return (
+                <div
+                  key={idx}
+                  className={`h-10 w-9 rounded-xl flex items-center justify-center font-mono font-bold text-base transition-all duration-200 ${
+                    isFilled
+                      ? 'scale-105 bg-[#E8F5EE] text-[#0B5D3F] border border-emerald-300 ring-2 ring-emerald-200'
+                      : 'bg-slate-100 text-slate-300 border border-slate-200'
+                  }`}
+                >
+                  {isFilled ? (showPin ? pinInput[idx] : '●') : ''}
+                </div>
+              );
+            })}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowPin(!showPin)}
+            className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-[#0B5D3F] font-semibold transition-colors cursor-pointer py-0.5 px-2 rounded-lg hover:bg-slate-100"
+            title={showPin ? 'Tutup PIN' : 'Lihat PIN'}
+            aria-label={showPin ? 'Tutup PIN' : 'Lihat PIN'}
+          >
+            {showPin ? <EyeOff size={14} /> : <Eye size={14} />}
+            <span>{showPin ? 'Tutup PIN' : 'Lihat PIN'}</span>
+          </button>
         </div>
 
         {/* Error / Lockout Alert */}

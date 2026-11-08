@@ -14,10 +14,11 @@ import {
   Lock,
   KeyRound,
   PhoneCall,
-  User,
   CheckCircle2,
   AlertCircle,
   Landmark,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { PengaturanKas, AuthUser } from '../types';
 import { ConfirmationModal } from '../components/ConfirmationModal';
@@ -96,6 +97,9 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
   const [pinLama, setPinLama] = useState('');
   const [pinBaru, setPinBaru] = useState('');
   const [pinKonfirmasi, setPinKonfirmasi] = useState('');
+  const [showPinLama, setShowPinLama] = useState(false);
+  const [showPinBaru, setShowPinBaru] = useState(false);
+  const [showPinKonfirmasi, setShowPinKonfirmasi] = useState(false);
   const [pinMessage, setPinMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   const [savedSettings, setSavedSettings] = useState(false);
@@ -236,16 +240,27 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
               <label className="text-xs font-bold text-slate-700 block mb-1.5">
                 PIN Lama Anda
               </label>
-              <input
-                type="password"
-                inputMode="numeric"
-                maxLength={6}
-                required
-                value={pinLama}
-                onChange={(e) => setPinLama(e.target.value.replace(/\D/g, ''))}
-                placeholder="Ketik 6 digit PIN lama (Awal: 123456)"
-                className="w-full rounded-2xl border border-slate-300 px-4 py-3 text-sm font-mono font-bold text-slate-800 focus:border-[#0B5D3F] focus:ring-2 focus:ring-[#0B5D3F]/10 outline-hidden"
-              />
+              <div className="relative">
+                <input
+                  type={showPinLama ? 'text' : 'password'}
+                  inputMode="numeric"
+                  maxLength={6}
+                  required
+                  value={pinLama}
+                  onChange={(e) => setPinLama(e.target.value.replace(/\D/g, ''))}
+                  placeholder="Ketik 6 digit PIN lama (Awal: 123456)"
+                  className="w-full rounded-2xl border border-slate-300 pl-4 pr-11 py-3 text-sm font-mono font-bold text-slate-800 focus:border-[#0B5D3F] focus:ring-2 focus:ring-[#0B5D3F]/10 outline-hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPinLama(!showPinLama)}
+                  className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                  title={showPinLama ? 'Tutup PIN' : 'Lihat PIN'}
+                  aria-label={showPinLama ? 'Tutup PIN' : 'Lihat PIN'}
+                >
+                  {showPinLama ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -253,32 +268,54 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
                 <label className="text-xs font-bold text-slate-700 block mb-1.5">
                   PIN Baru (6 Digit Angka)
                 </label>
-                <input
-                  type="password"
-                  inputMode="numeric"
-                  maxLength={6}
-                  required
-                  value={pinBaru}
-                  onChange={(e) => setPinBaru(e.target.value.replace(/\D/g, ''))}
-                  placeholder="6 digit angka baru"
-                  className="w-full rounded-2xl border border-slate-300 px-4 py-3 text-sm font-mono font-bold text-slate-800 focus:border-[#0B5D3F] focus:ring-2 focus:ring-[#0B5D3F]/10 outline-hidden"
-                />
+                <div className="relative">
+                  <input
+                    type={showPinBaru ? 'text' : 'password'}
+                    inputMode="numeric"
+                    maxLength={6}
+                    required
+                    value={pinBaru}
+                    onChange={(e) => setPinBaru(e.target.value.replace(/\D/g, ''))}
+                    placeholder="6 digit angka baru"
+                    className="w-full rounded-2xl border border-slate-300 pl-4 pr-11 py-3 text-sm font-mono font-bold text-slate-800 focus:border-[#0B5D3F] focus:ring-2 focus:ring-[#0B5D3F]/10 outline-hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPinBaru(!showPinBaru)}
+                    className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                    title={showPinBaru ? 'Tutup PIN' : 'Lihat PIN'}
+                    aria-label={showPinBaru ? 'Tutup PIN' : 'Lihat PIN'}
+                  >
+                    {showPinBaru ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
               </div>
 
               <div>
                 <label className="text-xs font-bold text-slate-700 block mb-1.5">
                   Konfirmasi PIN Baru
                 </label>
-                <input
-                  type="password"
-                  inputMode="numeric"
-                  maxLength={6}
-                  required
-                  value={pinKonfirmasi}
-                  onChange={(e) => setPinKonfirmasi(e.target.value.replace(/\D/g, ''))}
-                  placeholder="Ulangi 6 digit baru"
-                  className="w-full rounded-2xl border border-slate-300 px-4 py-3 text-sm font-mono font-bold text-slate-800 focus:border-[#0B5D3F] focus:ring-2 focus:ring-[#0B5D3F]/10 outline-hidden"
-                />
+                <div className="relative">
+                  <input
+                    type={showPinKonfirmasi ? 'text' : 'password'}
+                    inputMode="numeric"
+                    maxLength={6}
+                    required
+                    value={pinKonfirmasi}
+                    onChange={(e) => setPinKonfirmasi(e.target.value.replace(/\D/g, ''))}
+                    placeholder="Ulangi 6 digit baru"
+                    className="w-full rounded-2xl border border-slate-300 pl-4 pr-11 py-3 text-sm font-mono font-bold text-slate-800 focus:border-[#0B5D3F] focus:ring-2 focus:ring-[#0B5D3F]/10 outline-hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPinKonfirmasi(!showPinKonfirmasi)}
+                    className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                    title={showPinKonfirmasi ? 'Tutup PIN' : 'Lihat PIN'}
+                    aria-label={showPinKonfirmasi ? 'Tutup PIN' : 'Lihat PIN'}
+                  >
+                    {showPinKonfirmasi ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -662,15 +699,26 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
                 <label className="text-xs font-bold text-slate-700 block mb-1">
                   PIN Lama Anda (Default Awal: 123456)
                 </label>
-                <input
-                  type="password"
-                  maxLength={6}
-                  required
-                  value={pinLama}
-                  onChange={(e) => setPinLama(e.target.value.replace(/\D/g, ''))}
-                  placeholder="6 digit PIN lama"
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
-                />
+                <div className="relative">
+                  <input
+                    type={showPinLama ? 'text' : 'password'}
+                    maxLength={6}
+                    required
+                    value={pinLama}
+                    onChange={(e) => setPinLama(e.target.value.replace(/\D/g, ''))}
+                    placeholder="6 digit PIN lama"
+                    className="w-full rounded-xl border border-slate-200 pl-3 pr-10 py-2 text-xs font-mono font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPinLama(!showPinLama)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                    title={showPinLama ? 'Tutup PIN' : 'Lihat PIN'}
+                    aria-label={showPinLama ? 'Tutup PIN' : 'Lihat PIN'}
+                  >
+                    {showPinLama ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -678,30 +726,52 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
                   <label className="text-xs font-bold text-slate-700 block mb-1">
                     PIN Baru (6 Digit)
                   </label>
-                  <input
-                    type="password"
-                    maxLength={6}
-                    required
-                    value={pinBaru}
-                    onChange={(e) => setPinBaru(e.target.value.replace(/\D/g, ''))}
-                    placeholder="6 digit angka baru"
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
-                  />
+                  <div className="relative">
+                    <input
+                      type={showPinBaru ? 'text' : 'password'}
+                      maxLength={6}
+                      required
+                      value={pinBaru}
+                      onChange={(e) => setPinBaru(e.target.value.replace(/\D/g, ''))}
+                      placeholder="6 digit angka baru"
+                      className="w-full rounded-xl border border-slate-200 pl-3 pr-10 py-2 text-xs font-mono font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPinBaru(!showPinBaru)}
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                      title={showPinBaru ? 'Tutup PIN' : 'Lihat PIN'}
+                      aria-label={showPinBaru ? 'Tutup PIN' : 'Lihat PIN'}
+                    >
+                      {showPinBaru ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
                 </div>
 
                 <div>
                   <label className="text-xs font-bold text-slate-700 block mb-1">
                     Konfirmasi PIN Baru
                   </label>
-                  <input
-                    type="password"
-                    maxLength={6}
-                    required
-                    value={pinKonfirmasi}
-                    onChange={(e) => setPinKonfirmasi(e.target.value.replace(/\D/g, ''))}
-                    placeholder="Ulangi 6 digit"
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
-                  />
+                  <div className="relative">
+                    <input
+                      type={showPinKonfirmasi ? 'text' : 'password'}
+                      maxLength={6}
+                      required
+                      value={pinKonfirmasi}
+                      onChange={(e) => setPinKonfirmasi(e.target.value.replace(/\D/g, ''))}
+                      placeholder="Ulangi 6 digit"
+                      className="w-full rounded-xl border border-slate-200 pl-3 pr-10 py-2 text-xs font-mono font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPinKonfirmasi(!showPinKonfirmasi)}
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                      title={showPinKonfirmasi ? 'Tutup PIN' : 'Lihat PIN'}
+                      aria-label={showPinKonfirmasi ? 'Tutup PIN' : 'Lihat PIN'}
+                    >
+                      {showPinKonfirmasi ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
                 </div>
               </div>
 

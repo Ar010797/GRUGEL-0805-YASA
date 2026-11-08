@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check } from 'lucide-react';
+import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check, Eye, EyeOff } from 'lucide-react';
 import { AuthUser, Warga, AdminRTAccount } from '../types';
 import { HouseLogo } from './HouseLogo';
 
@@ -23,6 +23,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   // Default to 'warga' or 'admin' so Server tab is NOT visible by default to citizens
   const [activeTab, setActiveTab] = useState<'server' | 'admin' | 'warga'>('admin');
   const [showServerTab, setShowServerTab] = useState(false);
+
+  // Password visibility toggles
+  const [showServerPassword, setShowServerPassword] = useState(false);
+  const [showAdminPassword, setShowAdminPassword] = useState(false);
+  const [showWargaPassword, setShowWargaPassword] = useState(false);
 
   // Server form (Credentials: RW05GLEMPANG / Rw05glempang)
   const [serverUsername, setServerUsername] = useState('RW05GLEMPANG');
@@ -282,13 +287,22 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     <KeyRound size={16} />
                   </div>
                   <input
-                    type="password"
+                    type={showServerPassword ? 'text' : 'password'}
                     required
                     value={serverPassword}
                     onChange={(e) => setServerPassword(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 outline-hidden font-mono"
+                    className="w-full rounded-xl border border-slate-200 pl-10 pr-10 py-2.5 text-sm text-slate-800 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 outline-hidden font-mono"
                     placeholder="Password Server"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowServerPassword(!showServerPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
+                    title={showServerPassword ? 'Tutup Password' : 'Lihat Password'}
+                    aria-label={showServerPassword ? 'Tutup Password' : 'Lihat Password'}
+                  >
+                    {showServerPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
                 </div>
               </div>
 
@@ -347,13 +361,22 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     <KeyRound size={16} />
                   </div>
                   <input
-                    type="password"
+                    type={showAdminPassword ? 'text' : 'password'}
                     required
                     value={adminPassword}
                     onChange={(e) => setAdminPassword(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-mono"
+                    className="w-full rounded-xl border border-slate-200 pl-10 pr-10 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-mono"
                     placeholder="rt08rw05"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowAdminPassword(!showAdminPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                    title={showAdminPassword ? 'Tutup Password' : 'Lihat Password'}
+                    aria-label={showAdminPassword ? 'Tutup Password' : 'Lihat Password'}
+                  >
+                    {showAdminPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
                 </div>
                 <p className="mt-1 text-[11px] text-slate-400">
                   Default RT 08: Username: <strong className="text-slate-600">Admin</strong>, Password: <strong className="text-slate-600">rt08rw05</strong>
@@ -435,14 +458,23 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     <CreditCard size={16} />
                   </div>
                   <input
-                    type="password"
+                    type={showWargaPassword ? 'text' : 'password'}
                     maxLength={16}
                     required
                     value={wargaPasswordKK}
                     onChange={(e) => setWargaPasswordKK(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-mono tracking-wider"
+                    className="w-full rounded-xl border border-slate-200 pl-10 pr-10 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-mono tracking-wider"
                     placeholder="3302140508000001"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowWargaPassword(!showWargaPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                    title={showWargaPassword ? 'Tutup Password / No KK' : 'Lihat Password / No KK'}
+                    aria-label={showWargaPassword ? 'Tutup Password / No KK' : 'Lihat Password / No KK'}
+                  >
+                    {showWargaPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
                 </div>
                 <div className="mt-1 flex items-center justify-between text-[11px]">
                   <span className="text-slate-400">Harus 16 digit angka</span>

@@ -15,7 +15,6 @@ import {
   Download,
   Upload,
   RefreshCw,
-  Phone,
   Trash2,
   Edit,
   UserCheck,
@@ -23,6 +22,8 @@ import {
   Wallet,
   HeartHandshake,
   ArrowRight,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import {
   AdminRTAccount,
@@ -97,6 +98,9 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
   const [formNama, setFormNama] = useState('');
   const [formUsername, setFormUsername] = useState('');
   const [formPassword, setFormPassword] = useState('');
+  const [showFormPassword, setShowFormPassword] = useState(false);
+  const [showEditPassword, setShowEditPassword] = useState(false);
+  const [revealedPasswords, setRevealedPasswords] = useState<Record<string, boolean>>({});
   const [formRT, setFormRT] = useState('01');
   const [formRW, setFormRW] = useState('05');
   const [formKontak, setFormKontak] = useState('');
@@ -350,7 +354,23 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                         {acc.username}
                       </td>
                       <td className="py-3.5 px-4 font-mono text-slate-700 bg-slate-50/80 rounded-md">
-                        {acc.passwordHash}
+                        <div className="flex items-center justify-between gap-1.5 min-w-[120px]">
+                          <span>{revealedPasswords[acc.id] ? acc.passwordHash : '••••••••'}</span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setRevealedPasswords((prev) => ({
+                                ...prev,
+                                [acc.id]: !prev[acc.id],
+                              }))
+                            }
+                            className="p-1 text-slate-400 hover:text-[#0B5D3F] transition-colors cursor-pointer rounded"
+                            title={revealedPasswords[acc.id] ? 'Tutup Password' : 'Lihat Password'}
+                            aria-label={revealedPasswords[acc.id] ? 'Tutup Password' : 'Lihat Password'}
+                          >
+                            {revealedPasswords[acc.id] ? <EyeOff size={13} /> : <Eye size={13} />}
+                          </button>
+                        </div>
                       </td>
                       <td className="py-3.5 px-4 text-slate-600 font-medium">
                         {acc.kontak}
@@ -659,14 +679,25 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
 
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">Password Akses</label>
-                  <input
-                    type="text"
-                    required
-                    value={formPassword}
-                    onChange={(e) => setFormPassword(e.target.value)}
-                    placeholder={`rt${formRT}rw05`}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono text-slate-800"
-                  />
+                  <div className="relative">
+                    <input
+                      type={showFormPassword ? 'text' : 'password'}
+                      required
+                      value={formPassword}
+                      onChange={(e) => setFormPassword(e.target.value)}
+                      placeholder={`rt${formRT}rw05`}
+                      className="w-full rounded-xl border border-slate-200 pl-3 pr-9 py-2 text-xs font-mono text-slate-800"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowFormPassword(!showFormPassword)}
+                      className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-slate-400 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                      title={showFormPassword ? 'Tutup Password' : 'Lihat Password'}
+                      aria-label={showFormPassword ? 'Tutup Password' : 'Lihat Password'}
+                    >
+                      {showFormPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -790,13 +821,24 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
 
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">Password Akses Baru</label>
-                  <input
-                    type="text"
-                    required
-                    value={editPassword}
-                    onChange={(e) => setEditPassword(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono text-emerald-800 font-bold bg-emerald-50/50 focus:border-[#0B5D3F] outline-hidden"
-                  />
+                  <div className="relative">
+                    <input
+                      type={showEditPassword ? 'text' : 'password'}
+                      required
+                      value={editPassword}
+                      onChange={(e) => setEditPassword(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 pl-3 pr-9 py-2 text-xs font-mono text-emerald-800 font-bold bg-emerald-50/50 focus:border-[#0B5D3F] outline-hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowEditPassword(!showEditPassword)}
+                      className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-slate-400 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                      title={showEditPassword ? 'Tutup Password' : 'Lihat Password'}
+                      aria-label={showEditPassword ? 'Tutup Password' : 'Lihat Password'}
+                    >
+                      {showEditPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
                 </div>
               </div>
 
