@@ -54,6 +54,7 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
     message: string;
     targetName?: string;
     variant: 'danger' | 'warning' | 'info';
+    confirmText?: string;
     onConfirm: () => void;
   }>({
     isOpen: false,
@@ -730,45 +731,30 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
                 Baca Kebijakan Privasi Lengkap
               </button>
 
-              <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+              <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <h4 className="text-xs font-bold text-slate-700">Manajemen Data Simulasi</h4>
-                  <p className="text-[11px] text-slate-400">Reset ke kondisi kosong atau isi data contoh</p>
+                  <h4 className="text-xs font-bold text-slate-800">Reset & Pengosongan Data Aplikasi</h4>
+                  <p className="text-[11px] text-slate-400">
+                    Hapus seluruh data kas, warga, bansos, dan arsip untuk memulai pembukuan baru yang bersih.
+                  </p>
                 </div>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setConfirmDialog({
-                        isOpen: true,
-                        title: 'Reset Database Kosong',
-                        message: 'Peringatan! Tindakan ini akan mengosongkan seluruh data transaksi kas dan warga di memori. Apakah Anda yakin ingin melanjutkan?',
-                        targetName: 'Reset Seluruh Data Kas & Warga',
-                        variant: 'danger',
-                        onConfirm: onResetEmpty,
-                      });
-                    }}
-                    className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-100 cursor-pointer"
-                  >
-                    Reset Kosong
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setConfirmDialog({
-                        isOpen: true,
-                        title: 'Muat Data Contoh Simulasi',
-                        message: 'Tindakan ini akan memuat kembali daftar warga dan riwayat transaksi contoh standar RT 08 RW 05.',
-                        targetName: 'Data Simulasi Standar',
-                        variant: 'warning',
-                        onConfirm: onLoadSample,
-                      });
-                    }}
-                    className="rounded-xl bg-slate-100 hover:bg-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 cursor-pointer"
-                  >
-                    Isi Contoh
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirmDialog({
+                      isOpen: true,
+                      title: 'Reset Total & Hapus Seluruh Data',
+                      message: 'PERINGATAN KERAS! Tindakan ini akan menghapus permanen seluruh data warga, transaksi kas masuk/keluar, bansos, arsip dokumen, dan laporan bulanan baik dari memori perangkat maupun server backend. Data tidak dapat dipulihkan kembali. Apakah Anda yakin ingin melakukan reset total?',
+                      targetName: 'HAPUS PERMANEN SEMUA DATA APLIKASI',
+                      variant: 'danger',
+                      confirmText: 'Ya, Hapus Semua Data',
+                      onConfirm: onResetEmpty,
+                    });
+                  }}
+                  className="rounded-xl border border-rose-300 bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer shrink-0"
+                >
+                  Reset Total Semua Data
+                </button>
               </div>
             </div>
           </div>
@@ -785,6 +771,7 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
         message={confirmDialog.message}
         targetName={confirmDialog.targetName}
         variant={confirmDialog.variant}
+        confirmText={confirmDialog.confirmText}
       />
     </div>
   );

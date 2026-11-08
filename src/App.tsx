@@ -62,6 +62,7 @@ import { isPengumumanExpired } from './utils/security';
 import {
   loadAppData,
   saveAppData,
+  clearAppData,
   AppDatabaseSchema,
 } from './utils/cloudSync';
 
@@ -152,132 +153,14 @@ export default function App() {
     },
   });
 
-  // Transactions State
+  // Transactions State (Siap Pakai - Bersih 0 Data)
   const [transactions, setTransactions] = useState<Transaction[]>([]);
 
-  // Registered Residents (with 16 digit No KK & full family members)
-  const [wargaList, setWargaList] = useState<Warga[]>([
-    {
-      id: 'w1',
-      no: 1,
-      nama: 'Ahmad Fauzi',
-      noKK: '3302140508000001',
-      noRumah: '01',
-      rt: '08',
-      rw: '05',
-      alamat: 'Jalan Kenanga No. 01, RT 08 RW 05 Desa Kotayasa',
-      jenisKelamin: 'Laki-laki',
-      jumlahJiwa: 4,
-      statusIuran: 'Sudah',
-      riwayatIuranPerTahun: { 2026: { 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true, 8: true, 9: true, 10: true, 11: true, 12: true } },
-      statusIuranPerTahun: { 2026: 'Sudah' },
-      anggotaKeluarga: [
-        { nik: '3302141503790001', nama: 'Ahmad Fauzi', hubungan: 'Kepala Keluarga', tempatLahir: 'Banyumas', tanggalLahir: '1979-03-15', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'PNS', statusPerkawinan: 'Kawin' },
-        { nik: '3302144806820002', nama: 'Wahyuni Ningsih', hubungan: 'Istri', tempatLahir: 'Purwokerto', tanggalLahir: '1982-06-08', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Guru', statusPerkawinan: 'Kawin' },
-        { nik: '3302141010070003', nama: 'Fajar Nugraha', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2007-10-10', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Pelajar', statusPerkawinan: 'Belum Kawin' },
-        { nik: '3302145504120004', nama: 'Annisa Fitri', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2012-04-15', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Pelajar', statusPerkawinan: 'Belum Kawin' },
-      ],
-    },
-    {
-      id: 'w2',
-      no: 2,
-      nama: 'Siti Aminah',
-      noKK: '3302140508000002',
-      noRumah: '02',
-      rt: '08',
-      rw: '05',
-      alamat: 'Jalan Kenanga No. 02, RT 08 RW 05 Desa Kotayasa',
-      jenisKelamin: 'Perempuan',
-      jumlahJiwa: 3,
-      statusIuran: 'Sudah',
-      riwayatIuranPerTahun: { 2026: { 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true, 8: true, 9: true, 10: true, 11: true, 12: true } },
-      statusIuranPerTahun: { 2026: 'Sudah' },
-      anggotaKeluarga: [
-        { nik: '3302145009750001', nama: 'Siti Aminah', hubungan: 'Kepala Keluarga', tempatLahir: 'Banyumas', tanggalLahir: '1975-09-10', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Pedagang', statusPerkawinan: 'Janda' },
-        { nik: '3302141208030002', nama: 'Dimas Aditya', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2003-08-12', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Mahasiswa', statusPerkawinan: 'Belum Kawin' },
-        { nik: '3302146102090003', nama: 'Laras Sekar', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2009-02-21', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Pelajar', statusPerkawinan: 'Belum Kawin' },
-      ],
-    },
-    {
-      id: 'w3',
-      no: 3,
-      nama: 'Budi Santoso',
-      noKK: '3302140508000003',
-      noRumah: '03',
-      rt: '08',
-      rw: '05',
-      alamat: 'Jalan Flamboyan No. 03, RT 08 RW 05 Desa Kotayasa',
-      jenisKelamin: 'Laki-laki',
-      jumlahJiwa: 5,
-      statusIuran: 'Belum',
-      riwayatIuranPerTahun: { 2026: { 1: true, 2: true, 3: true } },
-      statusIuranPerTahun: { 2026: 'Belum' },
-      anggotaKeluarga: [
-        { nik: '3302142207800001', nama: 'Budi Santoso', hubungan: 'Kepala Keluarga', tempatLahir: 'Banyumas', tanggalLahir: '1980-07-22', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Wiraswasta', statusPerkawinan: 'Kawin' },
-        { nik: '3302145311840002', nama: 'Dewi Sartika', hubungan: 'Istri', tempatLahir: 'Banyumas', tanggalLahir: '1984-11-13', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Ibu Rumah Tangga', statusPerkawinan: 'Kawin' },
-        { nik: '3302141505080003', nama: 'Bagus Pratama', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2008-05-15', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Pelajar', statusPerkawinan: 'Belum Kawin' },
-        { nik: '3302146409130004', nama: 'Salma Putri', hubungan: 'Anak', tempatLahir: 'Banyumas', tanggalLahir: '2013-09-24', jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Pelajar', statusPerkawinan: 'Belum Kawin' },
-        { nik: '3302141804550005', nama: 'Mbah Karyo', hubungan: 'Orang Tua', tempatLahir: 'Banyumas', tanggalLahir: '1955-04-18', jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Pensiunan', statusPerkawinan: 'Kawin' },
-      ],
-    },
-    {
-      id: 'w4',
-      no: 4,
-      nama: 'Rina Lestari',
-      noKK: '3302140508000004',
-      noRumah: '04',
-      rt: '08',
-      rw: '05',
-      alamat: 'Jalan Flamboyan No. 04, RT 08 RW 05 Desa Kotayasa',
-      jenisKelamin: 'Perempuan',
-      jumlahJiwa: 2,
-      statusIuran: 'Sudah',
-    },
-    {
-      id: 'w5',
-      no: 5,
-      nama: 'Agus Setiawan',
-      noKK: '3302140508000005',
-      noRumah: '05',
-      rt: '08',
-      rw: '05',
-      alamat: 'Jalan Mawar No. 05, RT 08 RW 05 Desa Kotayasa',
-      jenisKelamin: 'Laki-laki',
-      jumlahJiwa: 4,
-      statusIuran: 'Belum',
-    },
-  ]);
+  // Registered Residents (Siap Pakai - Bersih 0 Data)
+  const [wargaList, setWargaList] = useState<Warga[]>([]);
 
-  // Announcements from RT (each has a tanggalBerakhir / expiry date)
-  const [pengumumanList, setPengumumanList] = useState<PengumumanRT[]>([
-    {
-      id: 'p1',
-      judul: 'Kerja Bakti Lingkungan & Pembersihan Saluran Air',
-      tanggal: '18 Okt 2026',
-      tanggalBerakhir: '2026-11-20',
-      kategori: 'Kegiatan',
-      isi: 'Diberitahukan kepada seluruh warga RT 08 RW 05, kerja bakti massal akan dilaksanakan pada hari Minggu pagi pukul 07.00 WIB. Titik kumpul di depan pos kamling RT 08. Mohon membawa cangkul/sabit.',
-      penulis: 'Ketua RT 08 (Bpk. Suwardi)',
-      penting: true,
-      tentang: 'Kerja Bakti Massal & Pembersihan Saluran Air',
-      hariTanggalAcara: 'Minggu, 25 Oktober 2026',
-      waktuAcara: '07.00 WIB s/d selesai',
-      tempatAcara: 'Pos Kamling RT 08',
-    },
-    {
-      id: 'p2',
-      judul: 'Penarikan Iuran Kas & Kas Kematian (Kain Mori)',
-      tanggal: '10 Okt 2026',
-      tanggalBerakhir: '2026-11-30',
-      kategori: 'Iuran',
-      isi: 'Penarikan iuran jimpitan RT sebesar Rp 25.000 dan kas kematian Rp 10.000 (total Rp 35.000) mulai dikoordinasikan. Pembayaran dapat diserahkan langsung ke Bendahara atau melalui transfer kas.',
-      penulis: 'Bendahara (Bpk. Bambang S.)',
-      tentang: 'Penarikan Iuran Kas RT & Kas Kematian',
-      hariTanggalAcara: '10 - 25 Setiap Bulan',
-      waktuAcara: '19.30 - 21.00 WIB',
-      tempatAcara: 'Rumah Bendahara RT 08',
-    },
-  ]);
+  // Announcements from RT (Siap Pakai - Bersih 0 Data)
+  const [pengumumanList, setPengumumanList] = useState<PengumumanRT[]>([]);
 
   // Active announcements (filtered by expiration date)
   const activeAnnouncements = pengumumanList.filter((p) => !isPengumumanExpired(p.tanggalBerakhir));
@@ -301,44 +184,11 @@ export default function App() {
     }
   }, [dismissedNotificationIds]);
 
-  // Government Aid Data (KHUSUS ADMIN - 100% Tersembunyi dari Warga)
-  const [bantuanList, setBantuanList] = useState<BantuanPemerintah[]>([
-    {
-      id: 'b1',
-      jenisBantuan: 'BPNT',
-      namaPenerima: 'Budi Santoso',
-      noKK: '3302140508000003',
-      nominalAtauBarang: 'Rp 600.000 / Tahap',
-      tanggal: '2026-10-15',
-      status: 'Sudah Disalurkan',
-      sumberDana: 'Kemensos RI',
-      keterangan: 'Penyaluran sembako & pangan non tunai via Bank Himbara',
-    },
-    {
-      id: 'b2',
-      jenisBantuan: 'Sembako Beras',
-      namaPenerima: 'Agus Setiawan',
-      noKK: '3302140508000005',
-      nominalAtauBarang: 'Beras Bulog 10 Kg + Minyak 2L',
-      tanggal: '2026-10-18',
-      status: 'Sudah Disalurkan',
-      sumberDana: 'Cadangan Pangan Desa Kotayasa',
-      keterangan: 'Penyaluran langsung di Balai Desa Kotayasa',
-    },
-  ]);
+  // Government Aid Data (Siap Pakai - Bersih 0 Data)
+  const [bantuanList, setBantuanList] = useState<BantuanPemerintah[]>([]);
 
-  // Document PDF Archive
-  const [dokumenList, setDokumenList] = useState<DokumenPdfWarga[]>([
-    {
-      id: 'doc1',
-      judul: 'Rekapitulasi Data Sensus Kependudukan RT 08 RW 05 Tahun 2026',
-      namaFile: 'Data_Sensus_Warga_RT08_RW05_2026.pdf',
-      ukuranKb: 342,
-      tanggalUpload: '2026-10-01',
-      kategori: 'Data Sensus Warga RT',
-      keterangan: 'Pemutakhiran data sensus door-to-door pengurus RT',
-    },
-  ]);
+  // Document PDF Archive (Siap Pakai - Bersih 0 Data)
+  const [dokumenList, setDokumenList] = useState<DokumenPdfWarga[]>([]);
 
   // Admin RT Accounts (Managed by Server Super Admin)
   const [adminAccounts, setAdminAccounts] = useState<AdminRTAccount[]>([
@@ -352,100 +202,13 @@ export default function App() {
       kontak: '0812-3456-7890',
       jabatan: 'Ketua RT 08 RW 05',
       status: 'aktif',
-      terakhirLogin: '2026-10-24 14:30',
-      terakhirSinkronisasi: '2026-10-24 11:20',
-    },
-    {
-      id: 'adm_rt01',
-      username: 'AdminRT01',
-      passwordHash: 'rt01rw05',
-      nama: 'Bpk. Slamet Riyadi',
-      rt: '01',
-      rw: '05',
-      kontak: '0813-2222-3333',
-      jabatan: 'Ketua RT 01 RW 05',
-      status: 'aktif',
-      terakhirLogin: '2026-10-23 09:15',
-      terakhirSinkronisasi: '2026-10-23 09:15',
-    },
-    {
-      id: 'adm_rt02',
-      username: 'AdminRT02',
-      passwordHash: 'rt02rw05',
-      nama: 'Bpk. Hendra Gunawan',
-      rt: '02',
-      rw: '05',
-      kontak: '0815-4444-5555',
-      jabatan: 'Ketua RT 02 RW 05',
-      status: 'aktif',
-      terakhirLogin: '2026-10-22 19:40',
-      terakhirSinkronisasi: '2026-10-22 19:40',
+      terakhirLogin: 'Baru Dibuat',
+      terakhirSinkronisasi: 'Belum ada',
     },
   ]);
 
-  // Monthly Submissions sent by RT Admins to the Server
-  const [laporanBulananRT, setLaporanBulananRT] = useState<PembaruanBulananRT[]>([
-    {
-      id: 'lap_rt08_okt',
-      rt: '08',
-      rw: '05',
-      namaAdminPengirim: 'Bpk. Suwardi (Ketua RT 08)',
-      tanggalKirim: '2026-10-24T11:20:00.000Z',
-      bulanTahun: 'Oktober 2026',
-      tahun: 2026,
-      totalKK: 5,
-      totalJiwa: 18,
-      totalLunasIuran: 3,
-      totalBelumLunas: 2,
-      totalKasMasukBulanIni: 600000,
-      totalKasKeluarBulanIni: 200000,
-      saldoKasUmumBerjalan: 250000,
-      saldoKasKematianBerjalan: 150000,
-      totalPenerimaBansos: 2,
-      catatanKhusus: 'Pengajuan 1 warga untuk usulan tambahan PKH, kain mori siap pakai ada 3 set di pos kamling.',
-      statusVerifikasi: 'Diterima',
-    },
-    {
-      id: 'lap_rt01_okt',
-      rt: '01',
-      rw: '05',
-      namaAdminPengirim: 'Bpk. Slamet Riyadi',
-      tanggalKirim: '2026-10-23T09:15:00.000Z',
-      bulanTahun: 'Oktober 2026',
-      tahun: 2026,
-      totalKK: 42,
-      totalJiwa: 154,
-      totalLunasIuran: 38,
-      totalBelumLunas: 4,
-      totalKasMasukBulanIni: 1050000,
-      totalKasKeluarBulanIni: 320000,
-      saldoKasUmumBerjalan: 3250000,
-      saldoKasKematianBerjalan: 1100000,
-      totalPenerimaBansos: 8,
-      catatanKhusus: 'Kegiatan posyandu lansia berjalan lancar, iuran bulan ini 90% lunas.',
-      statusVerifikasi: 'Diterima',
-    },
-    {
-      id: 'lap_rt02_okt',
-      rt: '02',
-      rw: '05',
-      namaAdminPengirim: 'Bpk. Hendra Gunawan',
-      tanggalKirim: '2026-10-22T19:40:00.000Z',
-      bulanTahun: 'Oktober 2026',
-      tahun: 2026,
-      totalKK: 36,
-      totalJiwa: 128,
-      totalLunasIuran: 30,
-      totalBelumLunas: 6,
-      totalKasMasukBulanIni: 900000,
-      totalKasKeluarBulanIni: 450000,
-      saldoKasUmumBerjalan: 1840000,
-      saldoKasKematianBerjalan: 750000,
-      totalPenerimaBansos: 5,
-      catatanKhusus: 'Perbaikan saluran gorong-gorong RT 02 memerlukan dana kas keluar.',
-      statusVerifikasi: 'Menunggu Verifikasi',
-    },
-  ]);
+  // Monthly Submissions sent by RT Admins to the Server (Siap Pakai - Bersih 0 Data)
+  const [laporanBulananRT, setLaporanBulananRT] = useState<PembaruanBulananRT[]>([]);
 
   // Initial Data Load (Loads from Server or localStorage)
   const isLoadedRef = useRef(false);
@@ -456,13 +219,13 @@ export default function App() {
         lastUpdated: new Date().toISOString(),
         tahunAktif: 2026,
         pengaturanKas,
-        wargaList,
-        transactions,
-        bantuanList,
-        pengumumanList,
-        dokumenList,
+        wargaList: [],
+        transactions: [],
+        bantuanList: [],
+        pengumumanList: [],
+        dokumenList: [],
         adminAccounts,
-        laporanBulananRT,
+        laporanBulananRT: [],
       };
 
       try {
@@ -470,13 +233,13 @@ export default function App() {
         if (loaded) {
           if (loaded.tahunAktif) setTahunAktif(loaded.tahunAktif);
           if (loaded.pengaturanKas) setPengaturanKas(loaded.pengaturanKas);
-          if (loaded.wargaList && loaded.wargaList.length > 0) setWargaList(loaded.wargaList);
-          if (loaded.transactions && loaded.transactions.length > 0) setTransactions(loaded.transactions);
-          if (loaded.bantuanList) setBantuanList(loaded.bantuanList);
-          if (loaded.pengumumanList) setPengumumanList(loaded.pengumumanList);
-          if (loaded.dokumenList) setDokumenList(loaded.dokumenList);
-          if (loaded.adminAccounts && loaded.adminAccounts.length > 0) setAdminAccounts(loaded.adminAccounts);
-          if (loaded.laporanBulananRT && loaded.laporanBulananRT.length > 0) setLaporanBulananRT(loaded.laporanBulananRT);
+          setWargaList(Array.isArray(loaded.wargaList) ? loaded.wargaList : []);
+          setTransactions(Array.isArray(loaded.transactions) ? loaded.transactions : []);
+          setBantuanList(Array.isArray(loaded.bantuanList) ? loaded.bantuanList : []);
+          setPengumumanList(Array.isArray(loaded.pengumumanList) ? loaded.pengumumanList : []);
+          setDokumenList(Array.isArray(loaded.dokumenList) ? loaded.dokumenList : []);
+          setAdminAccounts(Array.isArray(loaded.adminAccounts) && loaded.adminAccounts.length > 0 ? loaded.adminAccounts : adminAccounts);
+          setLaporanBulananRT(Array.isArray(loaded.laporanBulananRT) ? loaded.laporanBulananRT : []);
         }
       } catch (err) {
         console.warn('Init data load notice:', err);
@@ -689,13 +452,29 @@ export default function App() {
     ]);
   };
 
-  const handleResetEmpty = () => {
+  // Complete Reset: Wipes all residents, transactions, aid records, documents, announcements, and local/cloud storage
+  const handleResetEmpty = async () => {
+    // 1. Wipe in-memory states
+    setWargaList([]);
     setTransactions([]);
+    setBantuanList([]);
+    setPengumumanList([]);
+    setDokumenList([]);
+    setLaporanBulananRT([]);
+    setFloatingAnnouncement(null);
+    setDismissedNotificationIds([]);
     setPengaturanKas((prev) => ({
       ...prev,
       saldoAwalKasUmum: 0,
       saldoAwalKasKematian: 0,
+      keteranganSaldoAwal: 'Sisa Kas RT Periode Lalu',
+      tanggalSaldoAwal: `${tahunAktif}-01-01`,
     }));
+
+    // 2. Wipe persistent storage & backend
+    await clearAppData();
+    setRolloverNotice('Seluruh data berhasil direset dan dihapus secara tuntas dari perangkat dan server.');
+    setTimeout(() => setRolloverNotice(null), 5000);
   };
 
   const handleUpdatePengaturan = (newSetting: Partial<PengaturanKas>) => {
@@ -1068,42 +847,6 @@ export default function App() {
                 Scope: {currentUser.rtScope}
               </p>
             )}
-
-            {/* 3-Way Quick Switch Buttons for Demo convenience */}
-            <div className="mt-2.5 pt-2 border-t border-white/10">
-              <p className="text-[9px] font-bold text-white/60 uppercase tracking-wider mb-1">
-                Uji Coba Peran Cepat:
-              </p>
-              <div className="grid grid-cols-3 gap-1 text-[10px] font-bold">
-                <button
-                  type="button"
-                  onClick={() => handleSwitchToRole('server')}
-                  className={`rounded-lg py-1 px-1 text-center transition-colors cursor-pointer ${
-                    isServer ? 'bg-indigo-500 text-white' : 'bg-white/10 text-white/80 hover:bg-white/20'
-                  }`}
-                >
-                  Server
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSwitchToRole('admin')}
-                  className={`rounded-lg py-1 px-1 text-center transition-colors cursor-pointer ${
-                    isAdminRT ? 'bg-[#0B5D3F] text-white' : 'bg-white/10 text-white/80 hover:bg-white/20'
-                  }`}
-                >
-                  Admin RT
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSwitchToRole('warga')}
-                  className={`rounded-lg py-1 px-1 text-center transition-colors cursor-pointer ${
-                    isWarga ? 'bg-amber-500 text-slate-900' : 'bg-white/10 text-white/80 hover:bg-white/20'
-                  }`}
-                >
-                  Warga
-                </button>
-              </div>
-            </div>
           </div>
 
           {/* Navigation Items */}

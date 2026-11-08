@@ -456,27 +456,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 </div>
               </div>
 
-              {/* Quick Select Pill for demo testing */}
-              {wargaList.length > 0 && (
-                <div className="pt-2">
-                  <p className="text-[11px] font-bold text-slate-500 mb-1.5">
-                    Pilih Cepat Akun Warga Terdaftar (Contoh Uji Coba):
-                  </p>
-                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto no-scrollbar p-1 bg-slate-50 rounded-xl border border-slate-100">
-                    {wargaList.slice(0, 5).map((w) => (
-                      <button
-                        key={w.id}
-                        type="button"
-                        onClick={() => handleQuickSelectWarga(w)}
-                        className="rounded-lg bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 border border-slate-200 hover:border-emerald-400 hover:text-[#0B5D3F] transition-all cursor-pointer"
-                      >
-                        {w.nama}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
               <button
                 type="submit"
                 className="w-full rounded-xl bg-[#0B5D3F] py-3 text-sm font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"

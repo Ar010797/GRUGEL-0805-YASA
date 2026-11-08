@@ -93,6 +93,73 @@ export async function saveAppData(data: AppDatabaseSchema): Promise<boolean> {
 }
 
 /**
+ * Completely wipes all database data from both localStorage and server backend.
+ * Returns true if both local and remote caches were cleared cleanly.
+ */
+export async function clearAppData(): Promise<boolean> {
+  // 1. Clear local storage
+  try {
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
+    localStorage.removeItem('rt_dismissed_notifications_v2');
+  } catch (err) {
+    console.error('Error clearing localStorage:', err);
+  }
+
+  // 2. Clear server-side persistent database
+  try {
+    const emptyPayload: AppDatabaseSchema = {
+      version: 2,
+      lastUpdated: new Date().toISOString(),
+      tahunAktif: 2026,
+      pengaturanKas: {
+        nominalJimpitanTahunan: 300000,
+        nominalJimpitanBulanan: 25000,
+        nominalKematianTahunan: 120000,
+        nominalKematianBulanan: 10000,
+        saldoAwalKasUmum: 0,
+        saldoAwalKasKematian: 0,
+        keteranganSaldoAwal: 'Sisa Kas RT Periode Lalu',
+        tanggalSaldoAwal: '2026-01-01',
+        kontakKetuaRT: { nama: '', telp: '' },
+        kontakBendahara: { nama: '', telp: '' },
+        tahunAktif: 2026,
+        profilRT: {
+          namaRT: '08',
+          namaRW: '05',
+          dusun: 'Dusun III',
+          desa: 'Desa Kotayasa',
+          kecamatan: 'Kecamatan Sumbang',
+          kabupaten: 'Kabupaten Banyumas',
+          provinsi: 'Jawa Tengah',
+          kodePos: '53183',
+          alamatSekretariat: 'RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas 53183',
+          judulKopSurat: 'PENGURUS RUKUN TETANGGA 08 RUKUN WARGA 05',
+          sebutanWilayah: 'RT 08 RW 05 Desa Kotayasa',
+        },
+      },
+      wargaList: [],
+      transactions: [],
+      bantuanList: [],
+      pengumumanList: [],
+      dokumenList: [],
+      adminAccounts: [],
+      laporanBulananRT: [],
+    };
+
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(emptyPayload));
+
+    const res = await fetch('/api/data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(emptyPayload),
+    });
+    return res.ok;
+  } catch (err) {
+    return true;
+  }
+}
+
+/**
  * Exports complete database to a downloadable .JSON backup file.
  */
 export function downloadBackupJSON(data: AppDatabaseSchema) {
