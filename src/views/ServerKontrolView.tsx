@@ -33,6 +33,7 @@ import {
   PengaturanKas,
 } from '../types';
 import { downloadBackupJSON, parseBackupFile, AppDatabaseSchema } from '../utils/cloudSync';
+import { ConfirmationModal } from '../components/ConfirmationModal';
 
 interface ServerKontrolViewProps {
   adminAccounts: AdminRTAccount[];
@@ -67,6 +68,30 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
   const [searchAdmin, setSearchAdmin] = useState('');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [importNotice, setImportNotice] = useState<string | null>(null);
+
+  // Edit / Recovery Admin Modal State
+  const [editingAdmin, setEditingAdmin] = useState<AdminRTAccount | null>(null);
+  const [editNama, setEditNama] = useState('');
+  const [editUsername, setEditUsername] = useState('');
+  const [editPassword, setEditPassword] = useState('');
+  const [editKontak, setEditKontak] = useState('');
+  const [editJabatan, setEditJabatan] = useState('');
+
+  // Confirmation Dialog State
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    targetName?: string;
+    variant: 'danger' | 'warning' | 'info';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    variant: 'danger',
+    onConfirm: () => {},
+  });
 
   // Form State for Adding Admin RT
   const [formNama, setFormNama] = useState('');
@@ -351,6 +376,22 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1">
+                          {/* Edit / Pulihkan Akun Admin RT */}
+                          <button
+                            onClick={() => {
+                              setEditingAdmin(acc);
+                              setEditNama(acc.nama);
+                              setEditUsername(acc.username);
+                              setEditPassword(acc.passwordHash);
+                              setEditKontak(acc.kontak);
+                              setEditJabatan(acc.jabatan);
+                            }}
+                            className="p-1 rounded-lg text-emerald-700 hover:text-emerald-900 hover:bg-emerald-50 cursor-pointer"
+                            title="Tinjau, Edit & Pulihkan Akun Admin Ini"
+                          >
+                            <Edit size={14} />
+                          </button>
+
                           {onSwitchToRTAdmin && (
                             <button
                               onClick={() => onSwitchToRTAdmin(`RT ${acc.rt} RW ${acc.rw}`)}
@@ -361,7 +402,16 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                             </button>
                           )}
                           <button
-                            onClick={() => onDeleteAdminAccount(acc.id)}
+                            onClick={() => {
+                              setConfirmDialog({
+                                isOpen: true,
+                                title: 'Hapus Akun Pengurus RT',
+                                message: `Apakah Anda yakin ingin menghapus akun ${acc.nama} (${acc.username})? Pengurus RT tidak akan bisa login lagi sebelum dibuatkan akun baru.`,
+                                targetName: `${acc.nama} - RT ${acc.rt} / RW ${acc.rw}`,
+                                variant: 'danger',
+                                onConfirm: () => onDeleteAdminAccount(acc.id),
+                              });
+                            }}
                             className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer"
                             title="Hapus akun admin RT ini"
                           >
@@ -635,13 +685,13 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsAddModalOpen(false)}
-                  className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100"
+                  className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
-                  className="rounded-xl bg-[#0B5D3F] px-5 py-2 text-xs font-bold text-white hover:bg-[#084831]"
+                  className="rounded-xl bg-[#0B5D3F] px-5 py-2 text-xs font-bold text-white hover:bg-[#084831] cursor-pointer"
                 >
                   Simpan Akun Admin RT
                 </button>
@@ -650,6 +700,146 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* MODAL EDIT / PULIHKAN AKUN ADMIN RT (OLEH SERVER) */}
+      {editingAdmin && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-md rounded-3xl bg-white shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-slate-100 bg-[#E8F5EE] px-6 py-4">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#0B5D3F] text-white">
+                  <KeyRound size={20} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-[#0B5D3F]">Tinjau & Pulihkan Akun Admin RT</h3>
+                  <p className="text-[11px] text-slate-500">
+                    RT {editingAdmin.rt} / RW {editingAdmin.rw} &bull; Pengaturan Kredensial
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEditingAdmin(null)}
+                className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-white text-slate-500 cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                setConfirmDialog({
+                  isOpen: true,
+                  title: 'Simpan Pembaruan Kredensial Admin',
+                  message: `Anda akan mengubah data login untuk akun ${editNama}. Password baru akan langsung aktif dan admin bisa login kembali.`,
+                  targetName: `Username: ${editUsername} (RT ${editingAdmin.rt})`,
+                  variant: 'warning',
+                  onConfirm: () => {
+                    onUpdateAdminAccount(editingAdmin.id, {
+                      nama: editNama,
+                      username: editUsername,
+                      passwordHash: editPassword,
+                      kontak: editKontak,
+                      jabatan: editJabatan,
+                    });
+                    setEditingAdmin(null);
+                  },
+                });
+              }}
+              className="p-6 space-y-4"
+            >
+              <div className="rounded-2xl bg-amber-50 p-3 text-xs text-amber-900 border border-amber-200 flex items-start gap-2">
+                <AlertCircle size={16} className="text-amber-700 shrink-0 mt-0.5" />
+                <p className="text-[11px] leading-relaxed">
+                  Jika Admin RT lupa username atau password, Server Pusat dapat mengubah dan memulihkan akses login mereka di sini.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Nama Lengkap Pengurus</label>
+                <input
+                  type="text"
+                  required
+                  value={editNama}
+                  onChange={(e) => setEditNama(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Jabatan di RT</label>
+                <input
+                  type="text"
+                  value={editJabatan}
+                  onChange={(e) => setEditJabatan(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Username Login</label>
+                  <input
+                    type="text"
+                    required
+                    value={editUsername}
+                    onChange={(e) => setEditUsername(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Password Akses Baru</label>
+                  <input
+                    type="text"
+                    required
+                    value={editPassword}
+                    onChange={(e) => setEditPassword(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono text-emerald-800 font-bold bg-emerald-50/50 focus:border-[#0B5D3F] outline-hidden"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Nomor WhatsApp Pengurus</label>
+                <input
+                  type="text"
+                  value={editKontak}
+                  onChange={(e) => setEditKontak(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingAdmin(null)}
+                  className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-xl bg-[#0B5D3F] px-5 py-2 text-xs font-bold text-white hover:bg-[#084831] cursor-pointer"
+                >
+                  Perbarui & Pulihkan Akun
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* REUSABLE CONFIRMATION MODAL */}
+      <ConfirmationModal
+        isOpen={confirmDialog.isOpen}
+        onClose={() => setConfirmDialog((prev) => ({ ...prev, isOpen: false }))}
+        onConfirm={confirmDialog.onConfirm}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        targetName={confirmDialog.targetName}
+        variant={confirmDialog.variant}
+      />
     </div>
   );
 };

@@ -86,9 +86,9 @@ export default function App() {
   // Authentication State (Role: 'server' | 'admin' | 'warga')
   const [currentUser, setCurrentUser] = useState<AuthUser | null>({
     role: 'server',
-    username: 'Server',
-    nama: 'Super Admin Server Desa Kotayasa',
-    rtScope: 'Semua RT se-Desa Kotayasa',
+    username: 'RW05GLEMPANG',
+    nama: 'Super Admin Server RW 05 Glempang',
+    rtScope: 'Semua RT se-RW 05 Glempang',
     isPinAuthenticated: true,
   });
 
@@ -882,9 +882,9 @@ export default function App() {
     if (targetRole === 'server') {
       setCurrentUser({
         role: 'server',
-        username: 'Server',
-        nama: 'Super Admin Server Desa Kotayasa',
-        rtScope: 'Semua RT se-Desa Kotayasa',
+        username: 'RW05GLEMPANG',
+        nama: 'Super Admin Server RW 05 Glempang',
+        rtScope: 'Semua RT se-RW 05 Glempang',
         isPinAuthenticated: true,
       });
       setCurrentView('server-kontrol');
@@ -1498,6 +1498,8 @@ export default function App() {
                   <DataWargaView
                     wargaList={wargaList}
                     bantuanList={bantuanList}
+                    profilRT={pengaturanKas.profilRT}
+                    isServer={isServer}
                     onOpenWargaModal={() => setIsWargaModalOpen(true)}
                     onDeleteWarga={handleDeleteWarga}
                     onBack={() => setCurrentView('beranda')}

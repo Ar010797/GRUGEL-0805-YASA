@@ -340,39 +340,32 @@ export const WargaModal: React.FC<WargaModalProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Nomor Rumah
+                  Wilayah RT / RW
                 </label>
-                <input
-                  type="text"
-                  value={noRumah}
-                  onChange={(e) => setNoRumah(e.target.value)}
-                  placeholder="Contoh: 08 atau 12A"
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-[#0B5D3F] outline-hidden"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  RT / RW
-                </label>
-                <div className="flex gap-1.5">
-                  <input
-                    type="text"
-                    value={rt}
-                    onChange={(e) => setRt(e.target.value)}
-                    placeholder="08"
-                    className="w-1/2 rounded-xl border border-slate-200 px-2.5 py-2 text-xs text-center font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
-                  />
-                  <input
-                    type="text"
-                    value={rw}
-                    onChange={(e) => setRw(e.target.value)}
-                    placeholder="05"
-                    className="w-1/2 rounded-xl border border-slate-200 px-2.5 py-2 text-xs text-center font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
-                  />
+                <div className="flex gap-2">
+                  <div className="flex-1 flex items-center gap-1.5 border border-slate-200 rounded-xl px-3 py-2 bg-slate-50/50">
+                    <span className="text-xs font-bold text-slate-400">RT:</span>
+                    <input
+                      type="text"
+                      value={rt}
+                      onChange={(e) => setRt(e.target.value)}
+                      placeholder="08"
+                      className="w-full text-xs font-bold text-slate-800 outline-hidden bg-transparent"
+                    />
+                  </div>
+                  <div className="flex-1 flex items-center gap-1.5 border border-slate-200 rounded-xl px-3 py-2 bg-slate-50/50">
+                    <span className="text-xs font-bold text-slate-400">RW:</span>
+                    <input
+                      type="text"
+                      value={rw}
+                      onChange={(e) => setRw(e.target.value)}
+                      placeholder="05"
+                      className="w-full text-xs font-bold text-slate-800 outline-hidden bg-transparent"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -393,7 +386,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
 
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
-                Alamat Lengkap
+                Alamat Lengkap Warga (Dusun / Jalan)
               </label>
               <input
                 type="text"

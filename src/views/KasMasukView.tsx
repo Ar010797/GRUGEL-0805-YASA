@@ -120,34 +120,47 @@ export const KasMasukView: React.FC<KasMasukViewProps> = ({
             </button>
           </div>
         ) : (
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200/80">
-              <tr>
-                <th className="py-3.5 px-6">Tanggal</th>
-                <th className="py-3.5 px-6">Sumber / Warga</th>
-                <th className="py-3.5 px-6">Kategori</th>
-                <th className="py-3.5 px-6">Keterangan</th>
-                <th className="py-3.5 px-6 text-right">Nominal</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filtered.map((t) => (
-                <tr key={t.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="py-3.5 px-6 text-slate-500">{t.tanggal}</td>
-                  <td className="py-3.5 px-6 font-bold text-slate-800">{t.namaWarga || 'Warga RT 08'}</td>
-                  <td className="py-3.5 px-6">
-                    <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-200">
-                      {t.kategori}
-                    </span>
-                  </td>
-                  <td className="py-3.5 px-6 text-slate-600">{t.keterangan}</td>
-                  <td className="py-3.5 px-6 text-right font-extrabold text-emerald-700">
-                    +{formatRupiah(t.nominal)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div>
+            {/* Mobile Swipe Tip */}
+            <div className="sm:hidden flex items-center justify-between text-[11px] font-bold text-emerald-800 bg-[#E8F5EE] px-3.5 py-2 border-b border-emerald-200">
+              <span className="flex items-center gap-1.5">
+                <span className="text-sm font-black">&larr; &rarr;</span>
+                <span>Geser tabel ke samping untuk melihat seluruh data</span>
+              </span>
+              <span className="text-[10px] text-emerald-700 font-semibold">{filtered.length} Transaksi</span>
+            </div>
+
+            <div className="overflow-x-auto touch-pan-x scrollbar-thin">
+              <table className="w-full text-left text-xs min-w-[620px]">
+                <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200/80">
+                  <tr>
+                    <th className="py-3.5 px-4 sm:px-6">Tanggal</th>
+                    <th className="py-3.5 px-4 sm:px-6">Sumber / Warga</th>
+                    <th className="py-3.5 px-4 sm:px-6">Kategori</th>
+                    <th className="py-3.5 px-4 sm:px-6">Keterangan</th>
+                    <th className="py-3.5 px-4 sm:px-6 text-right">Nominal</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filtered.map((t) => (
+                    <tr key={t.id} className="hover:bg-slate-50 transition-colors">
+                      <td className="py-3.5 px-4 sm:px-6 text-slate-500 whitespace-nowrap">{t.tanggal}</td>
+                      <td className="py-3.5 px-4 sm:px-6 font-bold text-slate-800">{t.namaWarga || 'Warga RT 08'}</td>
+                      <td className="py-3.5 px-4 sm:px-6">
+                        <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-200 whitespace-nowrap">
+                          {t.kategori}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4 sm:px-6 text-slate-600">{t.keterangan}</td>
+                      <td className="py-3.5 px-4 sm:px-6 text-right font-extrabold text-emerald-700 whitespace-nowrap">
+                        +{formatRupiah(t.nominal)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         )}
       </div>
     </div>

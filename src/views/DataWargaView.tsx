@@ -21,12 +21,15 @@ import {
   CreditCard,
   Building,
 } from 'lucide-react';
-import { Warga, BantuanPemerintah } from '../types';
-import { exportDataWargaPerKK_PDF, exportSingleKK_PDF } from '../utils/pdfExport';
+import { Warga, BantuanPemerintah, ProfilRT } from '../types';
+import { exportDataWargaPerKK_PDF, exportSingleKK_PDF, exportKartuKeluargaPemerintah_PDF } from '../utils/pdfExport';
+import { ConfirmationModal } from '../components/ConfirmationModal';
 
 interface DataWargaViewProps {
   wargaList: Warga[];
   bantuanList?: BantuanPemerintah[];
+  profilRT?: ProfilRT;
+  isServer?: boolean;
   onOpenWargaModal: () => void;
   onDeleteWarga: (id: string) => void;
   onBack: () => void;
@@ -35,6 +38,8 @@ interface DataWargaViewProps {
 export const DataWargaView: React.FC<DataWargaViewProps> = ({
   wargaList,
   bantuanList = [],
+  profilRT,
+  isServer = false,
   onOpenWargaModal,
   onDeleteWarga,
   onBack,
@@ -42,6 +47,22 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
   const [filterGender, setFilterGender] = useState<'semua' | 'Laki-laki' | 'Perempuan'>('semua');
   const [search, setSearch] = useState('');
   const [selectedWarga, setSelectedWarga] = useState<Warga | null>(null);
+
+  // Confirmation Modal State
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    targetName?: string;
+    variant: 'danger' | 'warning' | 'info';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    variant: 'danger',
+    onConfirm: () => {},
+  });
 
   const totalKK = wargaList.length;
   const totalJiwa = wargaList.reduce((acc, w) => acc + (w.anggotaKeluarga?.length || w.jumlahJiwa || 1), 0);
@@ -297,7 +318,16 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                           </button>
 
                           <button
-                            onClick={() => onDeleteWarga(w.id)}
+                            onClick={() => {
+                              setConfirmDialog({
+                                isOpen: true,
+                                title: 'Hapus Data Warga & Kartu Keluarga',
+                                message: `Apakah Anda yakin ingin menghapus data warga "${w.nama}" (No KK: ${w.noKK || '-'}) beserta seluruh data anggota keluarganya? Tindakan ini tidak dapat dibatalkan.`,
+                                targetName: `${w.nama} (No KK: ${w.noKK})`,
+                                variant: 'danger',
+                                onConfirm: () => onDeleteWarga(w.id),
+                              });
+                            }}
                             className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
                             title="Hapus data warga"
                           >
@@ -490,26 +520,62 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
             </div>
 
             {/* Modal Footer */}
-            <div className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-6 py-3.5 shrink-0">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 px-6 py-3.5 shrink-0">
               <button
                 type="button"
                 onClick={() => setSelectedWarga(null)}
-                className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-200 cursor-pointer"
+                className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-200 cursor-pointer w-full sm:w-auto"
               >
                 Tutup
               </button>
 
-              <button
-                onClick={() => exportSingleKK_PDF(selectedWarga, bantuanList)}
-                className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] px-4 py-2 text-xs font-bold text-white shadow-xs cursor-pointer"
-              >
-                <Download size={13} />
-                <span>Download PDF KK Ini</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
+                {/* Download Standar Register RT */}
+                <button
+                  onClick={() => exportSingleKK_PDF(selectedWarga, bantuanList)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 px-3.5 py-2 text-xs font-bold text-slate-700 shadow-xs cursor-pointer"
+                  title="Cetak Ringkasan Register Warga RT"
+                >
+                  <Download size={13} />
+                  <span>Cetak Register RT</span>
+                </button>
+
+                {/* CETAK / DOWNLOAD KARTU KELUARGA RESMI PEMERINTAH (DENGAN KONFIRMASI SERVER) */}
+                <button
+                  onClick={() => {
+                    setConfirmDialog({
+                      isOpen: true,
+                      title: 'Persetujuan Cetak Kartu Keluarga Standar Pemerintah',
+                      message: `Anda akan mencetak Kartu Keluarga Resmi Republik Indonesia untuk ${selectedWarga.nama} (No KK: ${selectedWarga.noKK}). Dokumen ini memiliki format Dukcapil dan dilindungi undang-undang. Pastikan Anda bertindak sah sebagai Pengurus/Server dan data ini tidak disalahgunakan. Apakah Anda menyetujui penerbitan cetak KK ini?`,
+                      targetName: `KARTU KELUARGA RESMI: ${selectedWarga.nama} (${selectedWarga.noKK})`,
+                      variant: 'warning',
+                      onConfirm: () => {
+                        exportKartuKeluargaPemerintah_PDF(selectedWarga, profilRT, true);
+                      },
+                    });
+                  }}
+                  className="flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-[#0B5D3F] to-emerald-800 hover:from-[#084831] hover:to-emerald-900 px-4 py-2 text-xs font-extrabold text-white shadow-md active:scale-95 transition-all cursor-pointer"
+                  title="Cetak KK format resmi pemerintah sesuai keluaran Dukcapil (dengan konfirmasi persetujuan)"
+                >
+                  <Building size={14} />
+                  <span>Cetak KK Resmi Pemerintah (Dukcapil)</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
       )}
+
+      {/* REUSABLE CONFIRMATION MODAL */}
+      <ConfirmationModal
+        isOpen={confirmDialog.isOpen}
+        onClose={() => setConfirmDialog((prev) => ({ ...prev, isOpen: false }))}
+        onConfirm={confirmDialog.onConfirm}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        targetName={confirmDialog.targetName}
+        variant={confirmDialog.variant}
+      />
     </div>
   );
 };

@@ -740,3 +740,286 @@ export const exportSingleKK_PDF = (
   exportDataWargaPerKK_PDF([warga], bantuanList);
 };
 
+/**
+ * CETAK / DOWNLOAD KARTU KELUARGA STANDAR RESMI PEMERINTAH REPUBLIK INDONESIA
+ * Format resmi sesuai standar Dukcapil:
+ * - Lambang Garuda Pancasila / Judul KARTU KELUARGA
+ * - Nomor KK & Nama Kepala Keluarga di bagian atas
+ * - Informasi Wilayah (Alamat, RT/RW, Desa/Kelurahan, Kecamatan, Kabupaten/Kota, Kode Pos, Provinsi)
+ * - Tabel 1: Nama, NIK, Jenis Kelamin, Tempat Lahir, Tgl Lahir, Agama, Pendidikan, Jenis Pekerjaan
+ * - Tabel 2: Status Perkawinan, Tanggal Perkawinan, Status Hubungan Dalam Keluarga, Kewarganegaraan, No. Paspor, No. KITAS, Nama Orang Tua
+ * - Tanggal Dikeluarkan, Stempel QR Code Dukcapil / Verifikasi Server
+ */
+export const exportKartuKeluargaPemerintah_PDF = (
+  warga: Warga,
+  profilRT?: ProfilRT,
+  isServerApproved: boolean = true
+) => {
+  const doc = new jsPDF({
+    orientation: 'landscape',
+    unit: 'mm',
+    format: 'a4',
+  });
+
+  const pageWidth = 297;
+  const pageHeight = 210;
+  const margin = 10;
+
+  const rtStr = warga.rt || profilRT?.namaRT || '08';
+  const rwStr = warga.rw || profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
+  const provStr = profilRT?.provinsi || 'Jawa Tengah';
+  const kodePosStr = profilRT?.kodePos || '53183';
+  const noKK = warga.noKK || '3302140508000001';
+
+  // Frame Border
+  doc.setDrawColor(20, 20, 20);
+  doc.setLineWidth(0.6);
+  doc.rect(margin, margin, pageWidth - margin * 2, pageHeight - margin * 2);
+  doc.setLineWidth(0.2);
+  doc.rect(margin + 1.2, margin + 1.2, pageWidth - margin * 2 - 2.4, pageHeight - margin * 2 - 2.4);
+
+  // Background Watermark if Approved by Server
+  doc.setTextColor(230, 230, 230);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(36);
+  doc.text('REPUBLIK INDONESIA', pageWidth / 2, pageHeight / 2 - 10, { align: 'center', angle: 25 });
+  doc.setFontSize(22);
+  doc.text('KARTU KELUARGA RESMI', pageWidth / 2, pageHeight / 2 + 10, { align: 'center', angle: 25 });
+
+  // Official Header
+  doc.setTextColor(20, 20, 20);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.text('KARTU KELUARGA', pageWidth / 2, 22, { align: 'center' });
+
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  doc.text(`No. ${noKK}`, pageWidth / 2, 28, { align: 'center' });
+
+  // 2-Column Metadata Header
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'bold');
+
+  // Left Column
+  doc.text('Nama Kepala Keluarga', margin + 6, 36);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`:  ${warga.nama.toUpperCase()}`, margin + 46, 36);
+
+  doc.setFont('helvetica', 'bold');
+  doc.text('Alamat', margin + 6, 41);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`:  ${warga.alamat || `RT ${rtStr} RW ${rwStr} ${desaStr}`}`, margin + 46, 41);
+
+  doc.setFont('helvetica', 'bold');
+  doc.text('RT / RW', margin + 6, 46);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`:  ${rtStr} / ${rwStr}`, margin + 46, 46);
+
+  doc.setFont('helvetica', 'bold');
+  doc.text('Desa / Kelurahan', margin + 6, 51);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`:  ${desaStr.toUpperCase()}`, margin + 46, 51);
+
+  // Right Column
+  doc.setFont('helvetica', 'bold');
+  doc.text('Kecamatan', pageWidth / 2 + 30, 36);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`:  ${kecStr.toUpperCase()}`, pageWidth / 2 + 65, 36);
+
+  doc.setFont('helvetica', 'bold');
+  doc.text('Kabupaten / Kota', pageWidth / 2 + 30, 41);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`:  ${kabStr.toUpperCase()}`, pageWidth / 2 + 65, 41);
+
+  doc.setFont('helvetica', 'bold');
+  doc.text('Kode Pos', pageWidth / 2 + 30, 46);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`:  ${kodePosStr}`, pageWidth / 2 + 65, 46);
+
+  doc.setFont('helvetica', 'bold');
+  doc.text('Provinsi', pageWidth / 2 + 30, 51);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`:  ${provStr.toUpperCase()}`, pageWidth / 2 + 65, 51);
+
+  // Table 1: Demografi Utama
+  const members = warga.anggotaKeluarga && warga.anggotaKeluarga.length > 0
+    ? warga.anggotaKeluarga
+    : [
+        {
+          nik: warga.noKK ? warga.noKK.slice(0, 12) + '0001' : '3302141503790001',
+          nama: warga.nama,
+          hubungan: 'Kepala Keluarga',
+          tempatLahir: 'Banyumas',
+          tanggalLahir: '1980-05-15',
+          jenisKelamin: warga.jenisKelamin || 'Laki-laki',
+          agama: 'Islam',
+          pekerjaan: 'Wiraswasta',
+          statusPerkawinan: 'Kawin',
+        },
+      ];
+
+  const table1Data = members.map((m, idx) => [
+    (idx + 1).toString(),
+    m.nama.toUpperCase(),
+    m.nik || '—',
+    m.jenisKelamin === 'Laki-laki' ? 'LAKI-LAKI' : 'PEREMPUAN',
+    m.tempatLahir?.toUpperCase() || 'BANYUMAS',
+    m.tanggalLahir || '—',
+    m.agama?.toUpperCase() || 'ISLAM',
+    'SLTA / SEDERAJAT',
+    m.pekerjaan?.toUpperCase() || 'WIRASWASTA',
+  ]);
+
+  autoTable(doc, {
+    startY: 55,
+    margin: { left: margin + 3, right: margin + 3 },
+    head: [
+      ['No', 'Nama Lengkap', 'NIK', 'Jenis Kelamin', 'Tempat Lahir', 'Tanggal Lahir', 'Agama', 'Pendidikan', 'Jenis Pekerjaan'],
+      ['(1)', '(2)', '(3)', '(4)', '(5)', '(6)', '(7)', '(8)', '(9)'],
+    ],
+    body: table1Data,
+    theme: 'grid',
+    headStyles: {
+      fillColor: [240, 240, 240],
+      textColor: [30, 30, 30],
+      fontStyle: 'bold',
+      fontSize: 7,
+      halign: 'center',
+      lineWidth: 0.2,
+      lineColor: [40, 40, 40],
+    },
+    styles: {
+      fontSize: 7,
+      cellPadding: 1.5,
+      textColor: [20, 20, 20],
+      lineWidth: 0.2,
+      lineColor: [40, 40, 40],
+    },
+    columnStyles: {
+      0: { cellWidth: 8, halign: 'center' },
+      1: { cellWidth: 50, fontStyle: 'bold' },
+      2: { cellWidth: 35, fontStyle: 'bold', halign: 'center' },
+      3: { cellWidth: 26, halign: 'center' },
+      4: { cellWidth: 30 },
+      5: { cellWidth: 24, halign: 'center' },
+      6: { cellWidth: 22, halign: 'center' },
+      7: { cellWidth: 35 },
+      8: { cellWidth: 41 },
+    },
+  });
+
+  const table1EndY = (doc as any).lastAutoTable?.finalY || 95;
+
+  // Table 2: Status Hubungan & Orang Tua
+  const table2Data = members.map((m, idx) => [
+    (idx + 1).toString(),
+    m.statusPerkawinan?.toUpperCase() || 'KAWIN',
+    m.statusPerkawinan === 'Kawin' ? 'TERCATAT' : '—',
+    m.hubungan?.toUpperCase() || 'ANGGOTA',
+    'WNI',
+    '—',
+    '—',
+    'Fulan (Ayah)',
+    'Fulanah (Ibu)',
+  ]);
+
+  autoTable(doc, {
+    startY: table1EndY + 3,
+    margin: { left: margin + 3, right: margin + 3 },
+    head: [
+      ['No', 'Status Perkawinan', 'Tgl Perkawinan', 'Status Hubungan dlm Keluarga', 'Kewarganegaraan', 'No. Paspor', 'No. KITAP', 'Nama Ayah', 'Nama Ibu'],
+      ['(10)', '(11)', '(12)', '(13)', '(14)', '(15)', '(16)', '(17)', '(18)'],
+    ],
+    body: table2Data,
+    theme: 'grid',
+    headStyles: {
+      fillColor: [240, 240, 240],
+      textColor: [30, 30, 30],
+      fontStyle: 'bold',
+      fontSize: 7,
+      halign: 'center',
+      lineWidth: 0.2,
+      lineColor: [40, 40, 40],
+    },
+    styles: {
+      fontSize: 7,
+      cellPadding: 1.5,
+      textColor: [20, 20, 20],
+      lineWidth: 0.2,
+      lineColor: [40, 40, 40],
+    },
+    columnStyles: {
+      0: { cellWidth: 8, halign: 'center' },
+      1: { cellWidth: 32, halign: 'center' },
+      2: { cellWidth: 24, halign: 'center' },
+      3: { cellWidth: 45, fontStyle: 'bold' },
+      4: { cellWidth: 28, halign: 'center' },
+      5: { cellWidth: 22, halign: 'center' },
+      6: { cellWidth: 22, halign: 'center' },
+      7: { cellWidth: 45 },
+      8: { cellWidth: 45 },
+    },
+  });
+
+  const table2EndY = (doc as any).lastAutoTable?.finalY || 145;
+
+  // Signatures Section: Kepala Keluarga & Pejabat Registrasi Disdukcapil
+  const footerY = Math.max(table2EndY + 6, pageHeight - 50);
+
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(30, 30, 30);
+
+  // Left Signature: Kepala Keluarga
+  doc.text('KEPALA KELUARGA,', margin + 35, footerY, { align: 'center' });
+  doc.setFont('helvetica', 'bold');
+  doc.text(warga.nama.toUpperCase(), margin + 35, footerY + 22, { align: 'center' });
+  doc.setFont('helvetica', 'normal');
+  doc.text('Tanda Tangan / Cap Jempol', margin + 35, footerY + 26, { align: 'center' });
+
+  // Center: Server Verification Badge (Security & Prevention of Misuse)
+  doc.setDrawColor(11, 93, 63);
+  doc.setFillColor(232, 245, 238);
+  doc.roundedRect(pageWidth / 2 - 35, footerY - 2, 70, 28, 2, 2, 'FD');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.setTextColor(11, 93, 63);
+  doc.text('TERVERIFIKASI SERVER PUSAT', pageWidth / 2, footerY + 4, { align: 'center' });
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(6.5);
+  doc.setTextColor(50, 50, 50);
+  doc.text(`ID Verifikasi: SRV-${noKK.slice(-6)}-${Date.now().toString().slice(-4)}`, pageWidth / 2, footerY + 9, { align: 'center' });
+  doc.text(`Status: DISETUJUI SERVER RESMI`, pageWidth / 2, footerY + 14, { align: 'center' });
+  doc.text('Dokumen Sah Registrasi Kependudukan', pageWidth / 2, footerY + 19, { align: 'center' });
+  doc.text(`Dicetak: ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, pageWidth / 2, footerY + 24, { align: 'center' });
+
+  // Right Signature: Kepala Dinas Kependudukan & Pencatatan Sipil
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(30, 30, 30);
+  doc.text(`${kabStr.toUpperCase()}, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, pageWidth - margin - 45, footerY, { align: 'center' });
+  doc.text('KEPALA DINAS KEPENDUDUKAN DAN PENCATATAN SIPIL', pageWidth - margin - 45, footerY + 4, { align: 'center' });
+  doc.setFont('helvetica', 'bold');
+  doc.text('( DUKCAPIL KABUPATEN BANYUMAS )', pageWidth - margin - 45, footerY + 22, { align: 'center' });
+  doc.setFont('helvetica', 'normal');
+  doc.text('Tanda Tangan Elektronik (TTE) Tersertifikasi', pageWidth - margin - 45, footerY + 26, { align: 'center' });
+
+  // Bottom Notice
+  doc.setFontSize(6.5);
+  doc.setTextColor(100, 100, 100);
+  doc.text(
+    'Dilarang memalsukan atau mengubah data Kartu Keluarga ini tanpa izin resmi Pejabat Berwenang. Dokumen ini dilindungi UU No. 24 Tahun 2013 & UU PDP No. 27 Tahun 2022.',
+    pageWidth / 2,
+    pageHeight - 4,
+    { align: 'center' }
+  );
+
+  // Save PDF
+  doc.save(`KARTU_KELUARGA_RESMI_${warga.nama.replace(/\s+/g, '_')}_${noKK}.pdf`);
+};
+

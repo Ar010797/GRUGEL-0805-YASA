@@ -20,11 +20,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   adminAccounts = [],
   onOpenLupaPassword,
 }) => {
-  const [activeTab, setActiveTab] = useState<'server' | 'admin' | 'warga'>('server');
+  // Default to 'warga' or 'admin' so Server tab is NOT visible by default to citizens
+  const [activeTab, setActiveTab] = useState<'server' | 'admin' | 'warga'>('admin');
+  const [showServerTab, setShowServerTab] = useState(false);
 
-  // Server form
-  const [serverUsername, setServerUsername] = useState('Server');
-  const [serverPassword, setServerPassword] = useState('desakotayasa');
+  // Server form (Credentials: RW05GLEMPANG / Rw05glempang)
+  const [serverUsername, setServerUsername] = useState('RW05GLEMPANG');
+  const [serverPassword, setServerPassword] = useState('Rw05glempang');
   const [serverError, setServerError] = useState('');
 
   // Admin form
@@ -44,20 +46,21 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     e.preventDefault();
     setServerError('');
 
-    const u = serverUsername.trim().toLowerCase();
+    const u = serverUsername.trim();
     const p = serverPassword.trim();
 
-    if ((u === 'server' || u === 'adminpusat') && p === 'desakotayasa') {
+    // Specific user credentials: Username: RW05GLEMPANG, Password: Rw05glempang
+    if (u === 'RW05GLEMPANG' && p === 'Rw05glempang') {
       onLoginSuccess({
         role: 'server',
-        username: 'Server',
-        nama: 'Super Admin Server Desa Kotayasa',
-        rtScope: 'Semua RT se-Desa Kotayasa',
+        username: 'RW05GLEMPANG',
+        nama: 'Super Admin Server RW 05 Glempang',
+        rtScope: 'Semua RT se-RW 05 Glempang',
         isPinAuthenticated: false,
       });
       onClose();
     } else {
-      setServerError('Username atau password Server salah. (Default: Username "Server", Password "desakotayasa")');
+      setServerError('Username atau password Server salah. Akses ini khusus Pengelola Server.');
     }
   };
 
@@ -185,25 +188,12 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           </div>
         </div>
 
-        {/* 3-Tier Tab Selection */}
-        <div className="grid grid-cols-3 border-b border-slate-200 bg-slate-50 p-1.5 gap-1">
-          <button
-            type="button"
-            onClick={() => { setActiveTab('server'); setServerError(''); }}
-            className={`flex items-center justify-center gap-1.5 rounded-xl py-2 text-xs font-bold transition-all cursor-pointer ${
-              activeTab === 'server'
-                ? 'bg-indigo-600 text-white shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            <Server size={14} />
-            <span>Server</span>
-          </button>
-
+        {/* Tab Selection: Default hanya Admin RT dan Warga (KK), Server disembunyikan */}
+        <div className={`grid ${showServerTab ? 'grid-cols-3' : 'grid-cols-2'} border-b border-slate-200 bg-slate-50 p-1.5 gap-1 transition-all`}>
           <button
             type="button"
             onClick={() => { setActiveTab('admin'); setAdminError(''); }}
-            className={`flex items-center justify-center gap-1.5 rounded-xl py-2 text-xs font-bold transition-all cursor-pointer ${
+            className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
               activeTab === 'admin'
                 ? 'bg-[#0B5D3F] text-white shadow-xs'
                 : 'text-slate-600 hover:text-slate-900'
@@ -216,7 +206,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           <button
             type="button"
             onClick={() => { setActiveTab('warga'); setWargaError(''); }}
-            className={`flex items-center justify-center gap-1.5 rounded-xl py-2 text-xs font-bold transition-all cursor-pointer ${
+            className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
               activeTab === 'warga'
                 ? 'bg-[#0B5D3F] text-white shadow-xs'
                 : 'text-slate-600 hover:text-slate-900'
@@ -225,6 +215,21 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             <User size={14} />
             <span>Warga (KK)</span>
           </button>
+
+          {showServerTab && (
+            <button
+              type="button"
+              onClick={() => { setActiveTab('server'); setServerError(''); }}
+              className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
+                activeTab === 'server'
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Server size={14} />
+              <span>Server Pusat</span>
+            </button>
+          )}
         </div>
 
         {/* Content Body */}
@@ -263,7 +268,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     value={serverUsername}
                     onChange={(e) => setServerUsername(e.target.value)}
                     className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 outline-hidden font-medium"
-                    placeholder="Server"
+                    placeholder="RW05GLEMPANG"
                   />
                 </div>
               </div>
@@ -282,19 +287,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     value={serverPassword}
                     onChange={(e) => setServerPassword(e.target.value)}
                     className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 outline-hidden font-mono"
-                    placeholder="desakotayasa"
+                    placeholder="Password Server"
                   />
                 </div>
-                <p className="mt-1 text-[11px] text-slate-400">
-                  Akses Server: Username: <strong className="text-slate-700">Server</strong>, Password: <strong className="text-slate-700">desakotayasa</strong>
-                </p>
               </div>
 
               <button
                 type="submit"
                 className="w-full rounded-xl bg-indigo-600 py-3 text-sm font-bold text-white shadow-md hover:bg-indigo-700 active:scale-95 transition-all cursor-pointer"
               >
-                Masuk Sebagai Server Desa
+                Masuk Sebagai Server RW 05
               </button>
             </form>
           ) : activeTab === 'admin' ? (
@@ -484,15 +486,32 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             </form>
           )}
 
-          {/* Footer security note */}
-          <div className="mt-5 pt-4 border-t border-slate-100 text-center">
+          {/* Footer security note & Discreet Server Access for App Owner */}
+          <div className="mt-5 pt-4 border-t border-slate-100 flex flex-col items-center gap-2 text-center">
             <button
               type="button"
               onClick={onOpenLupaPassword}
               className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-[#0B5D3F] transition-colors cursor-pointer"
             >
               <HelpCircle size={14} />
-              <span>Butuh Bantuan Akun atau Reset PIN? Hubungi Pengurus RT / Server</span>
+              <span>Butuh Bantuan Akun atau Reset PIN? Hubungi Pengurus RT</span>
+            </button>
+
+            {/* Tombol Tersembunyi Khusus Pemilik / Pengelola Server RW 05 */}
+            <button
+              type="button"
+              onClick={() => {
+                setShowServerTab((prev) => {
+                  const nextState = !prev;
+                  if (nextState) setActiveTab('server');
+                  return nextState;
+                });
+              }}
+              className="text-[10px] text-slate-400 hover:text-slate-600 transition-colors flex items-center gap-1 cursor-pointer pt-1"
+              title="Akses Khusus Pemilik Aplikasi / Pengelola Server"
+            >
+              <Lock size={10} />
+              <span>{showServerTab ? 'Sembunyikan Akses Server' : 'Akses Pengelola Server Pusat'}</span>
             </button>
           </div>
         </div>

@@ -26,9 +26,10 @@ import {
 } from 'lucide-react';
 import { AuthUser, Transaction, Warga, PengumumanRT, PengaturanKas, AnggotaKeluarga } from '../types';
 import { LeafIcon } from '../components/HouseLogo';
-import { exportRekapTahunanPDF, exportPengeluaranPDF, exportSuratPengumumanPDF } from '../utils/pdfExport';
+import { exportRekapTahunanPDF, exportPengeluaranPDF, exportSuratPengumumanPDF, exportKartuKeluargaPemerintah_PDF } from '../utils/pdfExport';
 import { kirimWhatsAppPengumuman } from '../utils/whatsappShare';
 import { maskNIK, maskNoKK } from '../utils/security';
+import { ConfirmationModal } from '../components/ConfirmationModal';
 
 interface DasborWargaViewProps {
   currentUser: AuthUser;
@@ -47,6 +48,20 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
 }) => {
   const [viewMode, setViewMode] = useState<'tahunan' | 'bulanan'>('tahunan');
   const [showMaskedNIK, setShowMaskedNIK] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    targetName?: string;
+    variant: 'danger' | 'warning' | 'info';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    variant: 'warning',
+    onConfirm: () => {},
+  });
 
   // Strictly find current resident data by No KK or matching name/id
   const wargaData = wargaList.find(
@@ -206,13 +221,35 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
             </div>
           </div>
 
-          <button
-            onClick={() => setShowMaskedNIK(!showMaskedNIK)}
-            className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700 transition-colors cursor-pointer self-start sm:self-auto"
-          >
-            {showMaskedNIK ? <EyeOff size={14} /> : <Eye size={14} />}
-            <span>{showMaskedNIK ? 'Sembunyikan NIK/KK' : 'Tampilkan NIK Lengkap'}</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+            <button
+              onClick={() => setShowMaskedNIK(!showMaskedNIK)}
+              className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700 transition-colors cursor-pointer"
+            >
+              {showMaskedNIK ? <EyeOff size={14} /> : <Eye size={14} />}
+              <span>{showMaskedNIK ? 'Sembunyikan NIK/KK' : 'Tampilkan NIK Lengkap'}</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setConfirmDialog({
+                  isOpen: true,
+                  title: 'Konfirmasi Cetak Kartu Keluarga Standar Pemerintah',
+                  message: `Apakah Anda menyatakan bahwa Kartu Keluarga resmi ini diunduh untuk keperluan keluarga sendiri dan tidak akan disalahgunakan? Dokumen dilindungi UU Kependudukan & PDP.`,
+                  targetName: `Kartu Keluarga: ${wargaData.nama} (${wargaData.noKK})`,
+                  variant: 'info',
+                  onConfirm: () => {
+                    exportKartuKeluargaPemerintah_PDF(wargaData as any, pengaturanKas.profilRT, true);
+                  },
+                });
+              }}
+              className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] px-3.5 py-1.5 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer"
+              title="Cetak format resmi Kartu Keluarga standar pemerintah"
+            >
+              <Download size={14} />
+              <span>Cetak KK Resmi Pemerintah</span>
+            </button>
+          </div>
         </div>
 
         {/* Member Table */}
@@ -515,6 +552,17 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* Confirmation Modal */}
+      <ConfirmationModal
+        isOpen={confirmDialog.isOpen}
+        onClose={() => setConfirmDialog((prev) => ({ ...prev, isOpen: false }))}
+        onConfirm={confirmDialog.onConfirm}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        targetName={confirmDialog.targetName}
+        variant={confirmDialog.variant}
+      />
     </div>
   );
 };

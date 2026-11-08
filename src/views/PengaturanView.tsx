@@ -20,6 +20,7 @@ import {
   Landmark,
 } from 'lucide-react';
 import { PengaturanKas, AuthUser } from '../types';
+import { ConfirmationModal } from '../components/ConfirmationModal';
 
 interface PengaturanViewProps {
   pengaturanKas: PengaturanKas;
@@ -46,6 +47,22 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
   onLoadSample,
   onBack,
 }) => {
+  // Confirmation Modal State
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    targetName?: string;
+    variant: 'danger' | 'warning' | 'info';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    variant: 'danger',
+    onConfirm: () => {},
+  });
+
   // Annual Dues Configuration (Admin input TAHUNAN -> auto hitung BULANAN)
   const [jimpitanTahunan, setJimpitanTahunan] = useState(
     (pengaturanKas.nominalJimpitanTahunan || 300000).toString()
@@ -721,14 +738,32 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    onClick={onResetEmpty}
+                    onClick={() => {
+                      setConfirmDialog({
+                        isOpen: true,
+                        title: 'Reset Database Kosong',
+                        message: 'Peringatan! Tindakan ini akan mengosongkan seluruh data transaksi kas dan warga di memori. Apakah Anda yakin ingin melanjutkan?',
+                        targetName: 'Reset Seluruh Data Kas & Warga',
+                        variant: 'danger',
+                        onConfirm: onResetEmpty,
+                      });
+                    }}
                     className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-100 cursor-pointer"
                   >
                     Reset Kosong
                   </button>
                   <button
                     type="button"
-                    onClick={onLoadSample}
+                    onClick={() => {
+                      setConfirmDialog({
+                        isOpen: true,
+                        title: 'Muat Data Contoh Simulasi',
+                        message: 'Tindakan ini akan memuat kembali daftar warga dan riwayat transaksi contoh standar RT 08 RW 05.',
+                        targetName: 'Data Simulasi Standar',
+                        variant: 'warning',
+                        onConfirm: onLoadSample,
+                      });
+                    }}
                     className="rounded-xl bg-slate-100 hover:bg-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 cursor-pointer"
                   >
                     Isi Contoh
@@ -740,6 +775,17 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
         </div>
       </div>
       )}
+
+      {/* Confirmation Modal */}
+      <ConfirmationModal
+        isOpen={confirmDialog.isOpen}
+        onClose={() => setConfirmDialog((prev) => ({ ...prev, isOpen: false }))}
+        onConfirm={confirmDialog.onConfirm}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        targetName={confirmDialog.targetName}
+        variant={confirmDialog.variant}
+      />
     </div>
   );
 };
