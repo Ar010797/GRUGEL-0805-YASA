@@ -1,7 +1,9 @@
+import 'dotenv/config';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { GoogleGenAI, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -93,6 +95,111 @@ app.post('/api/sync-monthly', (req, res) => {
   });
 });
 
+// POST OCR / AI Scan Kartu Keluarga (KK)
+app.post('/api/scan-kk', async (req, res) => {
+  try {
+    const { imageBase64, mimeType = 'image/jpeg' } = req.body || {};
+    if (!imageBase64) {
+      return res.status(400).json({ success: false, message: 'Foto KK tidak ditemukan' });
+    }
+
+    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const apiKey = process.env.GEMINI_API_KEY;
+
+    if (!apiKey) {
+      return res.status(503).json({
+        success: false,
+        noKey: true,
+        message: 'API Key Gemini belum diset di server.',
+      });
+    }
+
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+
+    const prompt = `Anda adalah sistem OCR kependudukan resmi Republik Indonesia untuk membaca Kartu Keluarga (KK).
+Baca dokumen Kartu Keluarga ini secara SANGAT TELITI dan AKURAT sesuai apa yang tertulis fisik pada foto.
+ATURAN MUTLAK:
+- DILARANG MENGARANG NAMA, NIK, ATAU NOMOR KK.
+- DILARANG MENGACAK DATA. Ekstrak teks asli apa adanya.
+- Pastikan noKK tepat 16 digit.
+- Pastikan setiap nik tepat 16 digit angka.
+- Ekstrak seluruh anggota keluarga pada tabel Kartu Keluarga.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                mimeType,
+                data: cleanBase64,
+              },
+            },
+            { text: prompt },
+          ],
+        },
+      ],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            noKK: { type: Type.STRING, description: '16 digit Nomor Kartu Keluarga' },
+            nama: { type: Type.STRING, description: 'Nama Kepala Keluarga' },
+            alamat: { type: Type.STRING },
+            rt: { type: Type.STRING },
+            rw: { type: Type.STRING },
+            jenisKelamin: { type: Type.STRING },
+            jumlahJiwa: { type: Type.INTEGER },
+            anggotaKeluarga: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  nik: { type: Type.STRING, description: '16 digit NIK' },
+                  nama: { type: Type.STRING, description: 'Nama Lengkap' },
+                  hubungan: { type: Type.STRING, description: 'Kepala Keluarga, Istri, Anak, dll' },
+                  jenisKelamin: { type: Type.STRING },
+                  tempatLahir: { type: Type.STRING },
+                  tanggalLahir: { type: Type.STRING },
+                  agama: { type: Type.STRING },
+                  pekerjaan: { type: Type.STRING },
+                  statusPerkawinan: { type: Type.STRING },
+                },
+                required: ['nik', 'nama', 'hubungan'],
+              },
+            },
+          },
+          required: ['noKK', 'nama', 'anggotaKeluarga'],
+        },
+      },
+    });
+
+    const text = response.text || '{}';
+    const parsed = JSON.parse(text);
+
+    return res.json({
+      success: true,
+      data: parsed,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/scan-kk:', error);
+    return res.status(500).json({
+      success: false,
+      message: error?.message || 'Gagal menganalisis dokumen Kartu Keluarga.',
+    });
+  }
+});
+
 // Start Full-Stack Server
 async function start() {
   const isProd = process.env.NODE_ENV === 'production';
@@ -100,7 +207,11 @@ async function start() {
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -111,9 +222,18 @@ async function start() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server Rukun Tetangga berjalan aktif di port ${PORT}`);
   });
+
+  const shutdown = () => {
+    server.close(() => {
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 start().catch((err) => {

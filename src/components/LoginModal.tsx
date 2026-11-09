@@ -35,8 +35,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [serverError, setServerError] = useState('');
 
   // Admin form
-  const [adminUsername, setAdminUsername] = useState('Admin');
-  const [adminPassword, setAdminPassword] = useState('rt08rw05');
+  const [adminUsername, setAdminUsername] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
   const [adminError, setAdminError] = useState('');
 
   // Warga form: Username = Nama Asli, Password = Nomor KK (16 digit)
@@ -69,7 +69,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     }
   };
 
-  // Handle Admin RT Submit
+  // Handle Admin RT Submit (Ketat: jika akun belum dibuat di server atau mengacak -> Akun Tidak Terdaftar)
   const handleAdminSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setAdminError('');
@@ -77,40 +77,44 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     const u = adminUsername.trim();
     const p = adminPassword.trim();
 
-    // Check matched in dynamic adminAccounts first
-    const matchedAccount = adminAccounts.find(
-      (acc) => acc.username.toLowerCase() === u.toLowerCase() && (acc.passwordHash === p || p === 'rt08rw05')
-    );
-
-    if (matchedAccount) {
-      if (matchedAccount.status === 'nonaktif') {
-        setAdminError(`Akun Admin ${matchedAccount.nama} sedang dinonaktifkan oleh Server Desa.`);
-        return;
-      }
-      onLoginSuccess({
-        role: 'admin',
-        username: matchedAccount.username,
-        nama: matchedAccount.nama,
-        rtScope: `RT ${matchedAccount.rt} RW ${matchedAccount.rw}`,
-        isPinAuthenticated: false,
-      });
-      onClose();
+    if (!u) {
+      setAdminError('Silakan masukkan Username Admin RT Anda.');
+      return;
+    }
+    if (!p) {
+      setAdminError('Silakan masukkan Password Admin RT Anda.');
       return;
     }
 
-    // Default fallback admin RT 08
-    if ((u.toLowerCase() === 'admin' || u.toLowerCase() === 'adminrt08') && p === 'rt08rw05') {
-      onLoginSuccess({
-        role: 'admin',
-        username: 'Admin',
-        nama: 'Administrator RT 08 RW 05',
-        rtScope: 'RT 08 RW 05',
-        isPinAuthenticated: false,
-      });
-      onClose();
-    } else {
-      setAdminError('Username atau password Admin RT tidak cocok. (Gunakan Username "Admin", Password "rt08rw05")');
+    // Check matched in registered adminAccounts from server
+    const matchedAccount = adminAccounts.find(
+      (acc) => acc.username.toLowerCase() === u.toLowerCase()
+    );
+
+    if (!matchedAccount) {
+      setAdminError('Akun tidak terdaftar! Anda belum memiliki akun admin RT. Silakan hubungi Server Pusat RW 05 untuk membuatkan akun.');
+      return;
     }
+
+    // Check exact password
+    if (matchedAccount.passwordHash !== p) {
+      setAdminError('Password salah! Periksa kembali kata sandi admin RT Anda atau hubungi Server RW 05 untuk pemulihan akses.');
+      return;
+    }
+
+    if (matchedAccount.status === 'nonaktif') {
+      setAdminError(`Akun Admin ${matchedAccount.nama} sedang dinonaktifkan oleh Server RW 05.`);
+      return;
+    }
+
+    onLoginSuccess({
+      role: 'admin',
+      username: matchedAccount.username,
+      nama: matchedAccount.nama,
+      rtScope: `RT ${matchedAccount.rt} RW ${matchedAccount.rw}`,
+      isPinAuthenticated: false,
+    });
+    onClose();
   };
 
   // Handle Warga Submit
@@ -379,32 +383,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   </button>
                 </div>
                 <p className="mt-1 text-[11px] text-slate-400">
-                  Default RT 08: Username: <strong className="text-slate-600">Admin</strong>, Password: <strong className="text-slate-600">rt08rw05</strong>
+                  Gunakan Username & Password resmi yang telah didaftarkan oleh Pengelola Server RW 05.
                 </p>
               </div>
-
-              {adminAccounts.length > 0 && (
-                <div className="pt-1">
-                  <p className="text-[11px] font-bold text-slate-500 mb-1">
-                    Akun Admin RT Terdaftar di Server:
-                  </p>
-                  <div className="flex flex-wrap gap-1">
-                    {adminAccounts.map((acc) => (
-                      <button
-                        key={acc.id}
-                        type="button"
-                        onClick={() => {
-                          setAdminUsername(acc.username);
-                          setAdminPassword(acc.passwordHash);
-                        }}
-                        className="rounded-lg bg-slate-100 hover:bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-slate-700 hover:text-[#0B5D3F] border border-slate-200 transition-colors cursor-pointer"
-                      >
-                        {acc.username} (RT {acc.rt})
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               <button
                 type="submit"

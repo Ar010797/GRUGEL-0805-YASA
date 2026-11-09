@@ -48,6 +48,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [scanSuccess, setScanSuccess] = useState<boolean>(false);
+  const [scanError, setScanError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
@@ -59,6 +60,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
       const base64 = e.target?.result as string;
       setImagePreview(base64);
       setScanSuccess(false);
+      setScanError(null);
 
       // Automatically trigger OCR processing
       setIsScanning(true);
@@ -74,8 +76,9 @@ export const WargaModal: React.FC<WargaModalProps> = ({
         setStatusIuran(extracted.statusIuran);
         setAnggotaKeluarga(extracted.anggotaKeluarga || []);
         setScanSuccess(true);
-      } catch (err) {
+      } catch (err: any) {
         console.error('Scan error:', err);
+        setScanError(err.message || 'Gagal membaca foto Kartu Keluarga.');
       } finally {
         setIsScanning(false);
       }
@@ -114,24 +117,36 @@ export const WargaModal: React.FC<WargaModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!nama.trim()) return;
+    const cleanNama = nama.trim();
+    const finalNoKK = noKK.replace(/\D/g, '').trim();
 
-    const finalNoKK = noKK.trim() || ('330214' + Math.floor(1000000000 + Math.random() * 9000000000).toString());
+    if (!cleanNama) {
+      alert('Silakan masukkan Nama Kepala Keluarga.');
+      return;
+    }
+    if (!finalNoKK) {
+      alert('Silakan masukkan 16 digit Nomor Kartu Keluarga.');
+      return;
+    }
 
     // Ensure at least one member (the head) exists
     const membersToSave: AnggotaKeluarga[] =
       anggotaKeluarga.length > 0
-        ? anggotaKeluarga
+        ? anggotaKeluarga.map((m) => ({
+            ...m,
+            nik: m.nik.trim(),
+            nama: m.nama.trim(),
+          }))
         : [
             {
-              nik: finalNoKK.slice(0, 12) + '0001',
-              nama,
+              nik: finalNoKK,
+              nama: cleanNama,
               hubungan: 'Kepala Keluarga',
-              tempatLahir: 'Banyumas',
-              tanggalLahir: '1980-01-01',
+              tempatLahir: '',
+              tanggalLahir: '',
               jenisKelamin,
               agama: 'Islam',
-              pekerjaan: 'Wiraswasta',
+              pekerjaan: '',
               statusPerkawinan: 'Kawin',
             },
           ];
@@ -281,7 +296,14 @@ export const WargaModal: React.FC<WargaModalProps> = ({
               {scanSuccess && (
                 <div className="flex items-center justify-center gap-2 text-xs font-bold text-emerald-800 bg-emerald-100/80 rounded-xl py-1.5 px-3">
                   <CheckCircle2 size={15} />
-                  <span>Data KK berhasil terbaca! Anda dapat mengoreksi data di bawah.</span>
+                  <span>Data KK berhasil terbaca! Anda dapat mengoreksi data di bawah sebelum disimpan.</span>
+                </div>
+              )}
+
+              {scanError && (
+                <div className="flex items-center gap-2 text-xs font-semibold text-rose-800 bg-rose-50 border border-rose-200 rounded-xl p-3">
+                  <AlertCircle size={16} className="shrink-0 text-rose-600" />
+                  <span>{scanError}</span>
                 </div>
               )}
             </div>
@@ -303,7 +325,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
           {/* Form Fields: Data Kartu Keluarga */}
           <div className="space-y-3 pt-2">
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-              1. Identitas Kepala Keluarga & Rumah
+              1. Identitas Kepala Keluarga & Alamat
             </h4>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
