@@ -103,7 +103,8 @@ app.post('/api/scan-kk', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Foto KK tidak ditemukan' });
     }
 
-    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const cleanBase64 = imageBase64.replace(/^data:[^;]+;base64,/, '').trim();
+    const cleanMime = (mimeType || 'image/jpeg').split(';')[0].trim();
     const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
@@ -123,14 +124,42 @@ app.post('/api/scan-kk', async (req, res) => {
       },
     });
 
-    const prompt = `Anda adalah sistem OCR kependudukan resmi Republik Indonesia untuk membaca Kartu Keluarga (KK).
-Baca dokumen Kartu Keluarga ini secara SANGAT TELITI dan AKURAT sesuai apa yang tertulis fisik pada foto.
+    const prompt = `Anda adalah sistem OCR AI kependudukan resmi Republik Indonesia untuk membaca dokumen KARTU KELUARGA (KK).
+Baca dokumen Kartu Keluarga ini secara SANGAT TELITI, DETAIL, dan AKURAT sesuai apa yang tertulis fisik pada foto dokumen.
+
+PANDUAN STRUKTUR DOKUMEN KARTU KELUARGA (KK):
+1. NOMOR KARTU KELUARGA (No. KK):
+   - Terletak di bagian atas formulir di bawah teks "KARTU KELUARGA".
+   - Terdiri dari 16 digit angka murni (contoh: "3302211101230002").
+   - Kembalikan HANYA 16 digit angka tanpa teks "No." atau tanda titik/strip.
+
+2. IDENTITAS KEPALA KELUARGA & ALAMAT (HEADER 2 KOLOM):
+   - "Nama Kepala Keluarga": Ekstrak HANYA nama orang kepala keluarga (contoh: "ALI PAMUJI").
+     PERHATIAN SANGAT PENTING: JANGAN PERNAH menyertakan teks dari kolom kanan atau label formulir seperti "Desa/Kelurahan", "Kecamatan", "Kabupaten", "Alamat", "RT", "RW". Bersihkan label tersebut!
+   - "Alamat": Jalan, Dusun, atau Lingkungan tempat tinggal.
+   - "RT": Angka RT (misal "008" atau "08").
+   - "RW": Angka RW (misal "005" atau "05").
+   - "Desa/Kelurahan": Nama Desa/Kelurahan (misal "Kotayasa").
+   - "Kecamatan": Nama Kecamatan (misal "Sumbang").
+
+3. TABEL ANGGOTA KELUARGA (WAJIB EKSTRAK SELURUH ANGGOTA):
+   - Dokumen KK memiliki tabel data anggota keluarga dengan nomor urut (1, 2, 3, dst).
+   - Ekstrak SETIAP baris anggota keluarga yang tercantum. JANGAN SAMPAI ADA ANGGOTA YANG TERTINGGAL (jangan hanya baris pertama).
+   - Untuk setiap baris anggota keluarga:
+     * nik: Tepat 16 digit angka NIK dari kolom NIK. Pastikan angka NIK akurat dan tidak tertukar.
+     * nama: Nama lengkap anggota keluarga dari kolom Nama Lengkap. HANYA nama orang, jangan gabungkan teks lain.
+     * hubungan: Status Hubungan Dalam Keluarga (contoh: "Kepala Keluarga", "Istri", "Anak", "Orang Tua", "Mertua", "Famili Lain").
+     * jenisKelamin: "Laki-laki" atau "Perempuan" sesuai kolom Jenis Kelamin.
+     * tempatLahir: Nama tempat/kota lahir.
+     * tanggalLahir: Tanggal lahir (format DD-MM-YYYY atau YYYY-MM-DD).
+     * agama: Agama (Islam, Kristen, Katholik, Hindu, Buddha, Konghucu).
+     * pekerjaan: Jenis Pekerjaan (Wiraswasta, Mengurus Rumah Tangga, Pelajar/Mahasiswa, Karyawan Swasta, Petani, dll).
+     * statusPerkawinan: "Kawin", "Belum Kawin", "Cerai Hidup", "Cerai Mati".
+
 ATURAN MUTLAK:
-- DILARANG MENGARANG NAMA, NIK, ATAU NOMOR KK.
-- DILARANG MENGACAK DATA. Ekstrak teks asli apa adanya.
-- Pastikan noKK tepat 16 digit.
-- Pastikan setiap nik tepat 16 digit angka.
-- Ekstrak seluruh anggota keluarga pada tabel Kartu Keluarga.`;
+- DILARANG MENGARANG DATA.
+- Jika ada 3 atau 4 orang dalam KK, kembalikan 3 atau 4 objek dalam array anggotaKeluarga.
+- Pastikan noKK dan seluruh nik berformat tepat 16 digit angka murni.`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
@@ -140,7 +169,7 @@ ATURAN MUTLAK:
           parts: [
             {
               inlineData: {
-                mimeType,
+                mimeType: cleanMime,
                 data: cleanBase64,
               },
             },
@@ -153,8 +182,8 @@ ATURAN MUTLAK:
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            noKK: { type: Type.STRING, description: '16 digit Nomor Kartu Keluarga' },
-            nama: { type: Type.STRING, description: 'Nama Kepala Keluarga' },
+            noKK: { type: Type.STRING, description: '16 digit angka Nomor Kartu Keluarga murni' },
+            nama: { type: Type.STRING, description: 'Nama Kepala Keluarga SAJA (tanpa Desa/Kelurahan)' },
             alamat: { type: Type.STRING },
             rt: { type: Type.STRING },
             rw: { type: Type.STRING },
@@ -165,8 +194,8 @@ ATURAN MUTLAK:
               items: {
                 type: Type.OBJECT,
                 properties: {
-                  nik: { type: Type.STRING, description: '16 digit NIK' },
-                  nama: { type: Type.STRING, description: 'Nama Lengkap' },
+                  nik: { type: Type.STRING, description: '16 digit angka NIK anggota keluarga' },
+                  nama: { type: Type.STRING, description: 'Nama Lengkap anggota keluarga' },
                   hubungan: { type: Type.STRING, description: 'Kepala Keluarga, Istri, Anak, dll' },
                   jenisKelamin: { type: Type.STRING },
                   tempatLahir: { type: Type.STRING },
@@ -187,9 +216,70 @@ ATURAN MUTLAK:
     const text = response.text || '{}';
     const parsed = JSON.parse(text);
 
+    // Sanitasi Nama dari label formulir KK yang tidak sengaja tertempel
+    const sanitizeName = (raw: string) => {
+      if (!raw) return '';
+      let s = raw.trim();
+      s = s.replace(/^(?:no\.?\s*)?\d+[\s.-]*/i, '').trim();
+      s = s.replace(/^(?:nama\s*kepala\s*keluarga|nama\s*lengkap|nama)\s*[:=]\s*/i, '').trim();
+      s = s.split(/(?:\b|(?<=[a-z]))(?:desa\s*[\/\.]?\s*kelurahan|desakelurahan|desa|kelurahan|kecamatan|kabupaten|kota|provinsi|kodepos|kode\s*pos|rt\s*[\/\.]?\s*rw|rt|rw|dusun|alamat)\b/i)[0].trim();
+      s = s.replace(/[^a-zA-Z\s.,'-]/g, ' ').trim();
+      return s.replace(/\s+/g, ' ');
+    };
+
+    const cleanNoKK = (parsed.noKK || '').replace(/\D/g, '').slice(0, 16);
+    const cleanKepalaNama = sanitizeName(parsed.nama || '');
+
+    const sanitizedMembers = Array.isArray(parsed.anggotaKeluarga)
+      ? parsed.anggotaKeluarga.map((m: any, idx: number) => {
+          const mNama = sanitizeName(m.nama || (idx === 0 ? cleanKepalaNama : `Anggota #${idx + 1}`));
+          const mNik = (m.nik || '').replace(/\D/g, '').slice(0, 16);
+          const mHubungan = (m.hubungan || (idx === 0 ? 'Kepala Keluarga' : idx === 1 ? 'Istri' : 'Anak')).trim();
+          const mGender = (m.jenisKelamin || '').toLowerCase().includes('perempuan') ? 'Perempuan' : 'Laki-laki';
+
+          return {
+            nik: mNik,
+            nama: mNama,
+            hubungan: mHubungan,
+            jenisKelamin: mGender,
+            tempatLahir: (m.tempatLahir || '').trim(),
+            tanggalLahir: (m.tanggalLahir || '').trim(),
+            agama: (m.agama || 'Islam').trim(),
+            pekerjaan: (m.pekerjaan || '').trim(),
+            statusPerkawinan: (m.statusPerkawinan || (idx === 0 ? 'Kawin' : 'Belum Kawin')).trim(),
+          };
+        })
+      : [];
+
+    // Jika anggota keluarga kosong tetapi kepala keluarga ada, buat entry kepala keluarga
+    if (sanitizedMembers.length === 0 && (cleanKepalaNama || cleanNoKK)) {
+      sanitizedMembers.push({
+        nik: cleanNoKK,
+        nama: cleanKepalaNama || 'Kepala Keluarga',
+        hubungan: 'Kepala Keluarga',
+        jenisKelamin: parsed.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki',
+        tempatLahir: '',
+        tanggalLahir: '',
+        agama: 'Islam',
+        pekerjaan: '',
+        statusPerkawinan: 'Kawin',
+      });
+    }
+
+    const finalData = {
+      noKK: cleanNoKK,
+      nama: cleanKepalaNama || (sanitizedMembers[0]?.nama || ''),
+      alamat: parsed.alamat || 'RT 08 RW 05 Desa Kotayasa',
+      rt: (parsed.rt || '08').replace(/\D/g, '').padStart(2, '0').slice(0, 2),
+      rw: (parsed.rw || '05').replace(/\D/g, '').padStart(2, '0').slice(0, 2),
+      jenisKelamin: parsed.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki',
+      jumlahJiwa: sanitizedMembers.length || 1,
+      anggotaKeluarga: sanitizedMembers,
+    };
+
     return res.json({
       success: true,
-      data: parsed,
+      data: finalData,
     });
   } catch (error: any) {
     console.error('Error in /api/scan-kk:', error);

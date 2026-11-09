@@ -22,7 +22,7 @@ import {
   Calendar,
 } from 'lucide-react';
 import { Warga, AnggotaKeluarga, Transaction } from '../types';
-import { scanKartuKeluargaImage } from '../utils/ocrKKScanner';
+import { scanKartuKeluargaImage, cleanIndonesianName, cleanNIK } from '../utils/ocrKKScanner';
 
 interface UpgradeKKModalProps {
   isOpen: boolean;
@@ -125,19 +125,27 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
 
       try {
         const extracted = await scanKartuKeluargaImage(base64, file.type);
-        setNewNama(extracted.nama);
-        setNewNoKK(extracted.noKK);
+        const cleanName = cleanIndonesianName(extracted.nama);
+        const cleanNoKKDigits = cleanNIK(extracted.noKK);
+        const cleanMembers = (extracted.anggotaKeluarga || []).map((m) => ({
+          ...m,
+          nama: cleanIndonesianName(m.nama),
+          nik: cleanNIK(m.nik),
+        }));
+
+        setNewNama(cleanName);
+        setNewNoKK(cleanNoKKDigits);
         setNewRt(extracted.rt || targetWarga?.rt || '08');
         setNewRw(extracted.rw || targetWarga?.rw || '05');
         setNewAlamat(extracted.alamat || targetWarga?.alamat || 'RT 08 RW 05 Desa Kotayasa');
         setNewJenisKelamin(extracted.jenisKelamin);
-        setNewAnggota(extracted.anggotaKeluarga || []);
+        setNewAnggota(cleanMembers);
         setScanSuccess(true);
 
         // Auto-detect removed member for meninggal / pisah KK if target exists
         if (targetWarga && targetWarga.anggotaKeluarga) {
           const oldMembers = targetWarga.anggotaKeluarga.map((m) => m.nama.toLowerCase());
-          const newMemberNames = (extracted.anggotaKeluarga || []).map((m) => m.nama.toLowerCase());
+          const newMemberNames = cleanMembers.map((m) => m.nama.toLowerCase());
           const missing = targetWarga.anggotaKeluarga.filter(
             (m) => !newMemberNames.some((n) => n.includes(m.nama.toLowerCase()) || m.nama.toLowerCase().includes(n))
           );
@@ -177,26 +185,35 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
       alert('Silakan pilih data KK yang ingin diperbarui.');
       return;
     }
-    if (!newNama.trim()) {
+    const cleanName = cleanIndonesianName(newNama);
+    const cleanNoKKDigits = cleanNIK(newNoKK);
+
+    if (!cleanName) {
       alert('Silakan masukkan Nama Kepala Keluarga baru.');
       return;
     }
-    if (!newNoKK.trim()) {
-      alert('Silakan masukkan Nomor KK baru (16 digit).');
+    if (!cleanNoKKDigits || cleanNoKKDigits.length < 16) {
+      alert('Nomor Kartu Keluarga baru harus tepat 16 digit angka.');
       return;
     }
+
+    const finalMembers = newAnggota.map((m) => ({
+      ...m,
+      nama: cleanIndonesianName(m.nama),
+      nik: cleanNIK(m.nik),
+    }));
 
     onApplyUpgrade({
       wargaId: targetWarga.id,
       oldWarga: targetWarga,
       newKKData: {
-        nama: newNama.trim(),
-        noKK: newNoKK.trim(),
+        nama: cleanName,
+        noKK: cleanNoKKDigits,
         rt: newRt,
         rw: newRw,
         alamat: newAlamat,
         jenisKelamin: newJenisKelamin,
-        anggotaKeluarga: newAnggota,
+        anggotaKeluarga: finalMembers,
       },
       alasan,
       keterangan: keterangan || `Pembaruan data KK via scan foto terbaru (${alasan})`,

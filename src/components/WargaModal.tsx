@@ -18,7 +18,7 @@ import {
   KeyRound,
 } from 'lucide-react';
 import { Warga, AnggotaKeluarga } from '../types';
-import { scanKartuKeluargaImage } from '../utils/ocrKKScanner';
+import { scanKartuKeluargaImage, cleanIndonesianName, cleanNIK } from '../utils/ocrKKScanner';
 
 interface WargaModalProps {
   isOpen: boolean;
@@ -66,15 +66,21 @@ export const WargaModal: React.FC<WargaModalProps> = ({
       setIsScanning(true);
       try {
         const extracted = await scanKartuKeluargaImage(base64, file.type);
-        setNama(extracted.nama);
-        setNoKK(extracted.noKK);
+        setNama(cleanIndonesianName(extracted.nama));
+        setNoKK(cleanNIK(extracted.noKK));
         setNoRumah(extracted.noRumah);
         setRt(extracted.rt || '08');
         setRw(extracted.rw || '05');
         setAlamat(extracted.alamat || 'RT 08 RW 05 Desa Kotayasa');
         setJenisKelamin(extracted.jenisKelamin);
         setStatusIuran(extracted.statusIuran);
-        setAnggotaKeluarga(extracted.anggotaKeluarga || []);
+        setAnggotaKeluarga(
+          (extracted.anggotaKeluarga || []).map((m) => ({
+            ...m,
+            nama: cleanIndonesianName(m.nama),
+            nik: cleanNIK(m.nik),
+          }))
+        );
         setScanSuccess(true);
       } catch (err: any) {
         console.error('Scan error:', err);
@@ -88,7 +94,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
 
   const handleAddAnggota = () => {
     const newIdx = anggotaKeluarga.length + 1;
-    const baseKK = noKK || '3302140805120000';
+    const baseKK = cleanNIK(noKK) || '3302140805120000';
     setAnggotaKeluarga((prev) => [
       ...prev,
       {
@@ -117,15 +123,15 @@ export const WargaModal: React.FC<WargaModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanNama = nama.trim();
-    const finalNoKK = noKK.replace(/\D/g, '').trim();
+    const cleanNama = cleanIndonesianName(nama);
+    const finalNoKK = cleanNIK(noKK);
 
     if (!cleanNama) {
       alert('Silakan masukkan Nama Kepala Keluarga.');
       return;
     }
-    if (!finalNoKK) {
-      alert('Silakan masukkan 16 digit Nomor Kartu Keluarga.');
+    if (!finalNoKK || finalNoKK.length < 16) {
+      alert('Nomor Kartu Keluarga harus tepat 16 digit angka.');
       return;
     }
 
@@ -134,25 +140,25 @@ export const WargaModal: React.FC<WargaModalProps> = ({
       anggotaKeluarga.length > 0
         ? anggotaKeluarga.map((m) => ({
             ...m,
-            nik: m.nik.trim(),
-            nama: m.nama.trim(),
+            nik: cleanNIK(m.nik),
+            nama: cleanIndonesianName(m.nama),
           }))
         : [
             {
               nik: finalNoKK,
               nama: cleanNama,
               hubungan: 'Kepala Keluarga',
-              tempatLahir: '',
+              tempatLahir: 'Banyumas',
               tanggalLahir: '',
               jenisKelamin,
               agama: 'Islam',
-              pekerjaan: '',
+              pekerjaan: 'Wiraswasta',
               statusPerkawinan: 'Kawin',
             },
           ];
 
     onSave({
-      nama,
+      nama: cleanNama,
       noKK: finalNoKK,
       noRumah: noRumah || '01',
       rt: rt || '08',
