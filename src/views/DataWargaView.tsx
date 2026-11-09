@@ -20,6 +20,9 @@ import {
   X,
   CreditCard,
   Building,
+  RefreshCw,
+  Sparkles,
+  History,
 } from 'lucide-react';
 import { Warga, BantuanPemerintah, ProfilRT } from '../types';
 import { exportDataWargaPerKK_PDF, exportSingleKK_PDF, exportKartuKeluargaPemerintah_PDF } from '../utils/pdfExport';
@@ -31,6 +34,7 @@ interface DataWargaViewProps {
   profilRT?: ProfilRT;
   isServer?: boolean;
   onOpenWargaModal: () => void;
+  onOpenUpgradeModal?: (targetWarga?: Warga) => void;
   onDeleteWarga: (id: string) => void;
   onBack: () => void;
 }
@@ -41,6 +45,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
   profilRT,
   isServer = false,
   onOpenWargaModal,
+  onOpenUpgradeModal,
   onDeleteWarga,
   onBack,
 }) => {
@@ -119,6 +124,18 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
             <Download size={15} />
             <span>Download PDF Per-KK (+ Bansos)</span>
           </button>
+
+          {/* Upgrade / Perbarui KK Terbaru (Otomatis Pindah Kas) */}
+          {onOpenUpgradeModal && (
+            <button
+              onClick={() => onOpenUpgradeModal()}
+              className="flex items-center gap-2 rounded-xl bg-emerald-50 border border-emerald-300 px-4 py-2.5 text-xs font-bold text-[#0B5D3F] shadow-xs hover:bg-emerald-100 transition-all cursor-pointer"
+              title="Perbarui data KK saat ada anggota meninggal atau pisah KK (Catatan kas dialihkan aman)"
+            >
+              <RefreshCw size={14} className="text-[#0B5D3F]" />
+              <span>Upgrade Data KK Baru</span>
+            </button>
+          )}
 
           {/* Tambah Warga / Foto KK */}
           <button
@@ -307,6 +324,18 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1">
+                          {/* Tombol Upgrade / Perbarui KK */}
+                          {onOpenUpgradeModal && (
+                            <button
+                              onClick={() => onOpenUpgradeModal(w)}
+                              className="flex items-center gap-1 rounded-lg bg-blue-50 hover:bg-blue-100 px-2.5 py-1 text-[11px] font-bold text-blue-700 transition-colors cursor-pointer"
+                              title="Perbarui KK jika ada yang meninggal atau pisah KK (Riwayat kas otomatis dipindahkan)"
+                            >
+                              <RefreshCw size={12} />
+                              <span>Upgrade KK</span>
+                            </button>
+                          )}
+
                           {/* Tombol Periksa / Lihat Detail KK */}
                           <button
                             onClick={() => setSelectedWarga(w)}
@@ -517,6 +546,47 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                   </div>
                 )}
               </div>
+
+              {/* RIWAYAT UPGRADE & PEMBARUAN KK (JIKA PERNAH MENINGGAL / PISAH KK) */}
+              {selectedWarga.riwayatPerubahanKK && selectedWarga.riwayatPerubahanKK.length > 0 && (
+                <div className="space-y-3 pt-2">
+                  <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+                    <History size={16} className="text-[#0B5D3F]" />
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-800">
+                      Riwayat Upgrade & Pembaruan Data KK
+                    </h4>
+                  </div>
+
+                  <div className="space-y-2.5">
+                    {selectedWarga.riwayatPerubahanKK.map((rw) => (
+                      <div
+                        key={rw.id}
+                        className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-3.5 text-xs text-emerald-950 space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between font-bold">
+                          <span className="flex items-center gap-1.5">
+                            <Sparkles size={14} className="text-[#0B5D3F]" />
+                            <span>
+                              {rw.alasan === 'meninggal'
+                                ? 'Pembaruan (Anggota Meninggal Dunia)'
+                                : rw.alasan === 'pisah_kk'
+                                ? 'Pembaruan (Pisah Kartu Keluarga)'
+                                : 'Pembaruan Susunan Anggota KK'}
+                            </span>
+                          </span>
+                          <span className="text-[10px] text-slate-500 font-normal">{rw.tanggal}</span>
+                        </div>
+                        <p className="text-[11px] text-slate-700 leading-relaxed">{rw.keterangan}</p>
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-emerald-800 pt-1 border-t border-emerald-200/60 font-semibold">
+                          <span>KK Lama: <span className="font-mono">{rw.noKKLama}</span> &rarr; KK Baru: <span className="font-mono">{rw.noKKBaru}</span></span>
+                          <span>Kepala: {rw.kepalaKeluargaLama} &rarr; {rw.kepalaKeluargaBaru}</span>
+                          <span className="text-[#0B5D3F] font-bold">Dana Kas Dialihkan: Rp {rw.totalKasDipindahkan.toLocaleString('id-ID')}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Modal Footer */}
@@ -530,6 +600,23 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
               </button>
 
               <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
+                {/* Tombol Upgrade KK di Modal Detail */}
+                {onOpenUpgradeModal && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const w = selectedWarga;
+                      setSelectedWarga(null);
+                      onOpenUpgradeModal(w);
+                    }}
+                    className="flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 px-3.5 py-2 text-xs font-bold text-white shadow-xs cursor-pointer"
+                    title="Scan KK baru untuk perbarui susunan keluarga dan alihkan data kas secara aman"
+                  >
+                    <RefreshCw size={13} />
+                    <span>Upgrade Data KK Ini</span>
+                  </button>
+                )}
+
                 {/* Download Standar Register RT */}
                 <button
                   onClick={() => exportSingleKK_PDF(selectedWarga, bantuanList)}

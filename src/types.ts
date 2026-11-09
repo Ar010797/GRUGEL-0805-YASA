@@ -55,6 +55,21 @@ export interface Warga {
   pin?: string; // 6 digit PIN (default: 123456)
   pinAttempts?: number;
   pinLockedUntil?: number; // timestamp jika salah 3x
+  riwayatPerubahanKK?: RiwayatPerubahanKK[];
+}
+
+export interface RiwayatPerubahanKK {
+  id: string;
+  tanggal: string;
+  alasan: 'meninggal' | 'pisah_kk' | 'perubahan_anggota' | 'pembaruan_berkala';
+  keterangan: string;
+  noKKLama: string;
+  noKKBaru: string;
+  kepalaKeluargaLama: string;
+  kepalaKeluargaBaru: string;
+  anggotaKeluar?: string[]; // Anggota yang meninggal / pisah KK
+  anggotaMasuk?: string[]; // Anggota baru yang lahir / masuk KK
+  totalKasDipindahkan: number; // Jumlah uang kas yang dialihkan utuh
 }
 
 export interface AuthUser {

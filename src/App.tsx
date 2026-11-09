@@ -47,10 +47,13 @@ import { PinLockModal } from './components/PinLockModal';
 import { LupaPasswordModal } from './components/LupaPasswordModal';
 import { FloatingNotification } from './components/FloatingNotification';
 import { KirimLaporanModal } from './components/KirimLaporanModal';
+import { UpgradeKKModal } from './components/UpgradeKKModal';
 import {
   AuthUser,
   Transaction,
   Warga,
+  AnggotaKeluarga,
+  RiwayatPerubahanKK,
   PengumumanRT,
   PengaturanKas,
   BantuanPemerintah,
@@ -122,6 +125,8 @@ export default function App() {
   const [isTxModalOpen, setIsTxModalOpen] = useState<boolean>(false);
   const [txModalType, setTxModalType] = useState<'masuk' | 'keluar' | 'kematian'>('masuk');
   const [isWargaModalOpen, setIsWargaModalOpen] = useState<boolean>(false);
+  const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState<boolean>(false);
+  const [upgradeTargetWarga, setUpgradeTargetWarga] = useState<Warga | null>(null);
   const [isPengumumanModalOpen, setIsPengumumanModalOpen] = useState<boolean>(false);
   const [isSaldoAwalModalOpen, setIsSaldoAwalModalOpen] = useState<boolean>(false);
 
@@ -577,6 +582,161 @@ export default function App() {
   // Delete resident
   const handleDeleteWarga = (id: string) => {
     setWargaList((prev) => prev.filter((w) => w.id !== id));
+  };
+
+  // Upgrade / Perbarui Data KK Warga (Meninggal Dunia, Pisah KK, Pembaruan Berkala)
+  // Menjamin 100% data uang kas & catatan iuran tidak hilang dan dialihkan otomatis ke KK / Kepala Keluarga baru
+  const handleApplyUpgradeKK = ({
+    wargaId,
+    oldWarga,
+    newKKData,
+    alasan,
+    keterangan,
+    catatSantunanKematian,
+    namaMeninggal,
+  }: {
+    wargaId: string;
+    oldWarga: Warga;
+    newKKData: {
+      nama: string;
+      noKK: string;
+      rt: string;
+      rw: string;
+      alamat: string;
+      jenisKelamin: 'Laki-laki' | 'Perempuan';
+      anggotaKeluarga: AnggotaKeluarga[];
+    };
+    alasan: 'meninggal' | 'pisah_kk' | 'perubahan_anggota' | 'pembaruan_berkala';
+    keterangan: string;
+    catatSantunanKematian: boolean;
+    namaMeninggal?: string;
+  }) => {
+    // 1. Hitung total uang kas yang tercatat atas KK ini
+    const oldTxs = transactions.filter(
+      (t) =>
+        (t.noKK && t.noKK === oldWarga.noKK) ||
+        (t.namaWarga && t.namaWarga.toLowerCase() === oldWarga.nama.toLowerCase())
+    );
+    const totalKasDipindahkan = oldTxs.reduce((sum, t) => sum + (t.nominal || 0), 0);
+
+    // 2. Deteksi anggota keluar & masuk
+    const oldAnggotaNames = (oldWarga.anggotaKeluarga || []).map((a) => a.nama.trim().toLowerCase());
+    const newAnggotaNames = (newKKData.anggotaKeluarga || []).map((a) => a.nama.trim().toLowerCase());
+
+    const anggotaKeluar = (oldWarga.anggotaKeluarga || [])
+      .filter((a) => !newAnggotaNames.includes(a.nama.trim().toLowerCase()))
+      .map((a) => `${a.nama} (${a.hubungan})`);
+
+    const anggotaMasuk = (newKKData.anggotaKeluarga || [])
+      .filter((a) => !oldAnggotaNames.includes(a.nama.trim().toLowerCase()))
+      .map((a) => `${a.nama} (${a.hubungan})`);
+
+    // 3. Buat catatan riwayat perubahan KK
+    const riwayatBaru: RiwayatPerubahanKK = {
+      id: 'rw_' + Date.now(),
+      tanggal: new Date().toISOString().split('T')[0],
+      alasan,
+      keterangan: keterangan || 'Pembaruan data KK melalui scan otomatis',
+      noKKLama: oldWarga.noKK,
+      noKKBaru: newKKData.noKK,
+      kepalaKeluargaLama: oldWarga.nama,
+      kepalaKeluargaBaru: newKKData.nama,
+      anggotaKeluar: anggotaKeluar.length > 0 ? anggotaKeluar : undefined,
+      anggotaMasuk: anggotaMasuk.length > 0 ? anggotaMasuk : undefined,
+      totalKasDipindahkan,
+    };
+
+    // 4. Update data warga target tanpa menghilangkan data kas/iuran (keuangan utuh 100%)
+    setWargaList((prev) =>
+      prev.map((w) => {
+        if (w.id === wargaId) {
+          return {
+            ...w,
+            nama: newKKData.nama,
+            noKK: newKKData.noKK,
+            rt: newKKData.rt || w.rt,
+            rw: newKKData.rw || w.rw,
+            alamat: newKKData.alamat || w.alamat,
+            jenisKelamin: newKKData.jenisKelamin || w.jenisKelamin,
+            jumlahJiwa:
+              newKKData.anggotaKeluarga.length > 0
+                ? newKKData.anggotaKeluarga.length
+                : w.jumlahJiwa,
+            anggotaKeluarga: newKKData.anggotaKeluarga,
+            riwayatPerubahanKK: [riwayatBaru, ...(w.riwayatPerubahanKK || [])],
+          };
+        }
+        return w;
+      })
+    );
+
+    // 5. Update seluruh riwayat transaksi kas lama ke data KK & Kepala Keluarga baru
+    setTransactions((prev) =>
+      prev.map((t) => {
+        const matchesKK = t.noKK && t.noKK === oldWarga.noKK;
+        const matchesNama =
+          t.namaWarga && t.namaWarga.toLowerCase() === oldWarga.nama.toLowerCase();
+
+        if (matchesKK || matchesNama) {
+          return {
+            ...t,
+            noKK: newKKData.noKK,
+            namaWarga: newKKData.nama,
+            keterangan: t.keterangan.includes('Dialihkan')
+              ? t.keterangan
+              : `${t.keterangan} (Dialihkan dari KK lama: ${oldWarga.noKK})`,
+          };
+        }
+        return t;
+      })
+    );
+
+    // 6. Jika opsional santunan kas kematian dicentang, buat transaksi santunan keluar otomatis
+    if (catatSantunanKematian) {
+      const santunanTx: Transaction = {
+        id: 'santunan_' + Date.now(),
+        tanggal: new Date().toISOString().split('T')[0],
+        kategori: 'Santunan Kematian',
+        keterangan: `Santunan Kas Kematian & Kain Mori (Alm. ${namaMeninggal || 'Anggota KK'}) - KK: ${newKKData.noKK}`,
+        nominal: 200000,
+        tipe: 'kematian',
+        namaWarga: newKKData.nama,
+        noKK: newKKData.noKK,
+        tahun: tahunAktif,
+      };
+      setTransactions((prev) => [santunanTx, ...prev]);
+    }
+
+    // 7. Update data bantuan pemerintah jika ada
+    setBantuanList((prev) =>
+      prev.map((b) => {
+        if (
+          b.noKK === oldWarga.noKK ||
+          b.namaPenerima.toLowerCase() === oldWarga.nama.toLowerCase()
+        ) {
+          return {
+            ...b,
+            namaPenerima: newKKData.nama,
+            noKK: newKKData.noKK,
+          };
+        }
+        return b;
+      })
+    );
+
+    // 8. Tampilkan pengumuman/notifikasi konfirmasi sukses
+    setFloatingAnnouncement({
+      id: 'upgrade_' + Date.now(),
+      judul: 'Data KK Berhasil Diperbarui',
+      isi: `Data KK atas nama ${oldWarga.nama} berhasil diperbarui menjadi ${newKKData.nama} (${newKKData.noKK}). Seluruh riwayat catatan keuangan & kas (${oldTxs.length} transaksi senilai Rp ${totalKasDipindahkan.toLocaleString('id-ID')}) dialihkan utuh tanpa ada yang hilang.`,
+      kategori: 'Umum',
+      tanggal: new Date().toISOString().split('T')[0],
+      tanggalBerakhir: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      penulis: 'Sistem Upgrade KK',
+    });
+
+    setIsUpgradeModalOpen(false);
+    setUpgradeTargetWarga(null);
   };
 
   // Create Announcement
@@ -1051,7 +1211,12 @@ export default function App() {
                 <DataWargaView
                   wargaList={wargaList}
                   bantuanList={bantuanList}
+                  isServer={true}
                   onOpenWargaModal={() => setIsWargaModalOpen(true)}
+                  onOpenUpgradeModal={(w) => {
+                    setUpgradeTargetWarga(w || null);
+                    setIsUpgradeModalOpen(true);
+                  }}
                   onDeleteWarga={handleDeleteWarga}
                   onBack={() => setCurrentView('server-kontrol')}
                 />
@@ -1244,6 +1409,10 @@ export default function App() {
                     profilRT={pengaturanKas.profilRT}
                     isServer={isServer}
                     onOpenWargaModal={() => setIsWargaModalOpen(true)}
+                    onOpenUpgradeModal={(w) => {
+                      setUpgradeTargetWarga(w || null);
+                      setIsUpgradeModalOpen(true);
+                    }}
                     onDeleteWarga={handleDeleteWarga}
                     onBack={() => setCurrentView('beranda')}
                   />
@@ -1370,6 +1539,21 @@ export default function App() {
           onClose={() => setIsSaldoAwalModalOpen(false)}
           pengaturanKas={pengaturanKas}
           onSaveSaldoAwal={handleSaveSaldoAwal}
+        />
+      )}
+
+      {/* Upgrade Data KK Modal (Scan KK Baru, Pindah Kas Utuh, Deteksi Anggota Meninggal/Pisah KK) */}
+      {(isAdminRT || isServer) && (
+        <UpgradeKKModal
+          isOpen={isUpgradeModalOpen}
+          onClose={() => {
+            setIsUpgradeModalOpen(false);
+            setUpgradeTargetWarga(null);
+          }}
+          wargaList={wargaList}
+          transactions={transactions}
+          initialTargetWarga={upgradeTargetWarga}
+          onApplyUpgrade={handleApplyUpgradeKK}
         />
       )}
     </div>
