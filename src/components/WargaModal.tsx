@@ -18,7 +18,13 @@ import {
   KeyRound,
 } from 'lucide-react';
 import { Warga, AnggotaKeluarga } from '../types';
-import { scanKartuKeluargaImage, cleanIndonesianName, cleanNIK } from '../utils/ocrKKScanner';
+import {
+  scanKartuKeluargaImage,
+  cleanIndonesianName,
+  cleanNIK,
+  isFormOrHeaderGarbage,
+  preprocessAndCompressImage,
+} from '../utils/ocrKKScanner';
 
 interface WargaModalProps {
   isOpen: boolean;
@@ -58,15 +64,18 @@ export const WargaModal: React.FC<WargaModalProps> = ({
     const reader = new FileReader();
     reader.onload = async (e) => {
       const base64 = e.target?.result as string;
-      setImagePreview(base64);
       setScanSuccess(false);
       setScanError(null);
-
-      // Automatically trigger OCR processing
       setIsScanning(true);
+
       try {
-        const extracted = await scanKartuKeluargaImage(base64, file.type);
-        setNama(cleanIndonesianName(extracted.nama));
+        // Optimize and compress large mobile camera photos
+        const optimized = await preprocessAndCompressImage(base64);
+        setImagePreview(optimized);
+
+        const extracted = await scanKartuKeluargaImage(optimized, 'image/jpeg');
+        const cleanKepala = cleanIndonesianName(extracted.nama);
+        setNama(cleanKepala);
         setNoKK(cleanNIK(extracted.noKK));
         setNoRumah(extracted.noRumah);
         setRt(extracted.rt || '08');
@@ -74,13 +83,20 @@ export const WargaModal: React.FC<WargaModalProps> = ({
         setAlamat(extracted.alamat || 'RT 08 RW 05 Desa Kotayasa');
         setJenisKelamin(extracted.jenisKelamin);
         setStatusIuran(extracted.statusIuran);
-        setAnggotaKeluarga(
-          (extracted.anggotaKeluarga || []).map((m) => ({
+
+        const cleanMembers = (extracted.anggotaKeluarga || []).map((m, idx) => {
+          let mName = cleanIndonesianName(m.nama);
+          if (!mName || isFormOrHeaderGarbage(mName) || mName === 'Istri' || mName.startsWith('Anak #')) {
+            mName = idx === 0 ? cleanKepala : '';
+          }
+          return {
             ...m,
-            nama: cleanIndonesianName(m.nama),
+            nama: mName,
             nik: cleanNIK(m.nik),
-          }))
-        );
+          };
+        });
+
+        setAnggotaKeluarga(cleanMembers);
         setScanSuccess(true);
       } catch (err: any) {
         console.error('Scan error:', err);
@@ -490,8 +506,18 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                         type="text"
                         value={member.nama}
                         onChange={(e) => handleUpdateAnggota(idx, 'nama', e.target.value)}
-                        placeholder="Nama anggota keluarga"
-                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-800"
+                        placeholder={
+                          idx === 0
+                            ? 'Nama Kepala Keluarga'
+                            : member.hubungan === 'Istri'
+                            ? 'Nama Lengkap Istri Sesuai KK'
+                            : `Nama Lengkap Anak #${idx}`
+                        }
+                        className={`w-full rounded-lg border px-2.5 py-1.5 text-xs font-bold ${
+                          !member.nama
+                            ? 'border-amber-300 bg-amber-50/50 text-amber-900 placeholder:text-amber-500'
+                            : 'border-slate-200 bg-white text-slate-800'
+                        }`}
                       />
                     </div>
 

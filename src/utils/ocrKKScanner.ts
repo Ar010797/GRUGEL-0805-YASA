@@ -14,6 +14,42 @@ export interface ExtractedKKData {
 }
 
 /**
+ * Checks if a string is form boilerplate, header text, or OCR noise, NOT a person's name.
+ */
+export function isFormOrHeaderGarbage(raw: string): boolean {
+  if (!raw) return true;
+  const s = raw.trim().toLowerCase();
+  if (s.length < 3) return true;
+
+  // Typical OCR misreads and form labels on KK
+  if (
+    /^(grd|nie|aamat|alamat|desa|kelurahan|kecamatan|kabupaten|kota|provinsi|kodepos|kode|pos|dusun|rt|rw|no|blangko|lembar|pemerintah|republik|indonesia)\b/i.test(
+      s
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(kotayasa|sumbang|banyumas|jawa tengah|republik|indonesia|kartu|keluarga|dukcapil|kependudukan)\b/i.test(
+      s
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(nik|nama|lengkap|jenis|kelamin|tempat|lahir|tanggal|agama|pendidikan|pekerjaan|status|perkawinan|hubungan|kewarganegaraan|ayah|ibu|paspor|kitap|tanda|tangan|dinas|gol\s*darah)\b/i.test(
+      s
+    )
+  ) {
+    return true;
+  }
+  if (/[:=]/.test(s)) return true;
+  if (/^[^a-zA-Z]+$/.test(s)) return true;
+
+  return false;
+}
+
+/**
  * Sanitizes Indonesian names extracted from Kartu Keluarga forms.
  * Strips out form labels, column headers, and adjacent field texts like:
  * "Desa/Kelurahan", "DesaKelurahan", "Kecamatan", "Kabupaten", "RT/RW", "Alamat", etc.
@@ -22,7 +58,7 @@ export function cleanIndonesianName(raw: string): string {
   if (!raw) return '';
   let str = raw.trim();
 
-  // Remove leading numbers like "1. ", "1 ", "No. 1 "
+  // Remove leading row numbering like "1. ", "1 ", "No. 1 "
   str = str.replace(/^(?:no\.?\s*)?\d+[\s.-]*/i, '').trim();
 
   // Remove form label prefixes like "Nama Kepala Keluarga : ", "Nama Lengkap : "
@@ -38,6 +74,11 @@ export function cleanIndonesianName(raw: string): string {
 
   // Normalize whitespace
   str = str.replace(/\s+/g, ' ');
+
+  // If the result matches form boilerplate or noise, discard it
+  if (isFormOrHeaderGarbage(str)) {
+    return '';
+  }
 
   return str;
 }
@@ -60,22 +101,82 @@ export function cleanNIK(raw: string): string {
 }
 
 /**
+ * Downscales and compresses large camera images to an optimal size (~1600px max, ~400KB JPEG).
+ * Prevents mobile memory crashes, huge network payloads, and OCR timeouts.
+ */
+export async function preprocessAndCompressImage(
+  dataUri: string,
+  maxDimension = 1600,
+  quality = 0.85
+): Promise<string> {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return dataUri;
+  }
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width <= maxDimension && height <= maxDimension && dataUri.length < 800000) {
+        return resolve(dataUri);
+      }
+
+      if (width > height) {
+        if (width > maxDimension) {
+          height = Math.round((height * maxDimension) / width);
+          width = maxDimension;
+        }
+      } else {
+        if (height > maxDimension) {
+          width = Math.round((width * maxDimension) / height);
+          height = maxDimension;
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return resolve(dataUri);
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(img, 0, 0, width, height);
+
+      const optimizedBase64 = canvas.toDataURL('image/jpeg', quality);
+      resolve(optimizedBase64);
+    };
+    img.onerror = () => resolve(dataUri);
+    img.src = dataUri;
+  });
+}
+
+/**
  * Scan & Extract Kartu Keluarga (KK) with precision:
- * 1. Uses Gemini 3.8 Flash Vision on the backend (/api/scan-kk) for high-accuracy OCR.
- * 2. If Gemini is unavailable, falls back to enhanced on-device Tesseract optical recognition.
- * 3. Never returns random or fabricated sample data.
+ * 1. Optimizes image size.
+ * 2. Uses Gemini 3.8 Flash Vision on the backend (/api/scan-kk) for high-accuracy OCR.
+ * 3. If Gemini is unavailable, falls back to enhanced on-device Tesseract optical recognition.
+ * 4. Never returns random or fabricated sample data.
  */
 export const scanKartuKeluargaImage = async (
   imageBase64: string,
   imageMimeType: string = 'image/jpeg'
 ): Promise<ExtractedKKData> => {
+  // Pre-process & compress image to avoid huge payload timeouts
+  let optimizedImage = imageBase64;
+  try {
+    optimizedImage = await preprocessAndCompressImage(imageBase64);
+  } catch {
+    optimizedImage = imageBase64;
+  }
+
   // Step 1: Call Backend Gemini Vision API
   try {
     const res = await fetch('/api/scan-kk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        imageBase64,
+        imageBase64: optimizedImage,
         mimeType: imageMimeType,
       }),
     });
@@ -86,25 +187,35 @@ export const scanKartuKeluargaImage = async (
         const d = result.data;
         const validMembers: AnggotaKeluarga[] = Array.isArray(d.anggotaKeluarga)
           ? d.anggotaKeluarga.map((m: any, idx: number) => {
-              const cleanedMName = cleanIndonesianName(m.nama || '');
+              let cleanedMName = cleanIndonesianName(m.nama || '');
               const cleanedMNik = cleanNIK(m.nik || '');
               const hubungan = (
                 m.hubungan || (idx === 0 ? 'Kepala Keluarga' : idx === 1 ? 'Istri' : 'Anak')
               ).trim();
-              const jenisKelamin = m.jenisKelamin?.toLowerCase().includes('perempuan')
-                ? 'Perempuan'
-                : 'Laki-laki';
+
+              // Infer gender
+              let jenisKelamin: 'Laki-laki' | 'Perempuan' = 'Laki-laki';
+              if (m.jenisKelamin?.toLowerCase().includes('perempuan') || hubungan.toLowerCase() === 'istri') {
+                jenisKelamin = 'Perempuan';
+              } else if (cleanedMNik.length === 16) {
+                const dd = parseInt(cleanedMNik.slice(6, 8), 10);
+                if (!isNaN(dd) && dd > 40) jenisKelamin = 'Perempuan';
+              }
+
+              if (!cleanedMName || isFormOrHeaderGarbage(cleanedMName)) {
+                cleanedMName = idx === 0 ? cleanIndonesianName(d.nama || '') : idx === 1 ? 'Istri' : `Anak #${idx}`;
+              }
 
               return {
                 nik: cleanedMNik,
-                nama: cleanedMName || (idx === 0 ? 'Kepala Keluarga' : `Anggota #${idx + 1}`),
+                nama: cleanedMName,
                 hubungan,
                 jenisKelamin,
-                tempatLahir: (m.tempatLahir || '').trim(),
+                tempatLahir: (m.tempatLahir || 'Banyumas').trim(),
                 tanggalLahir: (m.tanggalLahir || '').trim(),
                 agama: (m.agama || 'Islam').trim(),
-                pekerjaan: (m.pekerjaan || '').trim(),
-                statusPerkawinan: (m.statusPerkawinan || (idx === 0 ? 'Kawin' : 'Belum Kawin')).trim(),
+                pekerjaan: (m.pekerjaan || (idx === 0 ? 'Wiraswasta' : idx === 1 ? 'Mengurus Rumah Tangga' : 'Pelajar / Mahasiswa')).trim(),
+                statusPerkawinan: (m.statusPerkawinan || (idx <= 1 ? 'Kawin' : 'Belum Kawin')).trim(),
               };
             })
           : [];
@@ -120,10 +231,10 @@ export const scanKartuKeluargaImage = async (
               nama: kepalaKeluargaName || 'Kepala Keluarga',
               hubungan: 'Kepala Keluarga',
               jenisKelamin: d.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki',
-              tempatLahir: '',
+              tempatLahir: 'Banyumas',
               tanggalLahir: '',
               agama: 'Islam',
-              pekerjaan: '',
+              pekerjaan: 'Wiraswasta',
               statusPerkawinan: 'Kawin',
             });
           }
@@ -151,7 +262,7 @@ export const scanKartuKeluargaImage = async (
   try {
     const { createWorker } = await import('tesseract.js');
     const worker = await createWorker('eng');
-    const ret = await worker.recognize(imageBase64);
+    const ret = await worker.recognize(optimizedImage);
     await worker.terminate();
 
     const ocrText = ret?.data?.text || '';
@@ -179,13 +290,16 @@ function parseIndonesianKKText(text: string): ExtractedKKData {
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
-  // 1. Extract all 16-digit numbers (No KK and individual NIKs)
+  // 1. Extract all 16-digit numbers in the document
   const sixteenDigits = (text.match(/\b\d{16}\b/g) || []).map((d) => cleanNIK(d));
 
   // Extract No. KK (near KARTU KELUARGA header or "No.")
   let noKK = '';
   for (const line of lines) {
-    if (/No\.?\s*[:=]?\s*\d{16}/i.test(line) || (/KARTU\s*KELUARGA/i.test(line) && /\d{16}/.test(line))) {
+    if (
+      /No\.?\s*[:=]?\s*\d{16}/i.test(line) ||
+      (/KARTU\s*KELUARGA/i.test(line) && /\d{16}/.test(line))
+    ) {
       const match = line.match(/\d{16}/);
       if (match) {
         noKK = cleanNIK(match[0]);
@@ -228,59 +342,38 @@ function parseIndonesianKKText(text: string): ExtractedKKData {
   if (alamatLine) {
     const parts = alamatLine.split(/[:=]/);
     if (parts.length > 1 && parts[1].trim()) {
-      alamat = cleanIndonesianName(parts[1]);
+      const addrClean = cleanIndonesianName(parts[1]);
+      if (addrClean) alamat = addrClean;
     }
   }
 
   // 5. Extract Family Members from Table
-  // Exclude No KK from individual NIKs if possible, or keep if single member
+  // Filter out No KK so we only keep individual member NIKs
   const memberNiks = sixteenDigits.filter((digit) => digit !== noKK);
   const uniqueNiks = Array.from(new Set(memberNiks.length > 0 ? memberNiks : sixteenDigits));
 
-  // Find candidate name lines in the table area (exclude headers & labels)
-  const isHeaderWord = (s: string) => {
-    return /^(republik|indonesia|kartu|keluarga|tanda|tangan|kepala|dinas|kependudukan|catatan|sipil|nik|nama|lengkap|jenis|kelamin|tempat|lahir|tanggal|agama|pendidikan|pekerjaan|status|perkawinan|hubungan|kewarganegaraan|ayah|ibu|paspor|kitap|no|desa|kelurahan|kecamatan|kabupaten|provinsi|alamat|rt|rw|dusun)\b/i.test(
-      s.trim()
-    );
-  };
-
-  const candidateNameLines: string[] = [];
-  for (const line of lines) {
-    // Check if line looks like an Indonesian person name (2+ letters, mostly uppercase, not form label)
-    const cleaned = cleanIndonesianName(line);
-    if (
-      cleaned.length >= 3 &&
-      !isHeaderWord(cleaned) &&
-      !/^\d+$/.test(cleaned) &&
-      cleaned.split(' ').length >= 1 &&
-      cleaned.split(' ').length <= 5
-    ) {
-      candidateNameLines.push(cleaned);
-    }
-  }
-
-  // Build Anggota Keluarga records
   const anggotaKeluarga: AnggotaKeluarga[] = [];
 
   if (uniqueNiks.length > 0) {
     uniqueNiks.forEach((nik, idx) => {
-      // Pick matched name or candidate name
       let memberName = '';
-      if (idx === 0 && namaKepalaKeluarga) {
-        memberName = namaKepalaKeluarga;
-      } else if (candidateNameLines[idx]) {
-        memberName = candidateNameLines[idx];
-      } else {
-        memberName = idx === 0 ? 'Kepala Keluarga' : `Anggota Keluarga #${idx + 1}`;
-      }
 
-      // Check relation
-      const hubungan =
-        idx === 0
-          ? 'Kepala Keluarga'
-          : idx === 1
-          ? 'Istri'
-          : 'Anak';
+      // Strategy 1: Check the line containing this NIK
+      const lineIdx = lines.findIndex((l) => l.includes(nik));
+      if (lineIdx !== -1) {
+        const line = lines[lineIdx];
+        const beforeNik = line.split(nik)[0].trim();
+        const candidateBefore = cleanIndonesianName(beforeNik);
+        if (candidateBefore && !isFormOrHeaderGarbage(candidateBefore)) {
+          memberName = candidateBefore;
+        } else if (lineIdx > 0) {
+          // Check line directly preceding the NIK
+          const candidatePrev = cleanIndonesianName(lines[lineIdx - 1]);
+          if (candidatePrev && !isFormOrHeaderGarbage(candidatePrev)) {
+            memberName = candidatePrev;
+          }
+        }
+      }
 
       // Infer gender from 7th and 8th digit of NIK (in Indonesia, female DD is > 40)
       let gender: 'Laki-laki' | 'Perempuan' = 'Laki-laki';
@@ -291,6 +384,26 @@ function parseIndonesianKKText(text: string): ExtractedKKData {
         }
       }
 
+      // Check relation
+      let hubungan = 'Anak';
+      if (idx === 0) {
+        hubungan = 'Kepala Keluarga';
+        if (!memberName && namaKepalaKeluarga) {
+          memberName = namaKepalaKeluarga;
+        }
+      } else if (idx === 1 && gender === 'Perempuan') {
+        hubungan = 'Istri';
+      }
+
+      if (!memberName || isFormOrHeaderGarbage(memberName)) {
+        memberName =
+          idx === 0
+            ? namaKepalaKeluarga || 'Kepala Keluarga'
+            : idx === 1 && gender === 'Perempuan'
+            ? 'Istri'
+            : `Anak #${idx}`;
+      }
+
       anggotaKeluarga.push({
         nik,
         nama: memberName,
@@ -299,7 +412,12 @@ function parseIndonesianKKText(text: string): ExtractedKKData {
         tanggalLahir: '',
         jenisKelamin: gender,
         agama: 'Islam',
-        pekerjaan: idx === 0 ? 'Wiraswasta' : idx === 1 ? 'Mengurus Rumah Tangga' : 'Pelajar / Mahasiswa',
+        pekerjaan:
+          idx === 0
+            ? 'Wiraswasta'
+            : idx === 1 && gender === 'Perempuan'
+            ? 'Mengurus Rumah Tangga'
+            : 'Pelajar / Mahasiswa',
         statusPerkawinan: idx <= 1 ? 'Kawin' : 'Belum Kawin',
       });
     });

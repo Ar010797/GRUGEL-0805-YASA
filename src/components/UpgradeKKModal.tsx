@@ -22,7 +22,13 @@ import {
   Calendar,
 } from 'lucide-react';
 import { Warga, AnggotaKeluarga, Transaction } from '../types';
-import { scanKartuKeluargaImage, cleanIndonesianName, cleanNIK } from '../utils/ocrKKScanner';
+import {
+  scanKartuKeluargaImage,
+  cleanIndonesianName,
+  cleanNIK,
+  isFormOrHeaderGarbage,
+  preprocessAndCompressImage,
+} from '../utils/ocrKKScanner';
 
 interface UpgradeKKModalProps {
   isOpen: boolean;
@@ -118,20 +124,28 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
     const reader = new FileReader();
     reader.onload = async (e) => {
       const base64 = e.target?.result as string;
-      setImagePreview(base64);
       setScanSuccess(false);
       setScanError(null);
       setIsScanning(true);
 
       try {
-        const extracted = await scanKartuKeluargaImage(base64, file.type);
+        const optimized = await preprocessAndCompressImage(base64);
+        setImagePreview(optimized);
+
+        const extracted = await scanKartuKeluargaImage(optimized, 'image/jpeg');
         const cleanName = cleanIndonesianName(extracted.nama);
         const cleanNoKKDigits = cleanNIK(extracted.noKK);
-        const cleanMembers = (extracted.anggotaKeluarga || []).map((m) => ({
-          ...m,
-          nama: cleanIndonesianName(m.nama),
-          nik: cleanNIK(m.nik),
-        }));
+        const cleanMembers = (extracted.anggotaKeluarga || []).map((m, idx) => {
+          let mName = cleanIndonesianName(m.nama);
+          if (!mName || isFormOrHeaderGarbage(mName) || mName === 'Istri' || mName.startsWith('Anak #')) {
+            mName = idx === 0 ? cleanName : '';
+          }
+          return {
+            ...m,
+            nama: mName,
+            nik: cleanNIK(m.nik),
+          };
+        });
 
         setNewNama(cleanName);
         setNewNoKK(cleanNoKKDigits);
