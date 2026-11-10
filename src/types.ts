@@ -23,8 +23,13 @@ export interface AnggotaKeluarga {
   tanggalLahir?: string;
   jenisKelamin: 'Laki-laki' | 'Perempuan';
   agama?: string;
+  pendidikan?: string;
   pekerjaan?: string;
+  golonganDarah?: string;
   statusPerkawinan?: string;
+  kewarganegaraan?: string;
+  namaAyah?: string;
+  namaIbu?: string;
 }
 
 export interface Warga {

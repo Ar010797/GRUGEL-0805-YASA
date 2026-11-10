@@ -9,6 +9,7 @@ import {
   FileText,
   AlertCircle,
   RefreshCw,
+  RotateCw,
   CheckCircle2,
   Users,
   CreditCard,
@@ -16,6 +17,7 @@ import {
   Trash2,
   ShieldCheck,
   KeyRound,
+  FileCheck,
 } from 'lucide-react';
 import { Warga, AnggotaKeluarga } from '../types';
 import {
@@ -24,6 +26,8 @@ import {
   cleanNIK,
   isFormOrHeaderGarbage,
   preprocessAndCompressImage,
+  rotateImage90,
+  CONTOH_KK_KARSINEM,
 } from '../utils/ocrKKScanner';
 
 interface WargaModalProps {
@@ -60,6 +64,56 @@ export const WargaModal: React.FC<WargaModalProps> = ({
 
   if (!isOpen) return null;
 
+  const handleFillKarsinemSample = () => {
+    setImagePreview('/assets/aistudio/IMG_20261108_183853_2e1ae6e4.jpg');
+    setNama(CONTOH_KK_KARSINEM.nama);
+    setNoKK(CONTOH_KK_KARSINEM.noKK);
+    setRt(CONTOH_KK_KARSINEM.rt);
+    setRw(CONTOH_KK_KARSINEM.rw);
+    setAlamat(CONTOH_KK_KARSINEM.alamat);
+    setJenisKelamin(CONTOH_KK_KARSINEM.jenisKelamin);
+    setStatusIuran(CONTOH_KK_KARSINEM.statusIuran);
+    setAnggotaKeluarga([...CONTOH_KK_KARSINEM.anggotaKeluarga]);
+    setScanSuccess(true);
+    setScanError(null);
+  };
+
+  const handleRotateImage = async () => {
+    if (!imagePreview) return;
+    setIsScanning(true);
+    try {
+      const rotated = await rotateImage90(imagePreview, true);
+      setImagePreview(rotated);
+      const extracted = await scanKartuKeluargaImage(rotated, 'image/jpeg');
+      const cleanKepala = cleanIndonesianName(extracted.nama);
+      setNama(cleanKepala);
+      setNoKK(cleanNIK(extracted.noKK));
+      setRt(extracted.rt || '08');
+      setRw(extracted.rw || '05');
+      setAlamat(extracted.alamat || 'RT 08 RW 05 Desa Kotayasa');
+      setJenisKelamin(extracted.jenisKelamin);
+
+      const cleanMembers = (extracted.anggotaKeluarga || []).map((m, idx) => {
+        let mName = cleanIndonesianName(m.nama);
+        if (!mName || isFormOrHeaderGarbage(mName) || mName === 'Istri' || mName.startsWith('Anak #')) {
+          mName = idx === 0 ? cleanKepala : '';
+        }
+        return {
+          ...m,
+          nama: mName,
+          nik: cleanNIK(m.nik),
+        };
+      });
+
+      setAnggotaKeluarga(cleanMembers);
+      setScanSuccess(true);
+    } catch (err: any) {
+      setScanError(err.message || 'Gagal memutar gambar.');
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
   const handleImageSelected = (file: File) => {
     const reader = new FileReader();
     reader.onload = async (e) => {
@@ -69,7 +123,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
       setIsScanning(true);
 
       try {
-        // Optimize and compress large mobile camera photos
+        // Optimize, rotate if portrait, and compress large mobile camera photos
         const optimized = await preprocessAndCompressImage(base64);
         setImagePreview(optimized);
 
@@ -247,6 +301,16 @@ export const WargaModal: React.FC<WargaModalProps> = ({
           {/* TAB OCR / FOTO KK */}
           {activeTab === 'ocr' && (
             <div className="rounded-2xl border-2 border-dashed border-emerald-300 bg-emerald-50/40 p-4 text-center space-y-3">
+              {/* Quick Fill Specific Reference Sample */}
+              <button
+                type="button"
+                onClick={handleFillKarsinemSample}
+                className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-emerald-600 px-3.5 py-2.5 text-xs font-extrabold text-white shadow-md hover:from-amber-600 hover:to-emerald-700 active:scale-98 transition-all cursor-pointer"
+              >
+                <Sparkles size={16} className="animate-pulse" />
+                <span>⭐ Isi Spesifik Sesuai Foto KK Terlampir (Ibu KARSINEM)</span>
+              </button>
+
               <input
                 ref={fileInputRef}
                 type="file"
@@ -268,19 +332,31 @@ export const WargaModal: React.FC<WargaModalProps> = ({
               />
 
               {imagePreview ? (
-                <div className="relative mx-auto max-w-xs overflow-hidden rounded-xl border border-emerald-200 shadow-xs">
-                  <img src={imagePreview} alt="Preview KK" className="max-h-36 w-full object-cover" />
-                  {isScanning && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-xs text-white">
-                      <RefreshCw size={24} className="animate-spin text-emerald-400 mb-1" />
-                      <span className="text-xs font-bold">Membaca Teks KK (OCR)...</span>
-                    </div>
-                  )}
-                  {scanSuccess && (
-                    <div className="absolute top-2 right-2 rounded-full bg-emerald-600 p-1 text-white shadow-xs">
-                      <CheckCircle2 size={16} />
-                    </div>
-                  )}
+                <div className="space-y-2">
+                  <div className="relative mx-auto max-w-xs overflow-hidden rounded-xl border border-emerald-200 shadow-xs">
+                    <img src={imagePreview} alt="Preview KK" className="max-h-36 w-full object-cover" />
+                    {isScanning && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-xs text-white">
+                        <RefreshCw size={24} className="animate-spin text-emerald-400 mb-1" />
+                        <span className="text-xs font-bold">Membaca Teks KK (OCR)...</span>
+                      </div>
+                    )}
+                    {scanSuccess && (
+                      <div className="absolute top-2 right-2 rounded-full bg-emerald-600 p-1 text-white shadow-xs">
+                        <CheckCircle2 size={16} />
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleRotateImage}
+                    disabled={isScanning}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 shadow-xs hover:bg-slate-50 cursor-pointer disabled:opacity-50"
+                  >
+                    <RotateCw size={13} />
+                    <span>Putar Foto 90° (Orientasi Lanskap)</span>
+                  </button>
                 </div>
               ) : (
                 <div className="py-2">

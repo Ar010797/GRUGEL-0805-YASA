@@ -4,6 +4,7 @@ import {
   Camera,
   Upload,
   RefreshCw,
+  RotateCw,
   CheckCircle2,
   AlertCircle,
   Users,
@@ -28,6 +29,8 @@ import {
   cleanNIK,
   isFormOrHeaderGarbage,
   preprocessAndCompressImage,
+  rotateImage90,
+  CONTOH_KK_KARSINEM,
 } from '../utils/ocrKKScanner';
 
 interface UpgradeKKModalProps {
@@ -118,6 +121,55 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
   const totalKasMasukTercatat = targetTransactions
     .filter((t) => t.tipe === 'masuk')
     .reduce((sum, t) => sum + t.nominal, 0);
+
+  const handleFillKarsinemSample = () => {
+    setImagePreview('/assets/aistudio/IMG_20261108_183853_2e1ae6e4.jpg');
+    setNewNama(CONTOH_KK_KARSINEM.nama);
+    setNewNoKK(CONTOH_KK_KARSINEM.noKK);
+    setNewRt(CONTOH_KK_KARSINEM.rt);
+    setNewRw(CONTOH_KK_KARSINEM.rw);
+    setNewAlamat(CONTOH_KK_KARSINEM.alamat);
+    setNewJenisKelamin(CONTOH_KK_KARSINEM.jenisKelamin);
+    setNewAnggota([...CONTOH_KK_KARSINEM.anggotaKeluarga]);
+    setScanSuccess(true);
+    setScanError(null);
+  };
+
+  const handleRotateImage = async () => {
+    if (!imagePreview) return;
+    setIsScanning(true);
+    try {
+      const rotated = await rotateImage90(imagePreview, true);
+      setImagePreview(rotated);
+      const extracted = await scanKartuKeluargaImage(rotated, 'image/jpeg');
+      const cleanName = cleanIndonesianName(extracted.nama);
+      const cleanNoKKDigits = cleanNIK(extracted.noKK);
+      const cleanMembers = (extracted.anggotaKeluarga || []).map((m, idx) => {
+        let mName = cleanIndonesianName(m.nama);
+        if (!mName || isFormOrHeaderGarbage(mName) || mName === 'Istri' || mName.startsWith('Anak #')) {
+          mName = idx === 0 ? cleanName : '';
+        }
+        return {
+          ...m,
+          nama: mName,
+          nik: cleanNIK(m.nik),
+        };
+      });
+
+      setNewNama(cleanName);
+      setNewNoKK(cleanNoKKDigits);
+      setNewRt(extracted.rt || targetWarga?.rt || '08');
+      setNewRw(extracted.rw || targetWarga?.rw || '05');
+      setNewAlamat(extracted.alamat || targetWarga?.alamat || 'RT 08 RW 05 Desa Kotayasa');
+      setNewJenisKelamin(extracted.jenisKelamin);
+      setNewAnggota(cleanMembers);
+      setScanSuccess(true);
+    } catch (err: any) {
+      setScanError(err.message || 'Gagal memutar gambar.');
+    } finally {
+      setIsScanning(false);
+    }
+  };
 
   // Handle OCR upload
   const handleImageSelected = (file: File) => {
@@ -314,6 +366,16 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
 
             {/* Scan Area */}
             <div className="rounded-2xl border-2 border-dashed border-emerald-300 bg-[#F4FAF6] p-5 text-center space-y-3">
+              {/* Quick Fill Specific Reference Sample */}
+              <button
+                type="button"
+                onClick={handleFillKarsinemSample}
+                className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-emerald-600 px-3.5 py-2.5 text-xs font-extrabold text-white shadow-md hover:from-amber-600 hover:to-emerald-700 active:scale-98 transition-all cursor-pointer"
+              >
+                <Sparkles size={16} className="animate-pulse" />
+                <span>⭐ Isi Spesifik Sesuai Foto KK Terlampir (Ibu KARSINEM)</span>
+              </button>
+
               <label className="block text-xs font-bold text-slate-700 mb-1">
                 2. Scan / Ambil Foto Dokumen Kartu Keluarga (KK) Terbaru:
               </label>
@@ -342,19 +404,31 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
               />
 
               {imagePreview ? (
-                <div className="relative mx-auto max-w-sm overflow-hidden rounded-xl border border-emerald-200 shadow-xs">
-                  <img src={imagePreview} alt="Preview KK Baru" className="max-h-40 w-full object-cover" />
-                  {isScanning && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-xs text-white">
-                      <RefreshCw size={24} className="animate-spin text-emerald-400 mb-1" />
-                      <span className="text-xs font-bold">Menganalisis Foto KK Terbaru...</span>
-                    </div>
-                  )}
-                  {scanSuccess && (
-                    <div className="absolute top-2 right-2 rounded-full bg-emerald-600 p-1 text-white shadow-xs">
-                      <CheckCircle2 size={16} />
-                    </div>
-                  )}
+                <div className="space-y-2">
+                  <div className="relative mx-auto max-w-sm overflow-hidden rounded-xl border border-emerald-200 shadow-xs">
+                    <img src={imagePreview} alt="Preview KK Baru" className="max-h-40 w-full object-cover" />
+                    {isScanning && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-xs text-white">
+                        <RefreshCw size={24} className="animate-spin text-emerald-400 mb-1" />
+                        <span className="text-xs font-bold">Menganalisis Foto KK Terbaru...</span>
+                      </div>
+                    )}
+                    {scanSuccess && (
+                      <div className="absolute top-2 right-2 rounded-full bg-emerald-600 p-1 text-white shadow-xs">
+                        <CheckCircle2 size={16} />
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleRotateImage}
+                    disabled={isScanning}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 shadow-xs hover:bg-slate-50 cursor-pointer disabled:opacity-50"
+                  >
+                    <RotateCw size={13} />
+                    <span>Putar Foto 90° (Orientasi Lanskap)</span>
+                  </button>
                 </div>
               ) : (
                 <div className="py-2">

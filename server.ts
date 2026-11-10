@@ -12,8 +12,17 @@ const app = express();
 const PORT = 3000;
 const DATA_FILE = path.join(__dirname, 'data_store.json');
 
-// Body parser
+// Body parser & CORS
 app.use(express.json({ limit: '25mb' }));
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
 // Helper to read server data
 function readServerData() {
@@ -161,57 +170,76 @@ ATURAN MUTLAK:
 - Jika ada 3 atau 4 orang dalam KK, kembalikan 3 atau 4 objek dalam array anggotaKeluarga.
 - Pastikan noKK dan seluruh nik berformat tepat 16 digit angka murni.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: [
-        {
-          role: 'user',
-          parts: [
+    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+    let response: any = null;
+    let lastError: any = null;
+
+    for (const model of candidateModels) {
+      try {
+        response = await ai.models.generateContent({
+          model,
+          contents: [
             {
-              inlineData: {
-                mimeType: cleanMime,
-                data: cleanBase64,
-              },
-            },
-            { text: prompt },
-          ],
-        },
-      ],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            noKK: { type: Type.STRING, description: '16 digit angka Nomor Kartu Keluarga murni' },
-            nama: { type: Type.STRING, description: 'Nama Kepala Keluarga SAJA (tanpa Desa/Kelurahan)' },
-            alamat: { type: Type.STRING },
-            rt: { type: Type.STRING },
-            rw: { type: Type.STRING },
-            jenisKelamin: { type: Type.STRING },
-            jumlahJiwa: { type: Type.INTEGER },
-            anggotaKeluarga: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  nik: { type: Type.STRING, description: '16 digit angka NIK anggota keluarga' },
-                  nama: { type: Type.STRING, description: 'Nama Lengkap anggota keluarga' },
-                  hubungan: { type: Type.STRING, description: 'Kepala Keluarga, Istri, Anak, dll' },
-                  jenisKelamin: { type: Type.STRING },
-                  tempatLahir: { type: Type.STRING },
-                  tanggalLahir: { type: Type.STRING },
-                  agama: { type: Type.STRING },
-                  pekerjaan: { type: Type.STRING },
-                  statusPerkawinan: { type: Type.STRING },
+              role: 'user',
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: cleanMime,
+                    data: cleanBase64,
+                  },
                 },
-                required: ['nik', 'nama', 'hubungan'],
+                { text: prompt },
+              ],
+            },
+          ],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                noKK: { type: Type.STRING, description: '16 digit angka Nomor Kartu Keluarga murni' },
+                nama: { type: Type.STRING, description: 'Nama Kepala Keluarga SAJA (tanpa Desa/Kelurahan)' },
+                alamat: { type: Type.STRING },
+                rt: { type: Type.STRING },
+                rw: { type: Type.STRING },
+                jenisKelamin: { type: Type.STRING },
+                jumlahJiwa: { type: Type.INTEGER },
+                anggotaKeluarga: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      nik: { type: Type.STRING, description: '16 digit angka NIK anggota keluarga' },
+                      nama: { type: Type.STRING, description: 'Nama Lengkap anggota keluarga' },
+                      hubungan: { type: Type.STRING, description: 'Kepala Keluarga, Istri, Anak, dll' },
+                      jenisKelamin: { type: Type.STRING },
+                      tempatLahir: { type: Type.STRING },
+                      tanggalLahir: { type: Type.STRING },
+                      agama: { type: Type.STRING },
+                      pekerjaan: { type: Type.STRING },
+                      statusPerkawinan: { type: Type.STRING },
+                    },
+                    required: ['nik', 'nama', 'hubungan'],
+                  },
+                },
               },
+              required: ['noKK', 'nama', 'anggotaKeluarga'],
             },
           },
-          required: ['noKK', 'nama', 'anggotaKeluarga'],
-        },
-      },
-    });
+        });
+
+        if (response && response.text) {
+          break; // Berhasil!
+        }
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`Model ${model} gagal atau sibuk, mencoba model cadangan...`, err?.message || err);
+      }
+    }
+
+    if (!response || !response.text) {
+      throw lastError || new Error('Gagal menghubungi engine AI.');
+    }
 
     const text = response.text || '{}';
     const parsed = JSON.parse(text);
