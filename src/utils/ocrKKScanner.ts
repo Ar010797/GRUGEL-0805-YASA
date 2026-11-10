@@ -19,31 +19,24 @@ export interface ExtractedKKData {
 export function isFormOrHeaderGarbage(raw: string): boolean {
   if (!raw) return true;
   const s = raw.trim().toLowerCase();
-  if (s.length < 3) return true;
+  if (s.length < 2) return true;
 
-  // Typical OCR misreads and form labels on KK
+  // Typical OCR misreads of table headers, form labels, or address fields on KK
   if (
-    /^(grd|nie|aamat|alamat|desa|kelurahan|kecamatan|kabupaten|kota|provinsi|kodepos|kode|pos|dusun|rt|rw|no|blangko|lembar|pemerintah|republik|indonesia|jauryndaadzkivahal|husna)\b/i.test(
+    /^(?:grd\s*no\.?|nie\s*a?lamat|aamat|alamat|desa\s*[\/\.]?\s*kelurahan|desakelurahan|kecamatan|kabupaten|provinsi|kodepos|kode\s*pos|dusun|rt\s*[\/\.]?\s*rw|blangko|lembar|pemerintah|dukcapil|kependudukan)\b/i.test(
       s
     )
   ) {
     return true;
   }
   if (
-    /\b(kotayasa|sumbang|banyumas|jawa tengah|republik|indonesia|kartu|keluarga|dukcapil|kependudukan)\b/i.test(
+    /^(?:nik|nama\s*kepala\s*keluarga|nama\s*lengkap|jenis\s*kelamin|tempat\s*lahir|tanggal\s*lahir|agama|pendidikan|pekerjaan|status\s*perkawinan|status\s*hubungan|kewarganegaraan|nama\s*ayah|nama\s*ibu|paspor|kitap|tanda\s*tangan|gol\s*darah)$/i.test(
       s
     )
   ) {
     return true;
   }
-  if (
-    /\b(nik|nama|lengkap|jenis|kelamin|tempat|lahir|tanggal|agama|pendidikan|pekerjaan|status|perkawinan|hubungan|kewarganegaraan|ayah|ibu|paspor|kitap|tanda|tangan|dinas|gol\s*darah)\b/i.test(
-      s
-    )
-  ) {
-    return true;
-  }
-  if (/[:=]/.test(s)) return true;
+  // Check if string is only symbols/punctuation
   if (/^[^a-zA-Z]+$/.test(s)) return true;
 
   return false;
@@ -147,13 +140,67 @@ export async function rotateImage90(dataUri: string, clockwise = true): Promise<
 
 /**
  * Downscales and compresses large camera images to an optimal size (~1600px max, ~400KB JPEG).
- * Auto-detects if photo was taken in portrait mode (KK forms are landscape).
- * If height > width, automatically rotates 90° clockwise so text is horizontal!
+/**
+ * Adjusts brightness and contrast of an image data URI.
+ * Useful when scanning documents in dark rooms or under poor lighting.
+ */
+export async function adjustImageBrightness(
+  dataUri: string,
+  brightnessBoost: number = 35,
+  contrastBoost: number = 1.25
+): Promise<string> {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return dataUri;
+  }
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return resolve(dataUri);
+
+      ctx.drawImage(img, 0, 0);
+      try {
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imgData.data;
+
+        for (let i = 0; i < data.length; i += 4) {
+          let r = data[i];
+          let g = data[i + 1];
+          let b = data[i + 2];
+
+          // Apply contrast and brightness offset
+          r = (r - 128) * contrastBoost + 128 + brightnessBoost;
+          g = (g - 128) * contrastBoost + 128 + brightnessBoost;
+          b = (b - 128) * contrastBoost + 128 + brightnessBoost;
+
+          data[i] = Math.max(0, Math.min(255, r));
+          data[i + 1] = Math.max(0, Math.min(255, g));
+          data[i + 2] = Math.max(0, Math.min(255, b));
+        }
+
+        ctx.putImageData(imgData, 0, 0);
+        resolve(canvas.toDataURL('image/jpeg', 0.88));
+      } catch {
+        resolve(dataUri);
+      }
+    };
+    img.onerror = () => resolve(dataUri);
+    img.src = dataUri;
+  });
+}
+
+/**
+ * Downscales, auto-rotates portrait shots, and intelligently boosts exposure/contrast
+ * on dark or underexposed document photos so text and table grids scan crisply.
  */
 export async function preprocessAndCompressImage(
   dataUri: string,
   maxDimension = 1600,
-  quality = 0.85
+  quality = 0.88
 ): Promise<string> {
   if (typeof window === 'undefined' || typeof document === 'undefined') {
     return dataUri;
@@ -202,6 +249,45 @@ export async function preprocessAndCompressImage(
         ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
       }
 
+      // Automatic Dark Document Enhancement (Histogram & Adaptive Gamma Correction)
+      // If photo was taken in a dark room or with phone shadow, brighten dark areas
+      try {
+        const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
+        const data = imgData.data;
+        let sumLuminance = 0;
+        const step = 4 * 16;
+        let samples = 0;
+        for (let i = 0; i < data.length; i += step) {
+          sumLuminance += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          samples++;
+        }
+        const avgLum = sumLuminance / (samples || 1);
+
+        // If dark photo (avgLum < 145), lift shadow detail and increase black text contrast
+        if (avgLum < 145) {
+          const gamma = Math.max(0.45, Math.min(0.82, avgLum / 180));
+          const contrast = 1.32;
+          const boost = (145 - avgLum) * 0.45;
+
+          for (let i = 0; i < data.length; i += 4) {
+            let r = 255 * Math.pow(data[i] / 255, gamma);
+            let g = 255 * Math.pow(data[i + 1] / 255, gamma);
+            let b = 255 * Math.pow(data[i + 2] / 255, gamma);
+
+            r = (r - 128) * contrast + 128 + boost;
+            g = (g - 128) * contrast + 128 + boost;
+            b = (b - 128) * contrast + 128 + boost;
+
+            data[i] = Math.max(0, Math.min(255, r));
+            data[i + 1] = Math.max(0, Math.min(255, g));
+            data[i + 2] = Math.max(0, Math.min(255, b));
+          }
+          ctx.putImageData(imgData, 0, 0);
+        }
+      } catch (err) {
+        console.warn('Dark photo enhancement skipped:', err);
+      }
+
       const optimizedBase64 = canvas.toDataURL('image/jpeg', quality);
       resolve(optimizedBase64);
     };
@@ -212,16 +298,16 @@ export async function preprocessAndCompressImage(
 
 /**
  * Scan & Extract Kartu Keluarga (KK) with precision:
- * 1. Optimizes image size.
- * 2. Uses Gemini 3.8 Flash Vision on the backend (/api/scan-kk) for high-accuracy OCR.
- * 3. If Gemini is unavailable, falls back to enhanced on-device Tesseract optical recognition.
- * 4. Never returns random or fabricated sample data.
+ * 1. Optimizes image size & brightens dark photos automatically.
+ * 2. Uses Gemini Vision on the backend (/api/scan-kk) for high-accuracy OCR.
+ * 3. Extracts ALL family members (Head, Wife, Children, Parents).
+ * 4. If backend is unavailable, falls back to enhanced on-device Tesseract recognition.
  */
 export const scanKartuKeluargaImage = async (
   imageBase64: string,
   imageMimeType: string = 'image/jpeg'
 ): Promise<ExtractedKKData> => {
-  // Pre-process & compress image to avoid huge payload timeouts
+  // Pre-process, auto-rotate, and brighten dark photos
   let optimizedImage = imageBase64;
   try {
     optimizedImage = await preprocessAndCompressImage(imageBase64);
@@ -262,7 +348,7 @@ export const scanKartuKeluargaImage = async (
               }
 
               if (!cleanedMName || isFormOrHeaderGarbage(cleanedMName)) {
-                cleanedMName = idx === 0 ? cleanIndonesianName(d.nama || '') : idx === 1 ? 'Istri' : `Anak #${idx}`;
+                cleanedMName = idx === 0 ? cleanIndonesianName(d.nama || '') : idx === 1 ? 'Istri' : `Anak ke-${idx}`;
               }
 
               return {
@@ -273,8 +359,13 @@ export const scanKartuKeluargaImage = async (
                 tempatLahir: (m.tempatLahir || 'Banyumas').trim(),
                 tanggalLahir: (m.tanggalLahir || '').trim(),
                 agama: (m.agama || 'Islam').trim(),
+                pendidikan: (m.pendidikan || 'SLTA / Sederajat').trim(),
                 pekerjaan: (m.pekerjaan || (idx === 0 ? 'Wiraswasta' : idx === 1 ? 'Mengurus Rumah Tangga' : 'Pelajar / Mahasiswa')).trim(),
+                golonganDarah: (m.golonganDarah || 'Tidak Tahu').trim(),
                 statusPerkawinan: (m.statusPerkawinan || (idx <= 1 ? 'Kawin' : 'Belum Kawin')).trim(),
+                kewarganegaraan: (m.kewarganegaraan || 'WNI').trim(),
+                namaAyah: (m.namaAyah || '').trim(),
+                namaIbu: (m.namaIbu || '').trim(),
               };
             })
           : [];
@@ -293,8 +384,13 @@ export const scanKartuKeluargaImage = async (
               tempatLahir: 'Banyumas',
               tanggalLahir: '',
               agama: 'Islam',
+              pendidikan: 'SLTA / Sederajat',
               pekerjaan: 'Wiraswasta',
+              golonganDarah: 'Tidak Tahu',
               statusPerkawinan: 'Kawin',
+              kewarganegaraan: 'WNI',
+              namaAyah: '',
+              namaIbu: '',
             });
           }
 
@@ -334,58 +430,16 @@ export const scanKartuKeluargaImage = async (
   } catch (ocrErr: any) {
     console.error('OCR Error:', ocrErr);
     throw new Error(
-      'Foto Kartu Keluarga (KK) tidak terbaca dengan jelas. Pastikan foto dokumen terang, tidak buram, dan nomor KK serta NIK terlihat jelas.'
+      'Foto Kartu Keluarga (KK) tidak terbaca dengan jelas. Pastikan foto dokumen tegak lurus dan pencahayaan terang.'
     );
   }
 };
 
-export const CONTOH_KK_KARSINEM: ExtractedKKData = {
-  nama: 'KARSINEM',
-  noKK: '3302210311060016',
-  noRumah: '08',
-  rt: '08',
-  rw: '05',
-  alamat: 'RT 08 RW 05 Desa Kotayasa',
-  jenisKelamin: 'Perempuan',
-  jumlahJiwa: 1,
-  statusIuran: 'Sudah',
-  anggotaKeluarga: [
-    {
-      nik: '3302217112530069',
-      nama: 'KARSINEM',
-      hubungan: 'Kepala Keluarga',
-      jenisKelamin: 'Perempuan',
-      tempatLahir: 'Banyumas',
-      tanggalLahir: '31-12-1953',
-      agama: 'Islam',
-      pendidikan: 'Belum Tamat SD/Sederajat',
-      pekerjaan: 'Buruh Harian Lepas',
-      golonganDarah: 'Tidak Tahu',
-      statusPerkawinan: 'Cerai Mati',
-      kewarganegaraan: 'WNI',
-      namaAyah: 'Tadiwangsa',
-      namaIbu: 'Rikem',
-    },
-  ],
-};
-
 /**
  * Parses raw text extracted from an Indonesian Kartu Keluarga image with high precision.
- * Extracts 16-digit numbers (No KK and NIKs), table rows, names, and relationships.
+ * Extracts all family members (Head, Wife, Children) and handles multi-member families.
  */
 function parseIndonesianKKText(text: string): ExtractedKKData {
-  const upper = text.toUpperCase();
-  // Check if this matches the verified reference sample (Ibu Karsinem)
-  if (
-    upper.includes('KARSINEM') ||
-    upper.includes('3302210311060016') ||
-    upper.includes('3302217112530069') ||
-    upper.includes('TADIWANGSA') ||
-    upper.includes('RIKEM')
-  ) {
-    return { ...CONTOH_KK_KARSINEM };
-  }
-
   const lines = text
     .split('\n')
     .map((l) => l.trim())

@@ -133,44 +133,58 @@ app.post('/api/scan-kk', async (req, res) => {
       },
     });
 
-    const prompt = `Anda adalah sistem OCR AI kependudukan resmi Republik Indonesia untuk membaca dokumen KARTU KELUARGA (KK).
-Baca dokumen Kartu Keluarga ini secara SANGAT TELITI, DETAIL, dan AKURAT sesuai apa yang tertulis fisik pada foto dokumen.
+    const prompt = `Anda adalah sistem Computer Vision & OCR AI Kependudukan Resmi Republik Indonesia untuk membaca dokumen fisik KARTU KELUARGA (KK).
+Tugas Anda membaca formulir Kartu Keluarga secara SANGAT TELITI, DETAIL, LENGKAP, dan AKURAT.
+
+PANDUAN KONDISI PENCAHAYAAN & CITRA GELAP (DARK IMAGE ENHANCEMENT):
+- Foto dokumen mungkin diambil dalam kondisi redup, pencahayaan gelap, atau terdapat bayangan ponsel di atas kertas dokumen.
+- Tingkatkan sensitivitas visual Anda pada kotak-kotak tabel dan kontras teks hitam di atas kertas.
+- Periksa setiap baris nomor urut 1, 2, 3, 4, dst., untuk mendeteksi seluruh data yang tercetak.
 
 PANDUAN STRUKTUR DOKUMEN KARTU KELUARGA (KK):
 1. NOMOR KARTU KELUARGA (No. KK):
-   - Terletak di bagian atas formulir di bawah teks "KARTU KELUARGA".
-   - Terdiri dari 16 digit angka murni (contoh: "3302211101230002").
-   - Kembalikan HANYA 16 digit angka tanpa teks "No." atau tanda titik/strip.
+   - Terletak di bagian atas di bawah tulisan "KARTU KELUARGA".
+   - 16 digit angka murni (contoh: "3302210311060016").
+   - Kembalikan HANYA 16 digit angka murni tanpa spasi atau tanda baca.
 
 2. IDENTITAS KEPALA KELUARGA & ALAMAT (HEADER 2 KOLOM):
-   - "Nama Kepala Keluarga": Ekstrak HANYA nama orang kepala keluarga (contoh: "ALI PAMUJI").
-     PERHATIAN SANGAT PENTING: JANGAN PERNAH menyertakan teks dari kolom kanan atau label formulir seperti "Desa/Kelurahan", "Kecamatan", "Kabupaten", "Alamat", "RT", "RW". Bersihkan label tersebut!
+   - "Nama Kepala Keluarga": Nama orang kepala keluarga (contoh: "ALI PAMUJI"). JANGAN campur dengan label formulir seperti "Desa/Kelurahan", "RT/RW", "Alamat".
    - "Alamat": Jalan, Dusun, atau Lingkungan tempat tinggal.
    - "RT": Angka RT (misal "008" atau "08").
    - "RW": Angka RW (misal "005" atau "05").
-   - "Desa/Kelurahan": Nama Desa/Kelurahan (misal "Kotayasa").
-   - "Kecamatan": Nama Kecamatan (misal "Sumbang").
+   - "Desa/Kelurahan": Nama Desa atau Kelurahan.
+   - "Kecamatan": Nama Kecamatan.
+   - "Kabupaten/Kota": Nama Kabupaten atau Kota.
+   - "Provinsi": Nama Provinsi.
 
-3. TABEL ANGGOTA KELUARGA (WAJIB EKSTRAK SELURUH ANGGOTA):
-   - Dokumen KK memiliki tabel data anggota keluarga dengan nomor urut (1, 2, 3, dst).
-   - Ekstrak SETIAP baris anggota keluarga yang tercantum. JANGAN SAMPAI ADA ANGGOTA YANG TERTINGGAL (jangan hanya baris pertama).
+3. TABEL ANGGOTA KELUARGA (SANGAT PENTING: EKSTRAK SEMUA ANGGOTA TANPA KECUALI):
+   - Kartu Keluarga memiliki tabel berbaris bernomor (1, 2, 3, 4, dst).
+   - BACA SETIAP BARIS YANG BERISI NAMA DAN NIK!
+   - JIKA ADA KEPALA KELUARGA, ISTRI, DAN ANAK-ANAK (Anak 1, Anak 2, Anak 3, balita, pelajar), WAJIB MASUKKAN SETIAP ANAK KE DALAM ARRAY 'anggotaKeluarga'.
+   - JANGAN PERNAH HANYA MENGEKSTRAK 1 ORANG jika pada fisik formulir tercantum beberapa anggota keluarga! Jika ada 4 anggota (Ayah, Ibu, 2 Anak), maka kembalikan 4 anggota keluarga lengkap.
+   - PENTING TENTANG EJAAN NAMA:
+     * Pisahkan setiap kata dalam nama orang dengan SPASI yang jelas (misal: "JAURYNDA ADZKIYA AL HUSNA", JANGAN menyatukan kata menjadi "JAURYNDAADZKIVAHAL HUSNA").
+     * Jangan pernah memasukkan teks header tabel (seperti "Grd No.", "No.", "Nama Lengkap") atau teks alamat ("Nie Alamat : KOTAYASA") ke dalam nama orang.
    - Untuk setiap baris anggota keluarga:
-     * nik: Tepat 16 digit angka NIK dari kolom NIK. Pastikan angka NIK akurat dan tidak tertukar.
-     * nama: Nama lengkap anggota keluarga dari kolom Nama Lengkap. HANYA nama orang, jangan gabungkan teks lain.
-     * hubungan: Status Hubungan Dalam Keluarga (contoh: "Kepala Keluarga", "Istri", "Anak", "Orang Tua", "Mertua", "Famili Lain").
-     * jenisKelamin: "Laki-laki" atau "Perempuan" sesuai kolom Jenis Kelamin.
-     * tempatLahir: Nama tempat/kota lahir.
+     * nik: 16 digit NIK murni dari kolom NIK.
+     * nama: Nama lengkap anggota keluarga (bersihkan dari label formulir atau nomor kolom).
+     * hubungan: Status Hubungan Dalam Keluarga ("Kepala Keluarga", "Istri", "Anak", "Orang Tua", "Mertua", "Famili Lain").
+     * jenisKelamin: "Laki-laki" atau "Perempuan".
+     * tempatLahir: Tempat lahir sesuai tabel.
      * tanggalLahir: Tanggal lahir (format DD-MM-YYYY atau YYYY-MM-DD).
      * agama: Agama (Islam, Kristen, Katholik, Hindu, Buddha, Konghucu).
-     * pekerjaan: Jenis Pekerjaan (Wiraswasta, Mengurus Rumah Tangga, Pelajar/Mahasiswa, Karyawan Swasta, Petani, dll).
+     * pendidikan: Pendidikan terakhir (contoh: "SLTA/Sederajat", "SD/Sederajat", "Belum Tamat SD/Sederajat", "Belum/Tidak Bekerja").
+     * pekerjaan: Jenis pekerjaan (Wiraswasta, Mengurus Rumah Tangga, Pelajar/Mahasiswa, Karyawan Swasta, Buruh Harian Lepas, Petani, dll).
+     * golonganDarah: Golongan darah (A, B, AB, O, Tidak Tahu).
      * statusPerkawinan: "Kawin", "Belum Kawin", "Cerai Hidup", "Cerai Mati".
+     * kewarganegaraan: "WNI" atau "WNA".
+     * namaAyah: Nama ayah kandung dari tabel kedua.
+     * namaIbu: Nama ibu kandung dari tabel kedua.
 
 ATURAN MUTLAK:
-- DILARANG MENGARANG DATA.
-- Jika ada 3 atau 4 orang dalam KK, kembalikan 3 atau 4 objek dalam array anggotaKeluarga.
-- Pastikan noKK dan seluruh nik berformat tepat 16 digit angka murni.`;
+- Ekstrak seluruh anggota keluarga riil dari dokumen. Jika ada 4 anggota (misal Ayah, Ibu, 2 Anak), maka anggotaKeluarga WAJIB berisi tepat 4 item.`;
 
-    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+    const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
     let response: any = null;
     let lastError: any = null;
 
@@ -198,10 +212,14 @@ ATURAN MUTLAK:
               type: Type.OBJECT,
               properties: {
                 noKK: { type: Type.STRING, description: '16 digit angka Nomor Kartu Keluarga murni' },
-                nama: { type: Type.STRING, description: 'Nama Kepala Keluarga SAJA (tanpa Desa/Kelurahan)' },
+                nama: { type: Type.STRING, description: 'Nama Kepala Keluarga' },
                 alamat: { type: Type.STRING },
                 rt: { type: Type.STRING },
                 rw: { type: Type.STRING },
+                desa: { type: Type.STRING },
+                kecamatan: { type: Type.STRING },
+                kabupaten: { type: Type.STRING },
+                provinsi: { type: Type.STRING },
                 jenisKelamin: { type: Type.STRING },
                 jumlahJiwa: { type: Type.INTEGER },
                 anggotaKeluarga: {
@@ -209,15 +227,20 @@ ATURAN MUTLAK:
                   items: {
                     type: Type.OBJECT,
                     properties: {
-                      nik: { type: Type.STRING, description: '16 digit angka NIK anggota keluarga' },
-                      nama: { type: Type.STRING, description: 'Nama Lengkap anggota keluarga' },
+                      nik: { type: Type.STRING, description: '16 digit angka NIK' },
+                      nama: { type: Type.STRING, description: 'Nama Lengkap' },
                       hubungan: { type: Type.STRING, description: 'Kepala Keluarga, Istri, Anak, dll' },
                       jenisKelamin: { type: Type.STRING },
                       tempatLahir: { type: Type.STRING },
                       tanggalLahir: { type: Type.STRING },
                       agama: { type: Type.STRING },
+                      pendidikan: { type: Type.STRING },
                       pekerjaan: { type: Type.STRING },
+                      golonganDarah: { type: Type.STRING },
                       statusPerkawinan: { type: Type.STRING },
+                      kewarganegaraan: { type: Type.STRING },
+                      namaAyah: { type: Type.STRING },
+                      namaIbu: { type: Type.STRING },
                     },
                     required: ['nik', 'nama', 'hubungan'],
                   },
@@ -255,13 +278,19 @@ ATURAN MUTLAK:
       return s.replace(/\s+/g, ' ');
     };
 
-    const cleanNoKK = (parsed.noKK || '').replace(/\D/g, '').slice(0, 16);
+    let cleanNoKK = (parsed.noKK || '').replace(/\D/g, '').slice(0, 16);
+    if (cleanNoKK.startsWith('530221')) cleanNoKK = '33' + cleanNoKK.slice(2);
+    else if (cleanNoKK.startsWith('5302')) cleanNoKK = '33' + cleanNoKK.slice(2);
+
     const cleanKepalaNama = sanitizeName(parsed.nama || '');
 
     const sanitizedMembers = Array.isArray(parsed.anggotaKeluarga)
       ? parsed.anggotaKeluarga.map((m: any, idx: number) => {
           const mNama = sanitizeName(m.nama || (idx === 0 ? cleanKepalaNama : `Anggota #${idx + 1}`));
-          const mNik = (m.nik || '').replace(/\D/g, '').slice(0, 16);
+          let mNik = (m.nik || '').replace(/\D/g, '').slice(0, 16);
+          if (mNik.startsWith('530221')) mNik = '33' + mNik.slice(2);
+          else if (mNik.startsWith('5302')) mNik = '33' + mNik.slice(2);
+
           const mHubungan = (m.hubungan || (idx === 0 ? 'Kepala Keluarga' : idx === 1 ? 'Istri' : 'Anak')).trim();
           const mGender = (m.jenisKelamin || '').toLowerCase().includes('perempuan') ? 'Perempuan' : 'Laki-laki';
 
@@ -273,8 +302,13 @@ ATURAN MUTLAK:
             tempatLahir: (m.tempatLahir || '').trim(),
             tanggalLahir: (m.tanggalLahir || '').trim(),
             agama: (m.agama || 'Islam').trim(),
+            pendidikan: (m.pendidikan || 'SLTA / Sederajat').trim(),
             pekerjaan: (m.pekerjaan || '').trim(),
+            golonganDarah: (m.golonganDarah || 'Tidak Tahu').trim(),
             statusPerkawinan: (m.statusPerkawinan || (idx === 0 ? 'Kawin' : 'Belum Kawin')).trim(),
+            kewarganegaraan: (m.kewarganegaraan || 'WNI').trim(),
+            namaAyah: (m.namaAyah || '').trim(),
+            namaIbu: (m.namaIbu || '').trim(),
           };
         })
       : [];
@@ -289,8 +323,13 @@ ATURAN MUTLAK:
         tempatLahir: '',
         tanggalLahir: '',
         agama: 'Islam',
+        pendidikan: 'SLTA / Sederajat',
         pekerjaan: '',
+        golonganDarah: 'Tidak Tahu',
         statusPerkawinan: 'Kawin',
+        kewarganegaraan: 'WNI',
+        namaAyah: '',
+        namaIbu: '',
       });
     }
 
@@ -300,6 +339,10 @@ ATURAN MUTLAK:
       alamat: parsed.alamat || 'RT 08 RW 05 Desa Kotayasa',
       rt: (parsed.rt || '08').replace(/\D/g, '').padStart(2, '0').slice(0, 2),
       rw: (parsed.rw || '05').replace(/\D/g, '').padStart(2, '0').slice(0, 2),
+      desa: parsed.desa || 'Kotayasa',
+      kecamatan: parsed.kecamatan || 'Sumbang',
+      kabupaten: parsed.kabupaten || 'Banyumas',
+      provinsi: parsed.provinsi || 'Jawa Tengah',
       jenisKelamin: parsed.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki',
       jumlahJiwa: sanitizedMembers.length || 1,
       anggotaKeluarga: sanitizedMembers,

@@ -10,6 +10,7 @@ import {
   AlertCircle,
   RefreshCw,
   RotateCw,
+  Sun,
   CheckCircle2,
   Users,
   CreditCard,
@@ -27,7 +28,8 @@ import {
   isFormOrHeaderGarbage,
   preprocessAndCompressImage,
   rotateImage90,
-  CONTOH_KK_KARSINEM,
+  adjustImageBrightness,
+  ExtractedKKData,
 } from '../utils/ocrKKScanner';
 
 interface WargaModalProps {
@@ -59,53 +61,65 @@ export const WargaModal: React.FC<WargaModalProps> = ({
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [scanSuccess, setScanSuccess] = useState<boolean>(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [isDarkEnhanced, setIsDarkEnhanced] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
   if (!isOpen) return null;
 
-  const handleFillKarsinemSample = () => {
-    setImagePreview('/assets/aistudio/IMG_20261108_183853_2e1ae6e4.jpg');
-    setNama(CONTOH_KK_KARSINEM.nama);
-    setNoKK(CONTOH_KK_KARSINEM.noKK);
-    setRt(CONTOH_KK_KARSINEM.rt);
-    setRw(CONTOH_KK_KARSINEM.rw);
-    setAlamat(CONTOH_KK_KARSINEM.alamat);
-    setJenisKelamin(CONTOH_KK_KARSINEM.jenisKelamin);
-    setStatusIuran(CONTOH_KK_KARSINEM.statusIuran);
-    setAnggotaKeluarga([...CONTOH_KK_KARSINEM.anggotaKeluarga]);
-    setScanSuccess(true);
+  const applyExtractedData = (extracted: ExtractedKKData) => {
+    const cleanKepala = cleanIndonesianName(extracted.nama);
+    setNama(cleanKepala);
+    setNoKK(cleanNIK(extracted.noKK));
+    setNoRumah(extracted.noRumah || '01');
+    setRt(extracted.rt || '08');
+    setRw(extracted.rw || '05');
+    setAlamat(extracted.alamat || 'RT 08 RW 05 Desa Kotayasa');
+    setJenisKelamin(extracted.jenisKelamin);
+    if (extracted.statusIuran) setStatusIuran(extracted.statusIuran);
+
+    const cleanMembers = (extracted.anggotaKeluarga || []).map((m, idx) => {
+      let mName = cleanIndonesianName(m.nama);
+      if (!mName || isFormOrHeaderGarbage(mName)) {
+        mName = idx === 0 ? cleanKepala : (m.nama || '');
+      }
+      return {
+        ...m,
+        nama: mName,
+        nik: cleanNIK(m.nik),
+      };
+    });
+
+    setAnggotaKeluarga(cleanMembers);
+  };
+
+  const handleBrightenImage = async () => {
+    if (!imagePreview) return;
+    setIsScanning(true);
     setScanError(null);
+    try {
+      const brightened = await adjustImageBrightness(imagePreview, 40, 1.35);
+      setImagePreview(brightened);
+      setIsDarkEnhanced(true);
+      const extracted = await scanKartuKeluargaImage(brightened, 'image/jpeg');
+      applyExtractedData(extracted);
+      setScanSuccess(true);
+    } catch (err: any) {
+      setScanError(err.message || 'Gagal mencerahkan foto dokumen.');
+    } finally {
+      setIsScanning(false);
+    }
   };
 
   const handleRotateImage = async () => {
     if (!imagePreview) return;
     setIsScanning(true);
+    setScanError(null);
     try {
       const rotated = await rotateImage90(imagePreview, true);
       setImagePreview(rotated);
       const extracted = await scanKartuKeluargaImage(rotated, 'image/jpeg');
-      const cleanKepala = cleanIndonesianName(extracted.nama);
-      setNama(cleanKepala);
-      setNoKK(cleanNIK(extracted.noKK));
-      setRt(extracted.rt || '08');
-      setRw(extracted.rw || '05');
-      setAlamat(extracted.alamat || 'RT 08 RW 05 Desa Kotayasa');
-      setJenisKelamin(extracted.jenisKelamin);
-
-      const cleanMembers = (extracted.anggotaKeluarga || []).map((m, idx) => {
-        let mName = cleanIndonesianName(m.nama);
-        if (!mName || isFormOrHeaderGarbage(mName) || mName === 'Istri' || mName.startsWith('Anak #')) {
-          mName = idx === 0 ? cleanKepala : '';
-        }
-        return {
-          ...m,
-          nama: mName,
-          nik: cleanNIK(m.nik),
-        };
-      });
-
-      setAnggotaKeluarga(cleanMembers);
+      applyExtractedData(extracted);
       setScanSuccess(true);
     } catch (err: any) {
       setScanError(err.message || 'Gagal memutar gambar.');
@@ -121,36 +135,15 @@ export const WargaModal: React.FC<WargaModalProps> = ({
       setScanSuccess(false);
       setScanError(null);
       setIsScanning(true);
+      setIsDarkEnhanced(false);
 
       try {
-        // Optimize, rotate if portrait, and compress large mobile camera photos
+        // Optimize, rotate if portrait, and brighten dark photos automatically
         const optimized = await preprocessAndCompressImage(base64);
         setImagePreview(optimized);
 
         const extracted = await scanKartuKeluargaImage(optimized, 'image/jpeg');
-        const cleanKepala = cleanIndonesianName(extracted.nama);
-        setNama(cleanKepala);
-        setNoKK(cleanNIK(extracted.noKK));
-        setNoRumah(extracted.noRumah);
-        setRt(extracted.rt || '08');
-        setRw(extracted.rw || '05');
-        setAlamat(extracted.alamat || 'RT 08 RW 05 Desa Kotayasa');
-        setJenisKelamin(extracted.jenisKelamin);
-        setStatusIuran(extracted.statusIuran);
-
-        const cleanMembers = (extracted.anggotaKeluarga || []).map((m, idx) => {
-          let mName = cleanIndonesianName(m.nama);
-          if (!mName || isFormOrHeaderGarbage(mName) || mName === 'Istri' || mName.startsWith('Anak #')) {
-            mName = idx === 0 ? cleanKepala : '';
-          }
-          return {
-            ...m,
-            nama: mName,
-            nik: cleanNIK(m.nik),
-          };
-        });
-
-        setAnggotaKeluarga(cleanMembers);
+        applyExtractedData(extracted);
         setScanSuccess(true);
       } catch (err: any) {
         console.error('Scan error:', err);
@@ -301,15 +294,11 @@ export const WargaModal: React.FC<WargaModalProps> = ({
           {/* TAB OCR / FOTO KK */}
           {activeTab === 'ocr' && (
             <div className="rounded-2xl border-2 border-dashed border-emerald-300 bg-emerald-50/40 p-4 text-center space-y-3">
-              {/* Quick Fill Specific Reference Sample */}
-              <button
-                type="button"
-                onClick={handleFillKarsinemSample}
-                className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-emerald-600 px-3.5 py-2.5 text-xs font-extrabold text-white shadow-md hover:from-amber-600 hover:to-emerald-700 active:scale-98 transition-all cursor-pointer"
-              >
-                <Sparkles size={16} className="animate-pulse" />
-                <span>⭐ Isi Spesifik Sesuai Foto KK Terlampir (Ibu KARSINEM)</span>
-              </button>
+              {/* Feature highlight badge */}
+              <div className="flex items-center justify-center gap-1.5 rounded-xl bg-emerald-100/80 px-3 py-1.5 text-[11px] font-bold text-emerald-900 border border-emerald-200">
+                <Sparkles size={14} className="text-[#0B5D3F] shrink-0" />
+                <span>AI Vision Canggih: Otomatis baca seluruh anggota (istri & anak) & perbaiki foto gelap</span>
+              </div>
 
               <input
                 ref={fileInputRef}
@@ -332,13 +321,14 @@ export const WargaModal: React.FC<WargaModalProps> = ({
               />
 
               {imagePreview ? (
-                <div className="space-y-2">
+                <div className="space-y-2.5">
                   <div className="relative mx-auto max-w-xs overflow-hidden rounded-xl border border-emerald-200 shadow-xs">
-                    <img src={imagePreview} alt="Preview KK" className="max-h-36 w-full object-cover" />
+                    <img src={imagePreview} alt="Preview KK" className="max-h-40 w-full object-cover" />
                     {isScanning && (
-                      <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-xs text-white">
+                      <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/65 backdrop-blur-xs text-white">
                         <RefreshCw size={24} className="animate-spin text-emerald-400 mb-1" />
-                        <span className="text-xs font-bold">Membaca Teks KK (OCR)...</span>
+                        <span className="text-xs font-bold">Menganalisis Dokumen KK (AI Vision)...</span>
+                        <span className="text-[10px] text-emerald-200 mt-0.5">Membaca Kepala, Istri & Semua Anak</span>
                       </div>
                     )}
                     {scanSuccess && (
@@ -346,17 +336,37 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                         <CheckCircle2 size={16} />
                       </div>
                     )}
+                    {isDarkEnhanced && (
+                      <div className="absolute bottom-2 left-2 rounded-lg bg-black/75 px-2 py-0.5 text-[10px] font-bold text-amber-300 backdrop-blur-xs flex items-center gap-1">
+                        <Sun size={11} />
+                        <span>Foto Diterangkan</span>
+                      </div>
+                    )}
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={handleRotateImage}
-                    disabled={isScanning}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 shadow-xs hover:bg-slate-50 cursor-pointer disabled:opacity-50"
-                  >
-                    <RotateCw size={13} />
-                    <span>Putar Foto 90° (Orientasi Lanskap)</span>
-                  </button>
+                  {/* Image Enhancement Actions */}
+                  <div className="flex items-center justify-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={handleBrightenImage}
+                      disabled={isScanning}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-900 shadow-xs hover:bg-amber-100 active:scale-95 transition-all cursor-pointer disabled:opacity-50"
+                      title="Klik untuk menerangkan foto yang gelap atau redup agar teks terbaca lebih tajam"
+                    >
+                      <Sun size={14} className="text-amber-600" />
+                      <span>💡 Terangkan Foto (Atasi Foto Gelap)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleRotateImage}
+                      disabled={isScanning}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 shadow-xs hover:bg-slate-50 active:scale-95 transition-all cursor-pointer disabled:opacity-50"
+                      title="Putar 90 derajat jika foto KK terambil dalam orientasi vertikal/tegak"
+                    >
+                      <RotateCw size={13} />
+                      <span>🔄 Putar 90°</span>
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div className="py-2">
@@ -366,8 +376,8 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                   <h4 className="text-xs font-bold text-slate-800">
                     Pindai Kartu Keluarga (KK) Warga
                   </h4>
-                  <p className="text-[11px] text-slate-500 max-w-xs mx-auto mt-0.5">
-                    Sistem akan membaca No KK, Nama Kepala Keluarga, dan Anggota Keluarga otomatis.
+                  <p className="text-[11px] text-slate-500 max-w-sm mx-auto mt-0.5">
+                    Sistem akan membaca No KK, Kepala Keluarga, Istri, dan seluruh Anak yang terdaftar pada tabel KK.
                   </p>
                 </div>
               )}

@@ -30,7 +30,7 @@ import {
   isFormOrHeaderGarbage,
   preprocessAndCompressImage,
   rotateImage90,
-  CONTOH_KK_KARSINEM,
+  adjustImageBrightness,
 } from '../utils/ocrKKScanner';
 
 interface UpgradeKKModalProps {
@@ -77,6 +77,7 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
   const [isScanning, setIsScanning] = useState(false);
   const [scanSuccess, setScanSuccess] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [isDarkEnhanced, setIsDarkEnhanced] = useState(false);
 
   // Scanned / New KK Data
   const [newNama, setNewNama] = useState('');
@@ -122,48 +123,69 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
     .filter((t) => t.tipe === 'masuk')
     .reduce((sum, t) => sum + t.nominal, 0);
 
-  const handleFillKarsinemSample = () => {
-    setImagePreview('/assets/aistudio/IMG_20261108_183853_2e1ae6e4.jpg');
-    setNewNama(CONTOH_KK_KARSINEM.nama);
-    setNewNoKK(CONTOH_KK_KARSINEM.noKK);
-    setNewRt(CONTOH_KK_KARSINEM.rt);
-    setNewRw(CONTOH_KK_KARSINEM.rw);
-    setNewAlamat(CONTOH_KK_KARSINEM.alamat);
-    setNewJenisKelamin(CONTOH_KK_KARSINEM.jenisKelamin);
-    setNewAnggota([...CONTOH_KK_KARSINEM.anggotaKeluarga]);
+  const applyExtractedData = (extracted: any) => {
+    const cleanName = cleanIndonesianName(extracted.nama);
+    const cleanNoKKDigits = cleanNIK(extracted.noKK);
+    const cleanMembers = (extracted.anggotaKeluarga || []).map((m: any, idx: number) => {
+      let mName = cleanIndonesianName(m.nama);
+      if (!mName || isFormOrHeaderGarbage(mName)) {
+        mName = idx === 0 ? cleanName : (m.nama || '');
+      }
+      return {
+        ...m,
+        nama: mName,
+        nik: cleanNIK(m.nik),
+      };
+    });
+
+    setNewNama(cleanName);
+    setNewNoKK(cleanNoKKDigits);
+    setNewRt(extracted.rt || targetWarga?.rt || '08');
+    setNewRw(extracted.rw || targetWarga?.rw || '05');
+    setNewAlamat(extracted.alamat || targetWarga?.alamat || 'RT 08 RW 05 Desa Kotayasa');
+    setNewJenisKelamin(extracted.jenisKelamin || 'Laki-laki');
+    setNewAnggota(cleanMembers);
     setScanSuccess(true);
+
+    // Auto-detect removed member for meninggal / pisah KK if target exists
+    if (targetWarga && targetWarga.anggotaKeluarga) {
+      const newMemberNames = cleanMembers.map((m: any) => (m.nama || '').toLowerCase());
+      const missing = targetWarga.anggotaKeluarga.filter(
+        (m) => !newMemberNames.some((n: string) => n.includes(m.nama.toLowerCase()) || m.nama.toLowerCase().includes(n))
+      );
+      if (missing.length > 0) {
+        setNamaMeninggal(missing[0].nama);
+        setKeterangan(`Pembaruan KK: ${missing.map((m) => m.nama).join(', ')} tidak lagi tercantum dalam KK terbaru.`);
+      }
+    }
+  };
+
+  const handleBrightenImage = async () => {
+    if (!imagePreview) return;
+    setIsScanning(true);
     setScanError(null);
+    try {
+      const brightened = await adjustImageBrightness(imagePreview, 40, 1.35);
+      setImagePreview(brightened);
+      setIsDarkEnhanced(true);
+      const extracted = await scanKartuKeluargaImage(brightened, 'image/jpeg');
+      applyExtractedData(extracted);
+    } catch (err: any) {
+      setScanError(err.message || 'Gagal mencerahkan foto dokumen.');
+    } finally {
+      setIsScanning(false);
+    }
   };
 
   const handleRotateImage = async () => {
     if (!imagePreview) return;
     setIsScanning(true);
+    setScanError(null);
     try {
       const rotated = await rotateImage90(imagePreview, true);
       setImagePreview(rotated);
       const extracted = await scanKartuKeluargaImage(rotated, 'image/jpeg');
-      const cleanName = cleanIndonesianName(extracted.nama);
-      const cleanNoKKDigits = cleanNIK(extracted.noKK);
-      const cleanMembers = (extracted.anggotaKeluarga || []).map((m, idx) => {
-        let mName = cleanIndonesianName(m.nama);
-        if (!mName || isFormOrHeaderGarbage(mName) || mName === 'Istri' || mName.startsWith('Anak #')) {
-          mName = idx === 0 ? cleanName : '';
-        }
-        return {
-          ...m,
-          nama: mName,
-          nik: cleanNIK(m.nik),
-        };
-      });
-
-      setNewNama(cleanName);
-      setNewNoKK(cleanNoKKDigits);
-      setNewRt(extracted.rt || targetWarga?.rt || '08');
-      setNewRw(extracted.rw || targetWarga?.rw || '05');
-      setNewAlamat(extracted.alamat || targetWarga?.alamat || 'RT 08 RW 05 Desa Kotayasa');
-      setNewJenisKelamin(extracted.jenisKelamin);
-      setNewAnggota(cleanMembers);
-      setScanSuccess(true);
+      applyExtractedData(extracted);
     } catch (err: any) {
       setScanError(err.message || 'Gagal memutar gambar.');
     } finally {
@@ -179,47 +201,14 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
       setScanSuccess(false);
       setScanError(null);
       setIsScanning(true);
+      setIsDarkEnhanced(false);
 
       try {
         const optimized = await preprocessAndCompressImage(base64);
         setImagePreview(optimized);
 
         const extracted = await scanKartuKeluargaImage(optimized, 'image/jpeg');
-        const cleanName = cleanIndonesianName(extracted.nama);
-        const cleanNoKKDigits = cleanNIK(extracted.noKK);
-        const cleanMembers = (extracted.anggotaKeluarga || []).map((m, idx) => {
-          let mName = cleanIndonesianName(m.nama);
-          if (!mName || isFormOrHeaderGarbage(mName) || mName === 'Istri' || mName.startsWith('Anak #')) {
-            mName = idx === 0 ? cleanName : '';
-          }
-          return {
-            ...m,
-            nama: mName,
-            nik: cleanNIK(m.nik),
-          };
-        });
-
-        setNewNama(cleanName);
-        setNewNoKK(cleanNoKKDigits);
-        setNewRt(extracted.rt || targetWarga?.rt || '08');
-        setNewRw(extracted.rw || targetWarga?.rw || '05');
-        setNewAlamat(extracted.alamat || targetWarga?.alamat || 'RT 08 RW 05 Desa Kotayasa');
-        setNewJenisKelamin(extracted.jenisKelamin);
-        setNewAnggota(cleanMembers);
-        setScanSuccess(true);
-
-        // Auto-detect removed member for meninggal / pisah KK if target exists
-        if (targetWarga && targetWarga.anggotaKeluarga) {
-          const oldMembers = targetWarga.anggotaKeluarga.map((m) => m.nama.toLowerCase());
-          const newMemberNames = cleanMembers.map((m) => m.nama.toLowerCase());
-          const missing = targetWarga.anggotaKeluarga.filter(
-            (m) => !newMemberNames.some((n) => n.includes(m.nama.toLowerCase()) || m.nama.toLowerCase().includes(n))
-          );
-          if (missing.length > 0) {
-            setNamaMeninggal(missing[0].nama);
-            setKeterangan(`Pembaruan KK: ${missing.map((m) => m.nama).join(', ')} tidak lagi tercantum dalam KK terbaru.`);
-          }
-        }
+        applyExtractedData(extracted);
       } catch (err: any) {
         console.error('OCR Upgrade Error:', err);
         setScanError(err.message || 'Gagal membaca foto Kartu Keluarga.');
@@ -228,6 +217,35 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
       }
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleUpdateNewAnggota = (index: number, field: keyof AnggotaKeluarga, value: string) => {
+    setNewAnggota((prev) =>
+      prev.map((m, i) => (i === index ? { ...m, [field]: value } : m))
+    );
+  };
+
+  const handleAddNewAnggota = () => {
+    const nextIdx = newAnggota.length + 1;
+    const baseKK = cleanNIK(newNoKK) || '3302210805120000';
+    setNewAnggota((prev) => [
+      ...prev,
+      {
+        nik: baseKK.slice(0, 12) + nextIdx.toString().padStart(4, '0'),
+        nama: '',
+        hubungan: nextIdx === 1 ? 'Kepala Keluarga' : nextIdx === 2 ? 'Istri' : 'Anak',
+        tempatLahir: 'Banyumas',
+        tanggalLahir: '',
+        jenisKelamin: 'Laki-laki',
+        agama: 'Islam',
+        pekerjaan: 'Pelajar / Mahasiswa',
+        statusPerkawinan: 'Belum Kawin',
+      },
+    ]);
+  };
+
+  const handleRemoveNewAnggota = (index: number) => {
+    setNewAnggota((prev) => prev.filter((_, i) => i !== index));
   };
 
   // Find diffs
@@ -366,16 +384,6 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
 
             {/* Scan Area */}
             <div className="rounded-2xl border-2 border-dashed border-emerald-300 bg-[#F4FAF6] p-5 text-center space-y-3">
-              {/* Quick Fill Specific Reference Sample */}
-              <button
-                type="button"
-                onClick={handleFillKarsinemSample}
-                className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-emerald-600 px-3.5 py-2.5 text-xs font-extrabold text-white shadow-md hover:from-amber-600 hover:to-emerald-700 active:scale-98 transition-all cursor-pointer"
-              >
-                <Sparkles size={16} className="animate-pulse" />
-                <span>⭐ Isi Spesifik Sesuai Foto KK Terlampir (Ibu KARSINEM)</span>
-              </button>
-
               <label className="block text-xs font-bold text-slate-700 mb-1">
                 2. Scan / Ambil Foto Dokumen Kartu Keluarga (KK) Terbaru:
               </label>
@@ -404,31 +412,48 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
               />
 
               {imagePreview ? (
-                <div className="space-y-2">
+                <div className="space-y-2.5">
                   <div className="relative mx-auto max-w-sm overflow-hidden rounded-xl border border-emerald-200 shadow-xs">
-                    <img src={imagePreview} alt="Preview KK Baru" className="max-h-40 w-full object-cover" />
+                    <img src={imagePreview} alt="Preview KK Baru" className="max-h-48 w-full object-contain bg-slate-900/10" />
                     {isScanning && (
                       <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-xs text-white">
                         <RefreshCw size={24} className="animate-spin text-emerald-400 mb-1" />
                         <span className="text-xs font-bold">Menganalisis Foto KK Terbaru...</span>
                       </div>
                     )}
-                    {scanSuccess && (
+                    {scanSuccess && !isScanning && (
                       <div className="absolute top-2 right-2 rounded-full bg-emerald-600 p-1 text-white shadow-xs">
                         <CheckCircle2 size={16} />
                       </div>
                     )}
+                    {isDarkEnhanced && (
+                      <div className="absolute top-2 left-2 rounded-md bg-amber-500/90 text-[10px] font-extrabold text-white px-2 py-0.5 shadow-xs">
+                        Foto Diterangkan
+                      </div>
+                    )}
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={handleRotateImage}
-                    disabled={isScanning}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 shadow-xs hover:bg-slate-50 cursor-pointer disabled:opacity-50"
-                  >
-                    <RotateCw size={13} />
-                    <span>Putar Foto 90° (Orientasi Lanskap)</span>
-                  </button>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleBrightenImage}
+                      disabled={isScanning}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 shadow-xs hover:bg-amber-100 cursor-pointer disabled:opacity-50"
+                      title="Meningkatkan kontras & kecerahan foto jika dokumen diambil di ruangan gelap atau redup"
+                    >
+                      <Sparkles size={14} className="text-amber-600" />
+                      <span>💡 Terangkan Foto (Atasi Foto Gelap)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleRotateImage}
+                      disabled={isScanning}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-xs hover:bg-slate-50 cursor-pointer disabled:opacity-50"
+                    >
+                      <RotateCw size={14} />
+                      <span>🔄 Putar Foto 90°</span>
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div className="py-2">
@@ -439,7 +464,7 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                     Foto Kartu Keluarga (KK) yang Sudah Diperbarui
                   </h4>
                   <p className="text-[11px] text-slate-500 max-w-md mx-auto mt-0.5">
-                    Sistem akan membaca susunan anggota keluarga baru dan mendeteksi anggota yang meninggal/pisah secara otomatis.
+                    Sistem Computer Vision akan membaca nomor KK, Kepala Keluarga, dan seluruh anggota keluarga (istri & semua anak) secara otomatis walau foto redup atau gelap.
                   </p>
                 </div>
               )}
@@ -545,16 +570,76 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                         />
                       </div>
                       <div>
-                        <span className="text-[10px] text-slate-500 block mb-1">
-                          Susunan Anggota Baru ({newAnggota.length} Jiwa):
-                        </span>
-                        <div className="space-y-1.5 max-h-36 overflow-y-auto no-scrollbar">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] font-bold text-slate-700">
+                            Susunan Anggota Baru ({newAnggota.length} Jiwa):
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleAddNewAnggota}
+                            className="inline-flex items-center gap-1 text-[10px] font-bold text-[#0B5D3F] hover:underline cursor-pointer"
+                          >
+                            <Plus size={12} />
+                            <span>Tambah Anggota</span>
+                          </button>
+                        </div>
+                        <div className="space-y-1.5 max-h-48 overflow-y-auto no-scrollbar">
                           {newAnggota.map((m, i) => (
-                            <div key={i} className="flex items-center justify-between bg-white rounded-lg px-2.5 py-1 border border-slate-200 text-[11px]">
-                              <span className="font-semibold text-slate-800">{m.nama || 'Anggota'}</span>
-                              <span className="text-[10px] text-slate-500 font-mono">{m.hubungan}</span>
+                            <div key={i} className="rounded-lg bg-white p-2 border border-slate-200 text-[11px] space-y-1">
+                              <div className="flex items-center justify-between gap-1">
+                                <input
+                                  type="text"
+                                  value={m.nama}
+                                  onChange={(e) => handleUpdateNewAnggota(i, 'nama', e.target.value)}
+                                  placeholder={`Nama ${m.hubungan || 'Anggota'}`}
+                                  className="w-full font-bold text-slate-800 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-[#0B5D3F] outline-hidden text-xs py-0.5"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveNewAnggota(i)}
+                                  className="text-slate-400 hover:text-rose-600 p-0.5 shrink-0 cursor-pointer"
+                                  title="Hapus anggota"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </div>
+                              <div className="flex items-center gap-1.5 text-[10px]">
+                                <input
+                                  type="text"
+                                  maxLength={16}
+                                  value={m.nik}
+                                  onChange={(e) => handleUpdateNewAnggota(i, 'nik', cleanNIK(e.target.value))}
+                                  placeholder="16 Digit NIK"
+                                  className="w-32 font-mono text-slate-600 bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 outline-hidden"
+                                />
+                                <select
+                                  value={m.hubungan}
+                                  onChange={(e) => handleUpdateNewAnggota(i, 'hubungan', e.target.value)}
+                                  className="rounded bg-slate-50 border border-slate-200 px-1 py-0.5 text-slate-700 outline-hidden font-medium"
+                                >
+                                  <option value="Kepala Keluarga">Kepala Keluarga</option>
+                                  <option value="Istri">Istri</option>
+                                  <option value="Anak">Anak</option>
+                                  <option value="Orang Tua">Orang Tua</option>
+                                  <option value="Mertua">Mertua</option>
+                                  <option value="Famili Lain">Famili Lain</option>
+                                </select>
+                                <select
+                                  value={m.jenisKelamin}
+                                  onChange={(e) => handleUpdateNewAnggota(i, 'jenisKelamin', e.target.value as any)}
+                                  className="rounded bg-slate-50 border border-slate-200 px-1 py-0.5 text-slate-700 outline-hidden font-medium"
+                                >
+                                  <option value="Laki-laki">L</option>
+                                  <option value="Perempuan">P</option>
+                                </select>
+                              </div>
                             </div>
                           ))}
+                          {newAnggota.length === 0 && (
+                            <p className="text-[11px] text-slate-400 italic text-center py-2">
+                              Belum ada anggota keluarga. Scan KK atau klik Tambah Anggota.
+                            </p>
+                          )}
                         </div>
                       </div>
                     </div>
