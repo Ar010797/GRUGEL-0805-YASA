@@ -98,7 +98,7 @@ export const FloatingNotification: React.FC<FloatingNotificationProps> = ({
 
             {/* Download Surat PDF */}
             <button
-              onClick={() => exportSuratPengumumanPDF(announcement, profilRT, namaKetua)}
+              onClick={() => exportSuratPengumumanPDF(announcement, profilRT, announcement.namaPengurus || namaKetua, announcement.jabatanPengurus)}
               className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] px-3 py-1.5 text-[11px] font-bold text-white shadow-xs transition-colors cursor-pointer"
               title="Download Surat Edaran Resmi (.PDF)"
             >

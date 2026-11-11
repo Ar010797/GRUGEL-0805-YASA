@@ -277,7 +277,8 @@ export const exportPengeluaranPDF = (
 export const exportSuratPengumumanPDF = (
   pengumuman: PengumumanRT,
   profilRT?: ProfilRT,
-  namaKetuaRT?: string
+  namaKetuaRT?: string,
+  jabatanPengurus?: string
 ) => {
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -292,33 +293,32 @@ export const exportSuratPengumumanPDF = (
   const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
   const judulKop = profilRT?.judulKopSurat || `PENGURUS RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
   const alamatKop = profilRT?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} Kode Pos ${profilRT?.kodePos || '53183'}`;
-  const ketuaName = namaKetuaRT || 'Bapak Suwardi';
+  
+  // Nama & Jabatan Penandatangan (Dapat diatur admin atau otomatis dari data RT)
+  const namaPenandatangan = pengumuman.namaPengurus || namaKetuaRT || 'Bpk. Suwardi';
+  const jabatanTtd = pengumuman.jabatanPengurus || jabatanPengurus || `Ketua RT ${rtStr}`;
 
-  // Top header border strip
-  doc.setFillColor(11, 93, 63);
-  doc.rect(0, 0, 210, 6, 'F');
-
-  // Letterhead (KOP SURAT RESMI OTOMATIS SESUAI PROFIL RT)
+  // Letterhead Resmi (KOP SURAT RESMI HITAM-PUTIH / MONOKROM TANPA WARNA)
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10.5);
-  doc.setTextColor(30, 30, 30);
+  doc.setTextColor(20, 20, 20);
   doc.text(`PEMERINTAH ${kabStr.toUpperCase()}`, 105, 15, { align: 'center' });
 
   doc.setFontSize(10.5);
-  doc.setTextColor(30, 30, 30);
+  doc.setTextColor(20, 20, 20);
   doc.text(`${kecStr.toUpperCase()} - ${desaStr.toUpperCase()}`, 105, 20, { align: 'center' });
 
-  doc.setFontSize(13.5);
-  doc.setTextColor(11, 93, 63);
+  doc.setFontSize(13);
+  doc.setTextColor(20, 20, 20);
   doc.text(judulKop.toUpperCase(), 105, 27, { align: 'center' });
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.5);
-  doc.setTextColor(90, 90, 90);
+  doc.setTextColor(60, 60, 60);
   doc.text(alamatKop, 105, 32, { align: 'center' });
 
-  // Double horizontal line (Garis Ganda Kop Surat)
-  doc.setDrawColor(11, 93, 63);
+  // Garis Ganda Kop Surat Hitam Pekat Standar Surat Dinas
+  doc.setDrawColor(20, 20, 20);
   doc.setLineWidth(1.1);
   doc.line(16, 35, 194, 35);
   doc.setLineWidth(0.3);
@@ -327,10 +327,11 @@ export const exportSuratPengumumanPDF = (
   // Metadata Surat (Nomor, Lampiran, Perihal, Tanggal)
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9.5);
-  doc.setTextColor(30, 30, 30);
+  doc.setTextColor(20, 20, 20);
 
   const cleanId = pengumuman.id.replace(/[^0-9]/g, '') || '01';
-  const noSurat = `0${cleanId}/EDR/RT${rtStr}-RW${rwStr}/X/2026`;
+  const tahunSurat = new Date().getFullYear();
+  const noSurat = `0${cleanId}/EDR/RT${rtStr}-RW${rwStr}/${tahunSurat}`;
 
   doc.text(`Nomor     : ${noSurat}`, 20, 44);
   doc.text('Lampiran : -', 20, 49);
@@ -356,22 +357,23 @@ export const exportSuratPengumumanPDF = (
   const splitPembuka = doc.splitTextToSize(pembuka, 170);
   doc.text(splitPembuka, 20, 102);
 
-  // Kotak Penegasan Pengumuman
-  doc.setFillColor(243, 249, 245);
-  doc.roundedRect(20, 114, 170, 58, 3, 3, 'F');
-  doc.setDrawColor(11, 93, 63);
-  doc.roundedRect(20, 114, 170, 58, 3, 3, 'D');
+  // Kotak Penegasan Pengumuman (Monochrome / Grayscale Bersih)
+  doc.setFillColor(250, 250, 250);
+  doc.roundedRect(20, 114, 170, 58, 2, 2, 'F');
+  doc.setDrawColor(40, 40, 40);
+  doc.setLineWidth(0.3);
+  doc.roundedRect(20, 114, 170, 58, 2, 2, 'D');
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(11);
-  doc.setTextColor(11, 93, 63);
+  doc.setFontSize(10.5);
+  doc.setTextColor(20, 20, 20);
   doc.text(pengumuman.judul, 25, 122);
 
   // Details
   if (pengumuman.hariTanggalAcara || pengumuman.waktuAcara || pengumuman.tempatAcara) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
-    doc.setTextColor(40, 40, 40);
+    doc.setTextColor(30, 30, 30);
     doc.text(`• Hari / Tanggal    : ${pengumuman.hariTanggalAcara || 'Sesuai jadwal'}`, 25, 130);
     doc.text(`• Waktu Pelaksanaan: ${pengumuman.waktuAcara || 'Waktu setempat'}`, 25, 136);
     doc.text(`• Tempat / Lokasi  : ${pengumuman.tempatAcara || `Wilayah RT ${rtStr} RW ${rwStr}`}`, 25, 142);
@@ -381,61 +383,66 @@ export const exportSuratPengumumanPDF = (
   } else {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
-    doc.setTextColor(40, 40, 40);
+    doc.setTextColor(30, 30, 30);
     const splitIsi = doc.splitTextToSize(pengumuman.isi, 160);
-    doc.text(splitIsi.slice(0, 5), 25, 130);
+    doc.text(splitIsi.slice(0, 6), 25, 130);
   }
 
   // Kategori & Masa Berlaku
   doc.setFont('helvetica', 'italic');
   doc.setFontSize(8);
-  doc.setTextColor(90, 90, 90);
+  doc.setTextColor(70, 70, 70);
   const masaBerlaku = pengumuman.tanggalBerakhir ? ` • Berlaku s/d: ${pengumuman.tanggalBerakhir}` : '';
   doc.text(`Kategori: ${pengumuman.kategori}${masaBerlaku} ${pengumuman.penting ? '• [PEMBERITAHUAN PENTING]' : ''}`, 25, 165);
 
   // Penutup
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9.5);
-  doc.setTextColor(30, 30, 30);
+  doc.setTextColor(20, 20, 20);
   const penutup = 'Demikian surat pengumuman resmi ini kami sampaikan. Atas perhatian, kesadaran, dan partisipasi aktif dari seluruh kepala keluarga atau perwakilan warga, kami sampaikan terima kasih yang sebesar-besarnya.';
   const splitPenutup = doc.splitTextToSize(penutup, 170);
   doc.text(splitPenutup, 20, 180);
 
   doc.text('Wassalamu’alaikum Warahmatullahi Wabarakatuh.', 20, 192);
 
-  // Tanda Tangan & Stempel Digital Sesuai RT
+  // Tanda Tangan & Stempel Digital Hitam-Putih Sesuai RT
   const signY = 205;
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9.5);
+  doc.setTextColor(20, 20, 20);
   doc.text(`Pengurus RT ${rtStr} RW ${rwStr} ${desaStr}`, 130, signY);
-  doc.text(`Ketua RT ${rtStr},`, 130, signY + 6);
+  doc.text(`${jabatanTtd},`, 130, signY + 6);
 
-  // Stempel Digital Bulat Otomatis
-  doc.setDrawColor(11, 93, 63);
+  // Stempel Digital Bulat Monokrom / Hitam Pekat
+  doc.setDrawColor(30, 30, 30);
   doc.setLineWidth(0.6);
   doc.circle(140, signY + 22, 13);
   doc.circle(140, signY + 22, 11.5);
 
   doc.setFontSize(5.5);
   doc.setFont('helvetica', 'bold');
-  doc.setTextColor(11, 93, 63);
+  doc.setTextColor(30, 30, 30);
   doc.text(`RUKUN TETANGGA ${rtStr}`, 140, signY + 16, { align: 'center' });
   doc.text(`★ RW ${rwStr} ★`, 140, signY + 22, { align: 'center' });
   doc.text(desaStr.toUpperCase(), 140, signY + 28, { align: 'center' });
 
-  // Nama Terang
+  // Nama Pengurus Penandatangan
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(20, 20, 20);
-  doc.text(ketuaName, 130, signY + 38);
+  doc.text(namaPenandatangan, 130, signY + 38);
+  doc.setLineWidth(0.3);
+  doc.setDrawColor(20, 20, 20);
+  doc.line(130, signY + 39, 185, signY + 39);
+
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
-  doc.setTextColor(100, 100, 100);
+  doc.setTextColor(80, 80, 80);
   doc.text(`Tembusan: Ketua RW ${rwStr} ${desaStr}`, 20, signY + 44);
 
   // Footer note
   doc.setFontSize(7.5);
-  doc.setTextColor(140, 140, 140);
+  doc.setTextColor(100, 100, 100);
   doc.text(`Surat resmi ini diterbitkan secara sah melalui Sistem Informasi RT ${rtStr} RW ${rwStr} ${desaStr}`, 105, 285, { align: 'center' });
 
   const safeTitle = pengumuman.judul.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
@@ -592,7 +599,7 @@ export const exportDataWargaPerKK_PDF = (
       m.nama,
       m.hubungan || 'Anggota',
       `${m.tempatLahir || ''} ${m.tanggalLahir || ''}`.trim() || '—',
-      m.jenisKelamin === 'Laki-laki' ? 'L' : m.jenisKelamin === 'Perempuan' ? 'P' : '—',
+      m.pendidikan || '—',
       m.agama || 'Islam',
       m.pekerjaan || '—',
     ]);
@@ -600,7 +607,7 @@ export const exportDataWargaPerKK_PDF = (
     autoTable(doc, {
       startY: currentY,
       margin: { left: margin, right: margin },
-      head: [['No', 'NIK', 'Nama Lengkap', 'Hubungan', 'TTL', 'L/P', 'Agama', 'Pekerjaan']],
+      head: [['No', 'NIK', 'Nama Lengkap', 'Hubungan', 'TTL', 'Pendidikan', 'Agama', 'Pekerjaan']],
       body: memberTableData,
       theme: 'grid',
       headStyles: {
@@ -616,13 +623,13 @@ export const exportDataWargaPerKK_PDF = (
       },
       columnStyles: {
         0: { cellWidth: 8, halign: 'center' },
-        1: { cellWidth: 32 },
-        2: { cellWidth: 44, fontStyle: 'bold' },
-        3: { cellWidth: 26 },
-        4: { cellWidth: 30 },
-        5: { cellWidth: 10, halign: 'center' },
+        1: { cellWidth: 30 },
+        2: { cellWidth: 40, fontStyle: 'bold' },
+        3: { cellWidth: 24 },
+        4: { cellWidth: 28 },
+        5: { cellWidth: 24 },
         6: { cellWidth: 14, halign: 'center' },
-        7: { cellWidth: 18 },
+        7: { cellWidth: 20 },
       },
     });
 

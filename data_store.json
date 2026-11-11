@@ -1,0 +1,160 @@
+{
+  "version": 2,
+  "lastUpdated": "2026-11-11T10:00:00.000Z",
+  "tahunAktif": 2026,
+  "pengaturanKas": {
+    "nominalJimpitanTahunan": 300000,
+    "nominalJimpitanBulanan": 25000,
+    "nominalKematianTahunan": 120000,
+    "nominalKematianBulanan": 10000,
+    "saldoAwalKasUmum": 0,
+    "saldoAwalKasKematian": 0,
+    "keteranganSaldoAwal": "Sisa Kas RT Periode Lalu (Pindahan Buku Manual)",
+    "tanggalSaldoAwal": "2026-01-01",
+    "kontakKetuaRT": {
+      "nama": "Bpk. Karsono",
+      "telp": "085869372879"
+    },
+    "kontakBendahara": {
+      "nama": "Bpk. Bambang S.",
+      "telp": "0813-9876-5432"
+    },
+    "tahunAktif": 2026,
+    "profilRT": {
+      "namaRT": "08",
+      "namaRW": "05",
+      "dusun": "Dusun III",
+      "desa": "Desa Kotayasa",
+      "kecamatan": "Kecamatan Sumbang",
+      "kabupaten": "Kabupaten Banyumas",
+      "provinsi": "Jawa Tengah",
+      "kodePos": "53183",
+      "alamatSekretariat": "RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas 53183",
+      "judulKopSurat": "PENGURUS RUKUN TETANGGA 08 RUKUN WARGA 05",
+      "sebutanWilayah": "RT 08 RW 05 Desa Kotayasa"
+    }
+  },
+  "wargaList": [
+    {
+      "id": "w_alipamuji",
+      "no": 1,
+      "nama": "Ali Pamuji",
+      "noKK": "3302211101230002",
+      "nik": "3302212512920002",
+      "noRumah": "01",
+      "rt": "08",
+      "rw": "05",
+      "alamat": "RT 08 RW 05 Desa Kotayasa",
+      "kodePos": "53183",
+      "tanggalDikeluarkan": "04-09-2024",
+      "jenisKelamin": "Laki-laki",
+      "jumlahJiwa": 4,
+      "statusIuran": "Sudah",
+      "pin": "123456",
+      "anggotaKeluarga": [
+        {
+          "nik": "3302212512920002",
+          "nama": "Ali Pamuji",
+          "hubungan": "Kepala Keluarga",
+          "tempatLahir": "Banyumas",
+          "tanggalLahir": "25-12-1992",
+          "jenisKelamin": "Laki-laki",
+          "agama": "Islam",
+          "pendidikan": "Diploma IV/Strata I",
+          "pekerjaan": "Belum/Tidak Bekerja",
+          "golonganDarah": "Tidak Tahu",
+          "statusPerkawinan": "Kawin Tercatat",
+          "tanggalPerkawinan": "25-12-2021",
+          "kewarganegaraan": "WNI",
+          "namaAyah": "Rusin Yudianto",
+          "namaIbu": "Siti Munarofah"
+        },
+        {
+          "nik": "3302216606020003",
+          "nama": "Annisa Nirmala Fathni Baroroh",
+          "hubungan": "Istri",
+          "tempatLahir": "Banyumas",
+          "tanggalLahir": "26-06-2002",
+          "jenisKelamin": "Perempuan",
+          "agama": "Islam",
+          "pendidikan": "SLTP/Sederajat",
+          "pekerjaan": "Mengurus Rumah Tangga",
+          "golonganDarah": "Tidak Tahu",
+          "statusPerkawinan": "Kawin Tercatat",
+          "tanggalPerkawinan": "25-12-2021",
+          "kewarganegaraan": "WNI",
+          "namaAyah": "Muhdini",
+          "namaIbu": "Fatimah Erna Yuki"
+        },
+        {
+          "nik": "3302216709220003",
+          "nama": "Aurynda Adzkiyah Al Husna",
+          "hubungan": "Anak",
+          "tempatLahir": "Banyumas",
+          "tanggalLahir": "27-09-2022",
+          "jenisKelamin": "Perempuan",
+          "agama": "Islam",
+          "pendidikan": "Tidak/Belum Sekolah",
+          "pekerjaan": "Belum/Tidak Bekerja",
+          "golonganDarah": "Tidak Tahu",
+          "statusPerkawinan": "Belum Kawin",
+          "tanggalPerkawinan": "-",
+          "kewarganegaraan": "WNI",
+          "namaAyah": "Ali Pamuji",
+          "namaIbu": "Annisa Nirmala Fathni Baroroh"
+        },
+        {
+          "nik": "3302215308240001",
+          "nama": "Alisha Shafa Ayyuna",
+          "hubungan": "Anak",
+          "tempatLahir": "Kabupaten Banyumas",
+          "tanggalLahir": "13-08-2024",
+          "jenisKelamin": "Perempuan",
+          "agama": "Islam",
+          "pendidikan": "Tidak/Belum Sekolah",
+          "pekerjaan": "Belum/Tidak Bekerja",
+          "golonganDarah": "Tidak Tahu",
+          "statusPerkawinan": "Belum Kawin",
+          "tanggalPerkawinan": "-",
+          "kewarganegaraan": "WNI",
+          "namaAyah": "Ali Pamuji",
+          "namaIbu": "Annisa Nirmala Fathni Baroroh"
+        }
+      ]
+    }
+  ],
+  "transactions": [
+    {
+      "id": "tx_init_alipamuji",
+      "tanggal": "2026-01-10",
+      "kategori": "Iuran Jimpitan Kas Warga",
+      "keterangan": "Iuran Kas RT 2026 (Warga: Ali Pamuji)",
+      "nominal": 300000,
+      "tipe": "masuk",
+      "namaWarga": "Ali Pamuji",
+      "nomorRumah": "01",
+      "noKK": "3302211101230002",
+      "tahun": 2026,
+      "rtScope": "RT 08"
+    }
+  ],
+  "bantuanList": [],
+  "pengumumanList": [],
+  "dokumenList": [],
+  "adminAccounts": [
+    {
+      "id": "adm_rt08",
+      "username": "Adminrt08",
+      "passwordHash": "Bismillahrt08",
+      "nama": "Bpk. Karsono (Ketua RT 08)",
+      "rt": "08",
+      "rw": "05",
+      "kontak": "085869372879",
+      "jabatan": "Ketua RT 08 RW 05",
+      "status": "aktif",
+      "terakhirLogin": "Baru Dibuat",
+      "terakhirSinkronisasi": "Aktif di Server"
+    }
+  ],
+  "laporanBulananRT": []
+}

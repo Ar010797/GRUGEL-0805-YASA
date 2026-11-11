@@ -137,6 +137,8 @@ export interface PengumumanRT {
   kategori: 'Kegiatan' | 'Iuran' | 'Keamanan' | 'Sosial' | 'Umum';
   isi: string;
   penulis: string;
+  namaPengurus?: string; // Nama pengurus penandatangan (bisa disesuaikan atau otomatis dari RT)
+  jabatanPengurus?: string; // misal 'Ketua RT 08', 'Sekretaris RT 08'
   penting?: boolean;
   tentang?: string;
   hariTanggalAcara?: string;

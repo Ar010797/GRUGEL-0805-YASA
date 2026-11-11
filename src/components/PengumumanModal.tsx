@@ -80,8 +80,19 @@ export const PengumumanModal: React.FC<PengumumanModalProps> = ({
   const [waktu, setWaktu] = useState(presetTopik[0].waktu);
   const [tempat, setTempat] = useState(presetTopik[0].tempat);
   const [catatan, setCatatan] = useState(presetTopik[0].catatan);
+  // Pengurus Penandatangan Surat (Dapat diatur admin atau menyesuaikan Nama RT yang diinput)
+  const [namaPengurus, setNamaPengurus] = useState(namaKetua);
+  const [jabatanPengurus, setJabatanPengurus] = useState(`Ketua RT ${rtStr}`);
   const [penulis, setPenulis] = useState(`Ketua RT ${rtStr} (${namaKetua})`);
   const [penting, setPenting] = useState(true);
+
+  // Sync namaPengurus if namaKetua changes
+  useEffect(() => {
+    if (namaKetua) {
+      setNamaPengurus(namaKetua);
+      setPenulis(`${jabatanPengurus} (${namaKetua})`);
+    }
+  }, [namaKetua, jabatanPengurus]);
 
   // Tanggal berakhir (auto-expired pengumuman)
   const defaultExpiry = new Date();
@@ -134,11 +145,14 @@ Demikian pengumuman resmi ini kami sampaikan. Atas perhatian, kesadaran, dan par
     e.preventDefault();
     if (!tentang.trim() || !isiSurat.trim()) return;
 
+    const finalPenulis = `${jabatanPengurus.trim() || `Ketua RT ${rtStr}`} (${namaPengurus.trim() || namaKetua})`;
     onSave({
       judul: tentang,
       kategori,
       isi: isiSurat,
-      penulis,
+      penulis: finalPenulis,
+      namaPengurus: namaPengurus.trim() || namaKetua,
+      jabatanPengurus: jabatanPengurus.trim() || `Ketua RT ${rtStr}`,
       penting,
       tanggal: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }),
       tanggalBerakhir,
@@ -352,6 +366,52 @@ Demikian pengumuman resmi ini kami sampaikan. Atas perhatian, kesadaran, dan par
               }}
               className="w-full rounded-xl border border-slate-300 p-3 text-xs text-slate-800 focus:border-[#0B5D3F] focus:outline-hidden font-mono leading-relaxed"
             />
+          </div>
+
+          {/* 4. Pengaturan Tanda Tangan & Nama Pengurus Penandatangan */}
+          <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                <FileText size={14} className="text-[#0B5D3F]" />
+                <span>4. Tanda Tangan Pengurus (Menyesuaikan Data RT / Bisa Diatur Bebas):</span>
+              </span>
+              <span className="text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md font-semibold">
+                Sesuai Input Admin
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                  Nama Pengurus Penandatangan:
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={namaPengurus}
+                  onChange={(e) => setNamaPengurus(e.target.value)}
+                  placeholder={`Nama Pengurus / Ketua RT (misal: ${namaKetua})`}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-800 focus:border-[#0B5D3F] focus:outline-hidden"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                  Jabatan Penandatangan:
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={jabatanPengurus}
+                  onChange={(e) => setJabatanPengurus(e.target.value)}
+                  placeholder={`Contoh: Ketua RT ${rtStr}`}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-800 focus:border-[#0B5D3F] focus:outline-hidden"
+                />
+              </div>
+            </div>
+            <p className="text-[10px] text-slate-400">
+              * Nama dan jabatan ini akan otomatis dicetak pada kolom tanda tangan surat pengumuman & PDF resmi.
+            </p>
           </div>
 
           {/* Tanda Penting */}

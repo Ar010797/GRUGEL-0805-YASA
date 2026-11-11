@@ -28,10 +28,14 @@ const LOCAL_STORAGE_KEY = 'kas_rt08_rw05_database_v2';
 /**
  * Loads data from localStorage first (offline-first), then syncs with server API if available.
  */
+/**
+ * Loads data from Server backend API (master source of truth for accounts & citizens),
+ * falls back to localStorage or merges cleanly so new phones never wipe server data.
+ */
 export async function loadAppData(defaultData: AppDatabaseSchema): Promise<AppDatabaseSchema> {
   let localData: AppDatabaseSchema | null = null;
 
-  // 1. Check client-side local cache
+  // 1. Read local cache first
   try {
     const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
     if (cached) {
@@ -41,22 +45,55 @@ export async function loadAppData(defaultData: AppDatabaseSchema): Promise<AppDa
     console.warn('Gagal membaca cache lokal:', err);
   }
 
-  // 2. Try to fetch from Server backend API
+  // 2. Fetch from Server backend API
   try {
     const res = await fetch('/api/data', { method: 'GET' });
     if (res.ok) {
       const serverPayload = await res.json();
       if (serverPayload && serverPayload.data) {
         const remoteData = serverPayload.data as AppDatabaseSchema;
-        // Merge or prefer server data if it has newer lastUpdated
-        if (!localData || (remoteData.lastUpdated && remoteData.lastUpdated > (localData.lastUpdated || ''))) {
+
+        // If localData doesn't exist or has no warga, server data is 100% authoritative
+        if (!localData || !Array.isArray(localData.wargaList) || localData.wargaList.length === 0) {
           localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(remoteData));
           return remoteData;
         }
+
+        // Smart merge: ensure accounts & citizens registered on server are never dropped
+        const localWarga = Array.isArray(localData.wargaList) ? localData.wargaList : [];
+        const remoteWarga = Array.isArray(remoteData.wargaList) ? remoteData.wargaList : [];
+        const mergedWarga = [...localWarga];
+
+        for (const rw of remoteWarga) {
+          if (!mergedWarga.some((lw) => lw.id === rw.id || lw.noKK === rw.noKK)) {
+            mergedWarga.push(rw);
+          }
+        }
+
+        // Merge admin accounts
+        const localAdmins = Array.isArray(localData.adminAccounts) ? localData.adminAccounts : [];
+        const remoteAdmins = Array.isArray(remoteData.adminAccounts) ? remoteData.adminAccounts : [];
+        const mergedAdmins = [...localAdmins];
+        for (const ra of remoteAdmins) {
+          if (!mergedAdmins.some((la) => la.username.toLowerCase() === ra.username.toLowerCase())) {
+            mergedAdmins.push(ra);
+          }
+        }
+
+        const resolvedData: AppDatabaseSchema = {
+          ...remoteData,
+          ...localData,
+          wargaList: mergedWarga.length >= remoteWarga.length ? mergedWarga : remoteWarga,
+          adminAccounts: mergedAdmins.length >= remoteAdmins.length ? mergedAdmins : remoteAdmins,
+          lastUpdated: remoteData.lastUpdated || localData.lastUpdated || new Date().toISOString(),
+        };
+
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(resolvedData));
+        return resolvedData;
       }
     }
   } catch (err) {
-    // Server might be in dev mode or offline; fallback to local
+    // Server fetch error fallback to local
   }
 
   return localData || defaultData;
@@ -64,8 +101,12 @@ export async function loadAppData(defaultData: AppDatabaseSchema): Promise<AppDa
 
 /**
  * Saves data immediately to localStorage and sends to server backend.
+ * Passes isHardReset: false by default to prevent accidental deletion from other devices.
  */
-export async function saveAppData(data: AppDatabaseSchema): Promise<boolean> {
+export async function saveAppData(
+  data: AppDatabaseSchema,
+  options?: { isHardReset?: boolean; deletedWargaIds?: string[]; deletedPengumumanIds?: string[] }
+): Promise<boolean> {
   const updatedData: AppDatabaseSchema = {
     ...data,
     lastUpdated: new Date().toISOString(),
@@ -78,12 +119,19 @@ export async function saveAppData(data: AppDatabaseSchema): Promise<boolean> {
     console.error('Error writing to localStorage:', err);
   }
 
-  // 2. Async server write
+  // 2. Async server write with multi-device protection
   try {
+    const payload = {
+      ...updatedData,
+      isHardReset: options?.isHardReset ?? false,
+      deletedWargaIds: options?.deletedWargaIds ?? [],
+      deletedPengumumanIds: options?.deletedPengumumanIds ?? [],
+    };
+
     const res = await fetch('/api/data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedData),
+      body: JSON.stringify(payload),
     });
     return res.ok;
   } catch (err) {
@@ -93,8 +141,38 @@ export async function saveAppData(data: AppDatabaseSchema): Promise<boolean> {
 }
 
 /**
+ * Saves a single citizen directly to the server database.
+ */
+export async function saveSingleWargaToServer(warga: Warga): Promise<boolean> {
+  try {
+    const res = await fetch('/api/warga', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ warga }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Explicitly removes a citizen from the server database.
+ */
+export async function deleteWargaFromServer(id: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/warga/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Completely wipes all database data from both localStorage and server backend.
- * Returns true if both local and remote caches were cleared cleanly.
+ * Explicitly passes isHardReset: true.
  */
 export async function clearAppData(): Promise<boolean> {
   // 1. Clear local storage
@@ -151,7 +229,7 @@ export async function clearAppData(): Promise<boolean> {
     const res = await fetch('/api/data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(emptyPayload),
+      body: JSON.stringify({ ...emptyPayload, isHardReset: true }),
     });
     return res.ok;
   } catch (err) {

@@ -66,6 +66,8 @@ import {
   loadAppData,
   saveAppData,
   clearAppData,
+  saveSingleWargaToServer,
+  deleteWargaFromServer,
   AppDatabaseSchema,
 } from './utils/cloudSync';
 
@@ -217,6 +219,8 @@ export default function App() {
 
   // Initial Data Load (Loads from Server or localStorage)
   const isLoadedRef = useRef(false);
+  const deletedWargaIdsRef = useRef<string[]>([]);
+  const deletedPengumumanIdsRef = useRef<string[]>([]);
   useEffect(() => {
     async function initData() {
       const defaultState: AppDatabaseSchema = {
@@ -276,7 +280,10 @@ export default function App() {
         laporanBulananRT,
       };
 
-      const ok = await saveAppData(stateToPersist);
+      const ok = await saveAppData(stateToPersist, {
+        deletedWargaIds: deletedWargaIdsRef.current,
+        deletedPengumumanIds: deletedPengumumanIdsRef.current,
+      });
       setSyncStatus(ok ? 'synced' : 'offline');
     }, 600);
 
@@ -555,6 +562,7 @@ export default function App() {
       statusIuran: w.statusIuran || 'Belum',
       statusIuranPerTahun: { [tahunAktif]: w.statusIuran || 'Belum' },
     };
+    saveSingleWargaToServer(newW);
     setWargaList((prev) => [...prev, newW]);
   };
 
@@ -568,11 +576,13 @@ export default function App() {
             ...(w.statusIuranPerTahun || {}),
             [tahunAktif]: nextStatus,
           };
-          return {
+          const updated = {
             ...w,
             statusIuran: nextStatus,
             statusIuranPerTahun: perTahun,
           };
+          saveSingleWargaToServer(updated);
+          return updated;
         }
         return w;
       })
@@ -581,6 +591,8 @@ export default function App() {
 
   // Delete resident
   const handleDeleteWarga = (id: string) => {
+    deletedWargaIdsRef.current.push(id);
+    deleteWargaFromServer(id);
     setWargaList((prev) => prev.filter((w) => w.id !== id));
   };
 

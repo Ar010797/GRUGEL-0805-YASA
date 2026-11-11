@@ -234,7 +234,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
 
                   {/* Tombol Download PDF Surat Pengumuman */}
                   <button
-                    onClick={() => exportSuratPengumumanPDF(p)}
+                    onClick={() => exportSuratPengumumanPDF(p, profilRT, p.namaPengurus || namaKetua, p.jabatanPengurus)}
                     className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] px-3.5 py-2 text-xs font-bold text-white shadow-xs transition-all cursor-pointer"
                     title="Unduh PDF Surat Edaran Resmi RT 08 RW 05"
                   >
@@ -355,7 +355,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
               <div className="pt-4 flex justify-end">
                 <div className="text-center w-56 relative">
                   <p className="text-xs text-slate-700">Pengurus RT {rtStr} RW {rwStr} {desaStr}</p>
-                  <p className="text-xs font-bold text-slate-900">Ketua RT {rtStr},</p>
+                  <p className="text-xs font-bold text-slate-900">{selectedSurat.jabatanPengurus || `Ketua RT ${rtStr}`},</p>
 
                   {/* Stempel Visual Digital */}
                   <div className="my-2 flex justify-center">
@@ -366,7 +366,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
                     </div>
                   </div>
 
-                  <p className="text-xs font-bold underline text-slate-900">{namaKetua}</p>
+                  <p className="text-xs font-bold underline text-slate-900">{selectedSurat.namaPengurus || namaKetua}</p>
                 </div>
               </div>
             </div>
@@ -389,7 +389,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
                   <span>Kirim ke WA Warga</span>
                 </button>
                 <button
-                  onClick={() => exportSuratPengumumanPDF(selectedSurat, profilRT, namaKetua)}
+                  onClick={() => exportSuratPengumumanPDF(selectedSurat, profilRT, selectedSurat.namaPengurus || namaKetua, selectedSurat.jabatanPengurus)}
                   className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] px-4 py-2 text-xs font-bold text-white shadow-xs cursor-pointer"
                 >
                   <Download size={13} />
