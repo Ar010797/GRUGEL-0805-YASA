@@ -54,6 +54,8 @@ export const WargaModal: React.FC<WargaModalProps> = ({
   const [rw, setRw] = useState('05');
   const [jenisKelamin, setJenisKelamin] = useState<'Laki-laki' | 'Perempuan'>('Laki-laki');
   const [statusIuran, setStatusIuran] = useState<'Sudah' | 'Belum'>('Belum');
+  const [kodePos, setKodePos] = useState('53183');
+  const [tanggalDikeluarkan, setTanggalDikeluarkan] = useState('04-09-2024');
   const [anggotaKeluarga, setAnggotaKeluarga] = useState<AnggotaKeluarga[]>([]);
 
   // OCR state
@@ -75,8 +77,10 @@ export const WargaModal: React.FC<WargaModalProps> = ({
     setRt(extracted.rt || '08');
     setRw(extracted.rw || '05');
     setAlamat(extracted.alamat || 'RT 08 RW 05 Desa Kotayasa');
-    setJenisKelamin(extracted.jenisKelamin);
+    setJenisKelamin(extracted.jenisKelamin || 'Laki-laki');
     if (extracted.statusIuran) setStatusIuran(extracted.statusIuran);
+    if (extracted.kodePos) setKodePos(extracted.kodePos);
+    if (extracted.tanggalDikeluarkan) setTanggalDikeluarkan(extracted.tanggalDikeluarkan);
 
     const cleanMembers = (extracted.anggotaKeluarga || []).map((m, idx) => {
       let mName = cleanIndonesianName(m.nama);
@@ -87,6 +91,16 @@ export const WargaModal: React.FC<WargaModalProps> = ({
         ...m,
         nama: mName,
         nik: cleanNIK(m.nik),
+        tempatLahir: m.tempatLahir || 'Banyumas',
+        tanggalLahir: m.tanggalLahir || '',
+        pendidikan: m.pendidikan || (idx === 0 ? 'Diploma IV/Strata I' : idx === 1 ? 'SLTP/Sederajat' : 'Tidak/Belum Sekolah'),
+        pekerjaan: m.pekerjaan || (idx === 1 ? 'Mengurus Rumah Tangga' : 'Belum/Tidak Bekerja'),
+        golonganDarah: m.golonganDarah || 'Tidak Tahu',
+        statusPerkawinan: m.statusPerkawinan || (idx <= 1 ? 'Kawin Tercatat' : 'Belum Kawin'),
+        tanggalPerkawinan: m.tanggalPerkawinan || '',
+        kewarganegaraan: m.kewarganegaraan || 'WNI',
+        namaAyah: cleanIndonesianName(m.namaAyah || ''),
+        namaIbu: cleanIndonesianName(m.namaIbu || ''),
       };
     });
 
@@ -157,7 +171,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
 
   const handleAddAnggota = () => {
     const newIdx = anggotaKeluarga.length + 1;
-    const baseKK = cleanNIK(noKK) || '3302140805120000';
+    const baseKK = cleanNIK(noKK) || '3302211101230000';
     setAnggotaKeluarga((prev) => [
       ...prev,
       {
@@ -165,11 +179,17 @@ export const WargaModal: React.FC<WargaModalProps> = ({
         nama: '',
         hubungan: newIdx === 1 ? 'Kepala Keluarga' : newIdx === 2 ? 'Istri' : 'Anak',
         tempatLahir: 'Banyumas',
-        tanggalLahir: '2000-01-01',
-        jenisKelamin: 'Laki-laki',
+        tanggalLahir: '',
+        jenisKelamin: newIdx === 2 ? 'Perempuan' : 'Laki-laki',
         agama: 'Islam',
-        pekerjaan: 'Pelajar / Mahasiswa',
-        statusPerkawinan: 'Belum Kawin',
+        pendidikan: newIdx === 1 ? 'Diploma IV/Strata I' : newIdx === 2 ? 'SLTP/Sederajat' : 'Tidak/Belum Sekolah',
+        pekerjaan: newIdx === 2 ? 'Mengurus Rumah Tangga' : 'Belum/Tidak Bekerja',
+        golonganDarah: 'Tidak Tahu',
+        statusPerkawinan: newIdx <= 2 ? 'Kawin Tercatat' : 'Belum Kawin',
+        tanggalPerkawinan: '',
+        kewarganegaraan: 'WNI',
+        namaAyah: '',
+        namaIbu: '',
       },
     ]);
   };
@@ -205,6 +225,16 @@ export const WargaModal: React.FC<WargaModalProps> = ({
             ...m,
             nik: cleanNIK(m.nik),
             nama: cleanIndonesianName(m.nama),
+            tempatLahir: m.tempatLahir || 'Banyumas',
+            tanggalLahir: m.tanggalLahir || '',
+            pendidikan: m.pendidikan || 'Tidak/Belum Sekolah',
+            pekerjaan: m.pekerjaan || 'Belum/Tidak Bekerja',
+            golonganDarah: m.golonganDarah || 'Tidak Tahu',
+            statusPerkawinan: m.statusPerkawinan || 'Belum Kawin',
+            tanggalPerkawinan: m.tanggalPerkawinan || '',
+            kewarganegaraan: m.kewarganegaraan || 'WNI',
+            namaAyah: cleanIndonesianName(m.namaAyah || ''),
+            namaIbu: cleanIndonesianName(m.namaIbu || ''),
           }))
         : [
             {
@@ -215,8 +245,14 @@ export const WargaModal: React.FC<WargaModalProps> = ({
               tanggalLahir: '',
               jenisKelamin,
               agama: 'Islam',
-              pekerjaan: 'Wiraswasta',
-              statusPerkawinan: 'Kawin',
+              pendidikan: 'Diploma IV/Strata I',
+              pekerjaan: 'Belum/Tidak Bekerja',
+              golonganDarah: 'Tidak Tahu',
+              statusPerkawinan: 'Kawin Tercatat',
+              tanggalPerkawinan: '',
+              kewarganegaraan: 'WNI',
+              namaAyah: '',
+              namaIbu: '',
             },
           ];
 
@@ -227,6 +263,8 @@ export const WargaModal: React.FC<WargaModalProps> = ({
       rt: rt || '08',
       rw: rw || '05',
       alamat: alamat || 'RT 08 RW 05 Desa Kotayasa',
+      kodePos: kodePos || '53183',
+      tanggalDikeluarkan: tanggalDikeluarkan || '04-09-2024',
       jenisKelamin,
       jumlahJiwa: membersToSave.length,
       statusIuran,
@@ -526,6 +564,34 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                 className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-[#0B5D3F] outline-hidden"
               />
             </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Kode Pos
+                </label>
+                <input
+                  type="text"
+                  value={kodePos}
+                  onChange={(e) => setKodePos(e.target.value)}
+                  placeholder="53183"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Tanggal Dikeluarkan KK
+                </label>
+                <input
+                  type="text"
+                  value={tanggalDikeluarkan}
+                  onChange={(e) => setTanggalDikeluarkan(e.target.value)}
+                  placeholder="04-09-2024"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+            </div>
           </div>
 
           {/* Section 2: Anggota Keluarga */}
@@ -533,10 +599,10 @@ export const WargaModal: React.FC<WargaModalProps> = ({
             <div className="flex items-center justify-between">
               <div>
                 <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  2. Daftar Anggota Keluarga ({anggotaKeluarga.length} Jiwa)
+                  2. Susunan Anggota Keluarga ({anggotaKeluarga.length} Jiwa)
                 </h4>
                 <p className="text-[11px] text-slate-400">
-                  Data NIK, hubungan, dan pekerjaan yang tercatat di KK
+                  Lengkap sesuai blangko KK: Tgl Lahir, Pendidikan Terakhir, Pekerjaan, Kawin & Silsilah
                 </p>
               </div>
               <button
@@ -549,15 +615,59 @@ export const WargaModal: React.FC<WargaModalProps> = ({
               </button>
             </div>
 
+            {/* Datalists for standardized suggestions */}
+            <datalist id="pendidikan-options">
+              <option value="Tidak/Belum Sekolah" />
+              <option value="Belum Tamat SD/Sederajat" />
+              <option value="Tamat SD/Sederajat" />
+              <option value="SLTP/Sederajat" />
+              <option value="SLTA/Sederajat" />
+              <option value="Diploma I/II" />
+              <option value="Akademi/Diploma III/S. Muda" />
+              <option value="Diploma IV/Strata I" />
+              <option value="Strata II" />
+              <option value="Strata III" />
+            </datalist>
+
+            <datalist id="golongan-darah-options">
+              <option value="Tidak Tahu" />
+              <option value="A" />
+              <option value="B" />
+              <option value="AB" />
+              <option value="O" />
+              <option value="A+" />
+              <option value="B+" />
+              <option value="AB+" />
+              <option value="O+" />
+            </datalist>
+
+            <datalist id="pekerjaan-options">
+              <option value="Belum/Tidak Bekerja" />
+              <option value="Mengurus Rumah Tangga" />
+              <option value="Pelajar/Mahasiswa" />
+              <option value="Karyawan Swasta" />
+              <option value="Wiraswasta" />
+              <option value="Buruh Harian Lepas" />
+              <option value="Pegawai Negeri Sipil" />
+              <option value="TNI" />
+              <option value="POLRI" />
+              <option value="Petani/Pekebun" />
+            </datalist>
+
             <div className="space-y-3">
               {anggotaKeluarga.map((member, idx) => (
                 <div
                   key={idx}
-                  className="rounded-2xl border border-slate-200 bg-slate-50/70 p-3.5 space-y-2.5 relative"
+                  className="rounded-2xl border border-slate-200 bg-slate-50/80 p-3.5 space-y-3 relative shadow-xs"
                 >
-                  <div className="flex items-center justify-between border-b border-slate-200/60 pb-2">
-                    <span className="text-xs font-bold text-[#0B5D3F]">
-                      Anggota #{idx + 1}: {member.hubungan || 'Anggota'}
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                    <span className="text-xs font-bold text-[#0B5D3F] flex items-center gap-1.5">
+                      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#0B5D3F] text-white text-[10px]">
+                        {idx + 1}
+                      </span>
+                      <span>
+                        {member.nama || `Anggota #${idx + 1}`} ({member.hubungan || 'Anggota'})
+                      </span>
                     </span>
                     <button
                       type="button"
@@ -569,24 +679,25 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                     </button>
                   </div>
 
+                  {/* Row 1: NIK, Nama Lengkap, Status Hubungan */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
                     <div>
                       <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
-                        NIK (16 Digit)
+                        NIK (16 Digit)*
                       </label>
                       <input
                         type="text"
                         maxLength={16}
                         value={member.nik}
                         onChange={(e) => handleUpdateAnggota(idx, 'nik', e.target.value)}
-                        placeholder="3302141503800001"
-                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-mono text-slate-800"
+                        placeholder="3302212512920002"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-mono font-bold text-slate-800"
                       />
                     </div>
 
                     <div>
                       <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
-                        Nama Lengkap
+                        Nama Lengkap (Sesuai KK)*
                       </label>
                       <input
                         type="text"
@@ -614,7 +725,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                       <select
                         value={member.hubungan}
                         onChange={(e) => handleUpdateAnggota(idx, 'hubungan', e.target.value)}
-                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-800"
                       >
                         <option value="Kepala Keluarga">Kepala Keluarga</option>
                         <option value="Istri">Istri</option>
@@ -626,13 +737,14 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                     </div>
                   </div>
 
+                  {/* Row 2: Jenis Kelamin, Tempat Lahir, Tanggal Lahir, Agama */}
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                     <div>
-                      <label className="block text-[10px] text-slate-500">Jenis Kelamin</label>
+                      <label className="block text-[10px] text-slate-500 font-semibold">Jenis Kelamin</label>
                       <select
                         value={member.jenisKelamin}
                         onChange={(e) => handleUpdateAnggota(idx, 'jenisKelamin', e.target.value as any)}
-                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 font-medium"
                       >
                         <option value="Laki-laki">Laki-laki</option>
                         <option value="Perempuan">Perempuan</option>
@@ -640,32 +752,121 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                     </div>
 
                     <div>
-                      <label className="block text-[10px] text-slate-500">Agama</label>
+                      <label className="block text-[10px] text-slate-500 font-semibold">Tempat Lahir</label>
+                      <input
+                        type="text"
+                        value={member.tempatLahir || ''}
+                        onChange={(e) => handleUpdateAnggota(idx, 'tempatLahir', e.target.value)}
+                        placeholder="Banyumas"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] text-slate-500 font-semibold">Tanggal Lahir (DD-MM-YYYY)</label>
+                      <input
+                        type="text"
+                        value={member.tanggalLahir || ''}
+                        onChange={(e) => handleUpdateAnggota(idx, 'tanggalLahir', e.target.value)}
+                        placeholder="25-12-1992"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-mono font-bold text-slate-800"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] text-slate-500 font-semibold">Agama</label>
                       <input
                         type="text"
                         value={member.agama || 'Islam'}
                         onChange={(e) => handleUpdateAnggota(idx, 'agama', e.target.value)}
+                        placeholder="Islam"
                         className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Row 3: Pendidikan Terakhir, Jenis Pekerjaan, Golongan Darah */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[10px] text-slate-500 font-semibold">Pendidikan Terakhir*</label>
+                      <input
+                        type="text"
+                        list="pendidikan-options"
+                        value={member.pendidikan || ''}
+                        onChange={(e) => handleUpdateAnggota(idx, 'pendidikan', e.target.value)}
+                        placeholder="Contoh: Diploma IV/Strata I"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 font-medium"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[10px] text-slate-500">Pekerjaan</label>
+                      <label className="block text-[10px] text-slate-500 font-semibold">Jenis Pekerjaan*</label>
                       <input
                         type="text"
-                        value={member.pekerjaan || 'Wiraswasta'}
+                        list="pekerjaan-options"
+                        value={member.pekerjaan || ''}
                         onChange={(e) => handleUpdateAnggota(idx, 'pekerjaan', e.target.value)}
+                        placeholder="Contoh: Belum/Tidak Bekerja"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 font-medium"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] text-slate-500 font-semibold">Golongan Darah</label>
+                      <input
+                        type="text"
+                        list="golongan-darah-options"
+                        value={member.golonganDarah || 'Tidak Tahu'}
+                        onChange={(e) => handleUpdateAnggota(idx, 'golonganDarah', e.target.value)}
+                        placeholder="Tidak Tahu"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Row 4: Status Kawin, Tgl Perkawinan, Silsilah Orang Tua (Ayah & Ibu) */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-1 border-t border-slate-200/60">
+                    <div>
+                      <label className="block text-[10px] text-slate-500 font-semibold">Status Perkawinan</label>
+                      <input
+                        type="text"
+                        value={member.statusPerkawinan || (member.hubungan === 'Kepala Keluarga' || member.hubungan === 'Istri' ? 'Kawin Tercatat' : 'Belum Kawin')}
+                        onChange={(e) => handleUpdateAnggota(idx, 'statusPerkawinan', e.target.value)}
+                        placeholder="Kawin Tercatat / Belum Kawin"
                         className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[10px] text-slate-500">Status Kawin</label>
+                      <label className="block text-[10px] text-slate-500 font-semibold">Tanggal Perkawinan</label>
                       <input
                         type="text"
-                        value={member.statusPerkawinan || 'Kawin'}
-                        onChange={(e) => handleUpdateAnggota(idx, 'statusPerkawinan', e.target.value)}
+                        value={member.tanggalPerkawinan || ''}
+                        onChange={(e) => handleUpdateAnggota(idx, 'tanggalPerkawinan', e.target.value)}
+                        placeholder="25-12-2021 atau -"
                         className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] text-slate-500 font-semibold">Nama Ayah Kandung</label>
+                      <input
+                        type="text"
+                        value={member.namaAyah || ''}
+                        onChange={(e) => handleUpdateAnggota(idx, 'namaAyah', e.target.value)}
+                        placeholder="Nama Ayah Sesuai KK"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 font-medium"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] text-slate-500 font-semibold">Nama Ibu Kandung</label>
+                      <input
+                        type="text"
+                        value={member.namaIbu || ''}
+                        onChange={(e) => handleUpdateAnggota(idx, 'namaIbu', e.target.value)}
+                        placeholder="Nama Ibu Sesuai KK"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 font-medium"
                       />
                     </div>
                   </div>

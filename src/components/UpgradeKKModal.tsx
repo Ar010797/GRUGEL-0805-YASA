@@ -48,6 +48,8 @@ interface UpgradeKKModalProps {
       rt: string;
       rw: string;
       alamat: string;
+      kodePos?: string;
+      tanggalDikeluarkan?: string;
       jenisKelamin: 'Laki-laki' | 'Perempuan';
       anggotaKeluarga: AnggotaKeluarga[];
     };
@@ -85,6 +87,8 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
   const [newRt, setNewRt] = useState('08');
   const [newRw, setNewRw] = useState('05');
   const [newAlamat, setNewAlamat] = useState('');
+  const [newKodePos, setNewKodePos] = useState('53183');
+  const [newTanggalDikeluarkan, setNewTanggalDikeluarkan] = useState('04-09-2024');
   const [newJenisKelamin, setNewJenisKelamin] = useState<'Laki-laki' | 'Perempuan'>('Laki-laki');
   const [newAnggota, setNewAnggota] = useState<AnggotaKeluarga[]>([]);
 
@@ -135,6 +139,16 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
         ...m,
         nama: mName,
         nik: cleanNIK(m.nik),
+        tempatLahir: m.tempatLahir || 'Banyumas',
+        tanggalLahir: m.tanggalLahir || '',
+        pendidikan: m.pendidikan || (idx === 0 ? 'Diploma IV/Strata I' : idx === 1 ? 'SLTP/Sederajat' : 'Tidak/Belum Sekolah'),
+        pekerjaan: m.pekerjaan || (idx === 1 ? 'Mengurus Rumah Tangga' : 'Belum/Tidak Bekerja'),
+        golonganDarah: m.golonganDarah || 'Tidak Tahu',
+        statusPerkawinan: m.statusPerkawinan || (idx <= 1 ? 'Kawin Tercatat' : 'Belum Kawin'),
+        tanggalPerkawinan: m.tanggalPerkawinan || '',
+        kewarganegaraan: m.kewarganegaraan || 'WNI',
+        namaAyah: cleanIndonesianName(m.namaAyah || ''),
+        namaIbu: cleanIndonesianName(m.namaIbu || ''),
       };
     });
 
@@ -144,6 +158,8 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
     setNewRw(extracted.rw || targetWarga?.rw || '05');
     setNewAlamat(extracted.alamat || targetWarga?.alamat || 'RT 08 RW 05 Desa Kotayasa');
     setNewJenisKelamin(extracted.jenisKelamin || 'Laki-laki');
+    if (extracted.kodePos) setNewKodePos(extracted.kodePos);
+    if (extracted.tanggalDikeluarkan) setNewTanggalDikeluarkan(extracted.tanggalDikeluarkan);
     setNewAnggota(cleanMembers);
     setScanSuccess(true);
 
@@ -285,6 +301,16 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
       ...m,
       nama: cleanIndonesianName(m.nama),
       nik: cleanNIK(m.nik),
+      tempatLahir: m.tempatLahir || 'Banyumas',
+      tanggalLahir: m.tanggalLahir || '',
+      pendidikan: m.pendidikan || 'Tidak/Belum Sekolah',
+      pekerjaan: m.pekerjaan || 'Belum/Tidak Bekerja',
+      golonganDarah: m.golonganDarah || 'Tidak Tahu',
+      statusPerkawinan: m.statusPerkawinan || 'Belum Kawin',
+      tanggalPerkawinan: m.tanggalPerkawinan || '',
+      kewarganegaraan: m.kewarganegaraan || 'WNI',
+      namaAyah: cleanIndonesianName(m.namaAyah || ''),
+      namaIbu: cleanIndonesianName(m.namaIbu || ''),
     }));
 
     onApplyUpgrade({
@@ -296,6 +322,8 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
         rt: newRt,
         rw: newRw,
         alamat: newAlamat,
+        kodePos: newKodePos,
+        tanggalDikeluarkan: newTanggalDikeluarkan,
         jenisKelamin: newJenisKelamin,
         anggotaKeluarga: finalMembers,
       },

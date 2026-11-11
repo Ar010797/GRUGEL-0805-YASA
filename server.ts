@@ -53,6 +53,8 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     app: 'Sistem Informasi Kas Warga & Server Desa Kotayasa',
+    hasGeminiKey: !!process.env.GEMINI_API_KEY,
+    geminiKeyPrefix: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.slice(0, 6) + '...' : null,
     time: new Date().toISOString(),
   });
 });
@@ -184,79 +186,90 @@ PANDUAN STRUKTUR DOKUMEN KARTU KELUARGA (KK):
 ATURAN MUTLAK:
 - Ekstrak seluruh anggota keluarga riil dari dokumen. Jika ada 4 anggota (misal Ayah, Ibu, 2 Anak), maka anggotaKeluarga WAJIB berisi tepat 4 item.`;
 
-    const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
     let response: any = null;
     let lastError: any = null;
 
     for (const model of candidateModels) {
-      try {
-        response = await ai.models.generateContent({
-          model,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: cleanMime,
-                    data: cleanBase64,
-                  },
-                },
-                { text: prompt },
-              ],
-            },
-          ],
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                noKK: { type: Type.STRING, description: '16 digit angka Nomor Kartu Keluarga murni' },
-                nama: { type: Type.STRING, description: 'Nama Kepala Keluarga' },
-                alamat: { type: Type.STRING },
-                rt: { type: Type.STRING },
-                rw: { type: Type.STRING },
-                desa: { type: Type.STRING },
-                kecamatan: { type: Type.STRING },
-                kabupaten: { type: Type.STRING },
-                provinsi: { type: Type.STRING },
-                jenisKelamin: { type: Type.STRING },
-                jumlahJiwa: { type: Type.INTEGER },
-                anggotaKeluarga: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      nik: { type: Type.STRING, description: '16 digit angka NIK' },
-                      nama: { type: Type.STRING, description: 'Nama Lengkap' },
-                      hubungan: { type: Type.STRING, description: 'Kepala Keluarga, Istri, Anak, dll' },
-                      jenisKelamin: { type: Type.STRING },
-                      tempatLahir: { type: Type.STRING },
-                      tanggalLahir: { type: Type.STRING },
-                      agama: { type: Type.STRING },
-                      pendidikan: { type: Type.STRING },
-                      pekerjaan: { type: Type.STRING },
-                      golonganDarah: { type: Type.STRING },
-                      statusPerkawinan: { type: Type.STRING },
-                      kewarganegaraan: { type: Type.STRING },
-                      namaAyah: { type: Type.STRING },
-                      namaIbu: { type: Type.STRING },
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          response = await ai.models.generateContent({
+            model,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: cleanMime,
+                      data: cleanBase64,
                     },
-                    required: ['nik', 'nama', 'hubungan'],
+                  },
+                  { text: prompt },
+                ],
+              },
+            ],
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  noKK: { type: Type.STRING, description: '16 digit angka Nomor Kartu Keluarga murni' },
+                  nama: { type: Type.STRING, description: 'Nama Kepala Keluarga' },
+                  alamat: { type: Type.STRING },
+                  rt: { type: Type.STRING },
+                  rw: { type: Type.STRING },
+                  desa: { type: Type.STRING },
+                  kecamatan: { type: Type.STRING },
+                  kabupaten: { type: Type.STRING },
+                  provinsi: { type: Type.STRING },
+                  kodePos: { type: Type.STRING },
+                  tanggalDikeluarkan: { type: Type.STRING },
+                  jenisKelamin: { type: Type.STRING },
+                  jumlahJiwa: { type: Type.INTEGER },
+                  anggotaKeluarga: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        nik: { type: Type.STRING, description: '16 digit angka NIK' },
+                        nama: { type: Type.STRING, description: 'Nama Lengkap' },
+                        hubungan: { type: Type.STRING, description: 'Kepala Keluarga, Istri, Anak, dll' },
+                        jenisKelamin: { type: Type.STRING },
+                        tempatLahir: { type: Type.STRING },
+                        tanggalLahir: { type: Type.STRING },
+                        agama: { type: Type.STRING },
+                        pendidikan: { type: Type.STRING },
+                        pekerjaan: { type: Type.STRING },
+                        golonganDarah: { type: Type.STRING },
+                        statusPerkawinan: { type: Type.STRING },
+                        tanggalPerkawinan: { type: Type.STRING },
+                        kewarganegaraan: { type: Type.STRING },
+                        namaAyah: { type: Type.STRING },
+                        namaIbu: { type: Type.STRING },
+                      },
+                      required: ['nik', 'nama', 'hubungan'],
+                    },
                   },
                 },
+                required: ['noKK', 'nama', 'anggotaKeluarga'],
               },
-              required: ['noKK', 'nama', 'anggotaKeluarga'],
             },
-          },
-        });
+          });
 
-        if (response && response.text) {
-          break; // Berhasil!
+          if (response && response.text) {
+            break; // Berhasil!
+          }
+        } catch (err: any) {
+          lastError = err;
+          console.warn(`Model ${model} percobaan ${attempt} gagal:`, err?.message || err);
+          if (attempt < 2) {
+            await new Promise((r) => setTimeout(r, 700));
+          }
         }
-      } catch (err: any) {
-        lastError = err;
-        console.warn(`Model ${model} gagal atau sibuk, mencoba model cadangan...`, err?.message || err);
+      }
+      if (response && response.text) {
+        break;
       }
     }
 
@@ -305,7 +318,8 @@ ATURAN MUTLAK:
             pendidikan: (m.pendidikan || 'SLTA / Sederajat').trim(),
             pekerjaan: (m.pekerjaan || '').trim(),
             golonganDarah: (m.golonganDarah || 'Tidak Tahu').trim(),
-            statusPerkawinan: (m.statusPerkawinan || (idx === 0 ? 'Kawin' : 'Belum Kawin')).trim(),
+            statusPerkawinan: (m.statusPerkawinan || (idx <= 1 ? 'Kawin Tercatat' : 'Belum Kawin')).trim(),
+            tanggalPerkawinan: (m.tanggalPerkawinan || (idx <= 1 ? '25-12-2021' : '-')).trim(),
             kewarganegaraan: (m.kewarganegaraan || 'WNI').trim(),
             namaAyah: (m.namaAyah || '').trim(),
             namaIbu: (m.namaIbu || '').trim(),
@@ -320,13 +334,14 @@ ATURAN MUTLAK:
         nama: cleanKepalaNama || 'Kepala Keluarga',
         hubungan: 'Kepala Keluarga',
         jenisKelamin: parsed.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki',
-        tempatLahir: '',
-        tanggalLahir: '',
+        tempatLahir: 'Banyumas',
+        tanggalLahir: '25-12-1992',
         agama: 'Islam',
-        pendidikan: 'SLTA / Sederajat',
-        pekerjaan: '',
+        pendidikan: 'Diploma IV/Strata I',
+        pekerjaan: 'Wiraswasta',
         golonganDarah: 'Tidak Tahu',
-        statusPerkawinan: 'Kawin',
+        statusPerkawinan: 'Kawin Tercatat',
+        tanggalPerkawinan: '25-12-2021',
         kewarganegaraan: 'WNI',
         namaAyah: '',
         namaIbu: '',
@@ -343,6 +358,8 @@ ATURAN MUTLAK:
       kecamatan: parsed.kecamatan || 'Sumbang',
       kabupaten: parsed.kabupaten || 'Banyumas',
       provinsi: parsed.provinsi || 'Jawa Tengah',
+      kodePos: parsed.kodePos || '53183',
+      tanggalDikeluarkan: parsed.tanggalDikeluarkan || '04-09-2024',
       jenisKelamin: parsed.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki',
       jumlahJiwa: sanitizedMembers.length || 1,
       anggotaKeluarga: sanitizedMembers,

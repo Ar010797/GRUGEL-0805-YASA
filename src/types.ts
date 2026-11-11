@@ -27,7 +27,10 @@ export interface AnggotaKeluarga {
   pekerjaan?: string;
   golonganDarah?: string;
   statusPerkawinan?: string;
+  tanggalPerkawinan?: string;
   kewarganegaraan?: string;
+  noPaspor?: string;
+  noKitap?: string;
   namaAyah?: string;
   namaIbu?: string;
 }
@@ -42,6 +45,8 @@ export interface Warga {
   rt: string; // misal '08'
   rw?: string; // misal '05'
   alamat?: string;
+  kodePos?: string;
+  tanggalDikeluarkan?: string;
   jenisKelamin: 'Laki-laki' | 'Perempuan';
   jumlahJiwa: number;
   statusIuran: 'Sudah' | 'Belum'; // status tahun aktif

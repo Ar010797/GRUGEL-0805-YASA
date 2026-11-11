@@ -1,7 +1,7 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
-import { Transaction, Warga, PengumumanRT, BantuanPemerintah, ProfilRT } from '../types';
+import { Transaction, Warga, AnggotaKeluarga, PengumumanRT, BantuanPemerintah, ProfilRT } from '../types';
 
 export const exportRekapTahunanPDF = (
   transactions: Transaction[],
@@ -772,8 +772,8 @@ export const exportKartuKeluargaPemerintah_PDF = async (
   const kecStr = (profilRT?.kecamatan || 'Sumbang').replace(/^Kecamatan\s+/i, '');
   const kabStr = (profilRT?.kabupaten || 'Banyumas').replace(/^Kabupaten\s+/i, '');
   const provStr = (profilRT?.provinsi || 'Jawa Tengah').toUpperCase();
-  const kodePosStr = profilRT?.kodePos || '53183';
-  const noKK = warga.noKK || '3302210311060016';
+  const kodePosStr = warga.kodePos || profilRT?.kodePos || '53183';
+  const noKK = warga.noKK || '3302211101230002';
   const alamatWarga = (warga.alamat || desaStr).toUpperCase();
 
   // Double Frame Border Standard Blangko Dukcapil
@@ -829,7 +829,7 @@ export const exportKartuKeluargaPemerintah_PDF = async (
   doc.text('KARTU KELUARGA', pageWidth / 2, 33, { align: 'center' });
 
   doc.setFontSize(13);
-  doc.text(`No. ${noKK}`, pageWidth / 2, 39, { align: 'center' });
+  doc.text(`No.  ${noKK}`, pageWidth / 2, 39, { align: 'center' });
 
   // 2-Column Metadata Header
   doc.setFontSize(7.5);
@@ -881,24 +881,24 @@ export const exportKartuKeluargaPemerintah_PDF = async (
   doc.text(`:  ${provStr}`, rightValX, 58.5);
 
   // Ensure member data is prepared
-  const members = (warga.anggotaKeluarga && warga.anggotaKeluarga.length > 0)
+  const members: AnggotaKeluarga[] = (warga.anggotaKeluarga && warga.anggotaKeluarga.length > 0)
     ? warga.anggotaKeluarga
     : [
         {
-          nik: warga.nik || warga.noKK || '3302217112530069',
+          nik: warga.nik || warga.noKK,
           nama: warga.nama,
           hubungan: 'Kepala Keluarga',
-          jenisKelamin: warga.jenisKelamin || 'Perempuan',
+          jenisKelamin: warga.jenisKelamin || 'Laki-laki',
           tempatLahir: 'Banyumas',
-          tanggalLahir: '31-12-1953',
+          tanggalLahir: '-',
           agama: 'Islam',
-          pendidikan: 'Belum Tamat SD/Sederajat',
-          pekerjaan: 'Buruh Harian Lepas',
+          pendidikan: 'Diploma IV/Strata I',
+          pekerjaan: 'Belum/Tidak Bekerja',
           golonganDarah: 'Tidak Tahu',
-          statusPerkawinan: 'Cerai Mati',
+          statusPerkawinan: 'Kawin Tercatat',
           kewarganegaraan: 'WNI',
-          namaAyah: 'Tadiwangsa',
-          namaIbu: 'Rikem',
+          namaAyah: '-',
+          namaIbu: '-',
         },
       ];
 
@@ -909,14 +909,14 @@ export const exportKartuKeluargaPemerintah_PDF = async (
       const m = members[i];
       table1Rows.push([
         (i + 1).toString(),
-        m.nama.toUpperCase(),
+        (m.nama || '').toUpperCase(),
         m.nik || '-',
         m.jenisKelamin === 'Perempuan' ? 'PEREMPUAN' : 'LAKI-LAKI',
-        (m.tempatLahir || 'BANYUMAS').toUpperCase(),
+        (m.tempatLahir || '-').toUpperCase(),
         m.tanggalLahir || '-',
         (m.agama || 'ISLAM').toUpperCase(),
-        (m.pendidikan || 'BELUM TAMAT SD/SEDERAJAT').toUpperCase(),
-        (m.pekerjaan || 'BURUH HARIAN LEPAS').toUpperCase(),
+        (m.pendidikan || 'TIDAK/BELUM SEKOLAH').toUpperCase(),
+        (m.pekerjaan || 'BELUM/TIDAK BEKERJA').toUpperCase(),
         (m.golonganDarah || 'TIDAK TAHU').toUpperCase(),
       ]);
     } else {
@@ -972,16 +972,20 @@ export const exportKartuKeluargaPemerintah_PDF = async (
   for (let i = 0; i < 10; i++) {
     if (i < members.length) {
       const m = members[i];
+      const defaultStatusKawin =
+        m.hubungan === 'Kepala Keluarga' || m.hubungan === 'Istri'
+          ? 'KAWIN TERCATAT'
+          : 'BELUM KAWIN';
       table2Rows.push([
         (i + 1).toString(),
-        (m.statusPerkawinan || 'CERAI MATI').toUpperCase(),
-        '-',
+        (m.statusPerkawinan || defaultStatusKawin).toUpperCase(),
+        m.tanggalPerkawinan || '-',
         (m.hubungan || 'KEPALA KELUARGA').toUpperCase(),
         (m.kewarganegaraan || 'WNI').toUpperCase(),
-        '-',
-        '-',
-        (m.namaAyah || 'TADIWANGSA').toUpperCase(),
-        (m.namaIbu || 'RIKEM').toUpperCase(),
+        m.noPaspor || '-',
+        m.noKitap || '-',
+        (m.namaAyah || '-').toUpperCase(),
+        (m.namaIbu || '-').toUpperCase(),
       ]);
     } else {
       table2Rows.push([(i + 1).toString(), '-', '-', '-', '-', '-', '-', '-', '-']);
@@ -995,7 +999,7 @@ export const exportKartuKeluargaPemerintah_PDF = async (
       [
         { content: 'No', rowSpan: 2 },
         { content: 'Status Perkawinan', rowSpan: 2 },
-        { content: 'Tanggal Perceraian', rowSpan: 2 },
+        { content: 'Tanggal Perkawinan', rowSpan: 2 },
         { content: 'Status Hubungan Dalam Keluarga', rowSpan: 2 },
         { content: 'Kewarganegaraan', rowSpan: 2 },
         { content: 'Dokumen Imigrasi', colSpan: 2, styles: { halign: 'center' } },
@@ -1047,12 +1051,13 @@ export const exportKartuKeluargaPemerintah_PDF = async (
   const footerY = Math.max(table2EndY + 5, 172);
 
   // Tanggal Dikeluarkan
+  const tglDikeluarkan = warga.tanggalDikeluarkan || '04-09-2024';
   doc.setFontSize(7.5);
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(20, 20, 20);
   doc.text('Dikeluarkan Tanggal  :', margin + 6, footerY);
   doc.setFont('helvetica', 'bold');
-  doc.text('17-11-2020', margin + 35, footerY);
+  doc.text(tglDikeluarkan, margin + 35, footerY);
 
   // Kiri: Tanda Tangan / Cap Jempol Kepala Keluarga
   const leftSignX = margin + 32;
@@ -1069,7 +1074,7 @@ export const exportKartuKeluargaPemerintah_PDF = async (
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(6.5);
-  doc.text('Tanda Tangan / Cap Jempol', leftSignX, footerY + 26, { align: 'center' });
+  doc.text('Tanda Tangan/Cap Jempol', leftSignX, footerY + 26, { align: 'center' });
 
   // Tengah: BSrE BSSN Legal Statement Persis Aslinya
   const midX = pageWidth / 2;
@@ -1088,8 +1093,12 @@ export const exportKartuKeluargaPemerintah_PDF = async (
   doc.text(`KEPALA DINDUKCAPIL`, rightSignX, footerY + 3, { align: 'center' });
   doc.text(`KABUPATEN ${kabStr.toUpperCase()}`, rightSignX, footerY + 6.8, { align: 'center' });
 
+  // Pejabat Resmi Dindukcapil Banyumas
+  const namaPejabat = 'Drs. HIRAWAN DANAN PUTRA, M.Si';
+  const nipPejabat = '197304221992031002';
+
   // Generate Real Official QR Code Data
-  const qrString = `DOKUMEN RESMI KARTU KELUARGA\nREPUBLIK INDONESIA\nDINAS KEPENDUDUKAN DAN PENCATATAN SIPIL KABUPATEN BANYUMAS\nNo. KK: ${noKK}\nKepala Keluarga: ${warga.nama.toUpperCase()}\nDikeluarkan: 17-11-2020\nTTE: WISNU JATMIKO, SH., MH.\nNIP: 196108191992031003\nSertifikasi: BSrE - BSSN`;
+  const qrString = `DOKUMEN RESMI KARTU KELUARGA\nREPUBLIK INDONESIA\nDINAS KEPENDUDUKAN DAN PENCATATAN SIPIL KABUPATEN ${kabStr.toUpperCase()}\nNo. KK: ${noKK}\nKepala Keluarga: ${warga.nama.toUpperCase()}\nDikeluarkan: ${tglDikeluarkan}\nTTE: ${namaPejabat}\nNIP: ${nipPejabat}\nSertifikasi: BSrE - BSSN`;
 
   try {
     const qrDataUrl = await QRCode.toDataURL(qrString, {
@@ -1109,16 +1118,17 @@ export const exportKartuKeluargaPemerintah_PDF = async (
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(7.5);
   doc.setTextColor(20, 20, 20);
-  doc.text('WISNU JATMIKO, SH., MH.', rightSignX, footerY + 29.5, { align: 'center' });
+  doc.text(namaPejabat, rightSignX, footerY + 29.5, { align: 'center' });
   doc.setLineWidth(0.3);
   doc.line(rightSignX - 25, footerY + 30.2, rightSignX + 25, footerY + 30.2);
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(6.5);
-  doc.text('NIP. 196108191992031003', rightSignX, footerY + 33.5, { align: 'center' });
+  doc.text(`NIP. ${nipPejabat}`, rightSignX, footerY + 33.5, { align: 'center' });
 
   // Save the PDF
   const safeFilename = `KARTU_KELUARGA_RESMI_${warga.nama.replace(/\s+/g, '_')}_${noKK}.pdf`;
   doc.save(safeFilename);
 };
+
 

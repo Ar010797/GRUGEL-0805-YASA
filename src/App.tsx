@@ -603,6 +603,8 @@ export default function App() {
       rt: string;
       rw: string;
       alamat: string;
+      kodePos?: string;
+      tanggalDikeluarkan?: string;
       jenisKelamin: 'Laki-laki' | 'Perempuan';
       anggotaKeluarga: AnggotaKeluarga[];
     };
@@ -657,6 +659,8 @@ export default function App() {
             rt: newKKData.rt || w.rt,
             rw: newKKData.rw || w.rw,
             alamat: newKKData.alamat || w.alamat,
+            kodePos: newKKData.kodePos || w.kodePos,
+            tanggalDikeluarkan: newKKData.tanggalDikeluarkan || w.tanggalDikeluarkan,
             jenisKelamin: newKKData.jenisKelamin || w.jenisKelamin,
             jumlahJiwa:
               newKKData.anggotaKeluarga.length > 0
