@@ -281,7 +281,7 @@ app.post('/api/sync-monthly', (req, res) => {
 });
 
 // POST OCR / AI Scan Kartu Keluarga (KK)
-app.post('/api/scan-kk', async (req, res) => {
+app.post(['/api/scan-kk', '/api/scan-kk/'], async (req, res) => {
   try {
     const { imageBase64, mimeType = 'image/jpeg' } = req.body || {};
     if (!imageBase64) {
@@ -293,10 +293,10 @@ app.post('/api/scan-kk', async (req, res) => {
     const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
-      return res.status(503).json({
+      return res.status(200).json({
         success: false,
-        noKey: true,
-        message: 'API Key Gemini belum diset di server.',
+        useClientFallback: true,
+        message: 'Engine Gemini offline, beralih ke on-device OCR.',
       });
     }
 
@@ -590,10 +590,19 @@ ATURAN MUTLAK:
       data: finalData,
     });
   } catch (error: any) {
-    console.error('Error in /api/scan-kk:', error);
-    return res.status(500).json({
+    console.error('Notice in /api/scan-kk:', error);
+    const isQuota =
+      error?.message?.includes('429') ||
+      error?.message?.includes('quota') ||
+      error?.message?.includes('RESOURCE_EXHAUSTED') ||
+      error?.status === 429;
+    return res.status(200).json({
       success: false,
-      message: error?.message || 'Gagal menganalisis dokumen Kartu Keluarga.',
+      useClientFallback: true,
+      quotaExceeded: isQuota,
+      message: isQuota
+        ? 'Batas kuota harian Gemini tercapai. Beralih ke pemindaian On-Device...'
+        : (error?.message || 'Beralih ke pemindaian On-Device...'),
     });
   }
 });
