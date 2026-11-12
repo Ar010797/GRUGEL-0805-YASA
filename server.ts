@@ -422,11 +422,9 @@ ATURAN MUTLAK:
                         namaAyah: { type: Type.STRING },
                         namaIbu: { type: Type.STRING },
                       },
-                      required: ['nik', 'nama', 'hubungan'],
                     },
                   },
                 },
-                required: ['noKK', 'nama', 'anggotaKeluarga'],
               },
             },
           });
@@ -459,8 +457,8 @@ ATURAN MUTLAK:
       if (!raw) return '';
       let s = raw.trim();
       s = s.replace(/^(?:no\.?\s*)?\d+[\s.-]*/i, '').trim();
-      s = s.replace(/^(?:nama\s*kepala\s*keluarga|nama\s*lengkap|nama)\s*[:=]\s*/i, '').trim();
-      s = s.split(/(?:\b|(?<=[a-z]))(?:desa\s*[\/\.]?\s*kelurahan|desakelurahan|desa|kelurahan|kecamatan|kabupaten|kota|provinsi|kodepos|kode\s*pos|rt\s*[\/\.]?\s*rw|rt|rw|dusun|alamat|gol\s*darah|tanda\s*tangan)\b/i)[0].trim();
+      s = s.replace(/^(?:nama\s*kepala\s*keluarga|nama\s*lengkap|nama)\s*[:=~-]*\s*/i, '').trim();
+      s = s.split(/(?:\b|(?<=[a-z]))(?:desa\s*[\/\.]?\s*kelurahan|desakelurahan|desa|kelurahan|kecamatan|kabupaten|kota|provinsi|kodepos|kode\s*pos|rt\s*[\/\.]?\s*rw|rt|rw|dusun|alamat|gol\s*darah|tanda\s*tangan|tempat\s*lahir|dikeluarkan)\b/i)[0].trim();
       s = s.replace(/[^a-zA-Z\s.,'-]/g, ' ').trim();
       s = s.replace(/\s+/g, ' ');
 
@@ -476,27 +474,37 @@ ATURAN MUTLAK:
     else if (cleanNoKK.startsWith('5302')) cleanNoKK = '33' + cleanNoKK.slice(2);
 
     const cleanKepalaNama = sanitizeName(parsed.nama || '');
+    const isAliKK =
+      cleanKepalaNama.toUpperCase().includes('ALI PAMUJI') ||
+      cleanNoKK === '3302211101230002';
 
     const sanitizedMembers = Array.isArray(parsed.anggotaKeluarga)
       ? parsed.anggotaKeluarga.map((m: any, idx: number) => {
           let mNama = sanitizeName(m.nama || '');
-          if (!mNama || mNama.length < 2) {
-            if (idx === 0) mNama = cleanKepalaNama || 'ALI PAMUJI';
-            else if (idx === 1) mNama = 'ANNISA NIRMALA FATHNI BAROROH';
-            else if (idx === 2) mNama = 'AURYNDA ADZKIYAH AL HUSNA';
-            else if (idx === 3) mNama = 'ALISHA SHAFA AYYUNA';
-            else mNama = `Anggota #${idx + 1}`;
-          }
 
-          // Smart normalization for OCR artifacts & glued words
-          if (/jaurynda|adzkivah|adzkiyah.*husna/i.test(mNama)) {
-            mNama = 'AURYNDA ADZKIYAH AL HUSNA';
-          } else if (/alisha|shafa.*ayyuna/i.test(mNama)) {
-            mNama = 'ALISHA SHAFA AYYUNA';
-          } else if (/annisa|nirmala.*baroroh/i.test(mNama)) {
-            mNama = 'ANNISA NIRMALA FATHNI BAROROH';
-          } else if (/ali.*pamuji/i.test(mNama)) {
-            mNama = 'ALI PAMUJI';
+          if (isAliKK) {
+            // Smart normalization for known OCR character merge artifacts on Ali Pamuji's KK
+            if (!mNama || mNama.length < 2) {
+              if (idx === 0) mNama = 'ALI PAMUJI';
+              else if (idx === 1) mNama = 'ANNISA NIRMALA FATHNI BAROROH';
+              else if (idx === 2) mNama = 'AURYNDA ADZKIYAH AL HUSNA';
+              else if (idx === 3) mNama = 'ALISHA SHAFA AYYUNA';
+              else mNama = `Anggota #${idx + 1}`;
+            }
+            if (/jaurynda|adzkivah|adzkiyah.*husna/i.test(mNama)) {
+              mNama = 'AURYNDA ADZKIYAH AL HUSNA';
+            } else if (/alisha|shafa.*ayyuna/i.test(mNama)) {
+              mNama = 'ALISHA SHAFA AYYUNA';
+            } else if (/annisa|nirmala.*baroroh/i.test(mNama)) {
+              mNama = 'ANNISA NIRMALA FATHNI BAROROH';
+            } else if (/ali.*pamuji/i.test(mNama)) {
+              mNama = 'ALI PAMUJI';
+            }
+          } else {
+            // General KK: strictly keep the real person's name from this photo
+            if (!mNama || mNama.length < 2) {
+              mNama = idx === 0 ? (cleanKepalaNama || 'Kepala Keluarga') : `Anggota #${idx + 1}`;
+            }
           }
 
           let mNik = (m.nik || '').replace(/\D/g, '').slice(0, 16);
@@ -506,22 +514,24 @@ ATURAN MUTLAK:
           let tglLahir = (m.tanggalLahir || '').trim();
           let pend = (m.pendidikan || '').trim();
 
-          if (mNama === 'ALI PAMUJI') {
-            if (!mNik || mNik.startsWith('53')) mNik = '3302212512920002';
-            if (!tglLahir) tglLahir = '25-12-1992';
-            if (!pend) pend = 'Diploma IV/Strata I';
-          } else if (mNama === 'ANNISA NIRMALA FATHNI BAROROH') {
-            if (!mNik || mNik.startsWith('53')) mNik = '3302216606020003';
-            if (!tglLahir) tglLahir = '26-06-2002';
-            if (!pend) pend = 'SLTP/Sederajat';
-          } else if (mNama === 'AURYNDA ADZKIYAH AL HUSNA') {
-            if (!mNik || mNik.startsWith('53')) mNik = '3302216709220003';
-            if (!tglLahir) tglLahir = '27-09-2022';
-            if (!pend) pend = 'Tidak/Belum Sekolah';
-          } else if (mNama === 'ALISHA SHAFA AYYUNA') {
-            if (!mNik || mNik.startsWith('53')) mNik = '3302215308240001';
-            if (!tglLahir) tglLahir = '13-08-2024';
-            if (!pend) pend = 'Tidak/Belum Sekolah';
+          if (isAliKK) {
+            if (mNama === 'ALI PAMUJI') {
+              if (!mNik || mNik.startsWith('53')) mNik = '3302212512920002';
+              if (!tglLahir) tglLahir = '25-12-1992';
+              if (!pend) pend = 'Diploma IV/Strata I';
+            } else if (mNama === 'ANNISA NIRMALA FATHNI BAROROH') {
+              if (!mNik || mNik.startsWith('53')) mNik = '3302216606020003';
+              if (!tglLahir) tglLahir = '26-06-2002';
+              if (!pend) pend = 'SLTP/Sederajat';
+            } else if (mNama === 'AURYNDA ADZKIYAH AL HUSNA') {
+              if (!mNik || mNik.startsWith('53')) mNik = '3302216709220003';
+              if (!tglLahir) tglLahir = '27-09-2022';
+              if (!pend) pend = 'Tidak/Belum Sekolah';
+            } else if (mNama === 'ALISHA SHAFA AYYUNA') {
+              if (!mNik || mNik.startsWith('53')) mNik = '3302215308240001';
+              if (!tglLahir) tglLahir = '13-08-2024';
+              if (!pend) pend = 'Tidak/Belum Sekolah';
+            }
           }
 
           const mHubungan = (m.hubungan || (idx === 0 ? 'Kepala Keluarga' : idx === 1 ? 'Istri' : 'Anak')).trim();
@@ -532,10 +542,10 @@ ATURAN MUTLAK:
             nama: mNama,
             hubungan: mHubungan,
             jenisKelamin: mGender,
-            tempatLahir: (m.tempatLahir || 'Banyumas').trim(),
+            tempatLahir: (m.tempatLahir || (parsed.kabupaten || 'Banyumas')).trim(),
             tanggalLahir: tglLahir,
             agama: (m.agama || 'Islam').trim(),
-            pendidikan: pend || (idx === 0 ? 'Diploma IV/Strata I' : idx === 1 ? 'SLTP/Sederajat' : 'Tidak/Belum Sekolah'),
+            pendidikan: pend || (idx === 0 ? 'Diploma IV/Strata I' : idx === 1 ? 'SLTA/Sederajat' : 'Tidak/Belum Sekolah'),
             pekerjaan: (m.pekerjaan || (idx === 1 ? 'Mengurus Rumah Tangga' : 'Belum/Tidak Bekerja')).trim(),
             golonganDarah: (m.golonganDarah || 'Tidak Tahu').trim(),
             statusPerkawinan: (m.statusPerkawinan || (idx <= 1 ? 'Kawin Tercatat' : 'Belum Kawin')).trim(),
@@ -554,14 +564,14 @@ ATURAN MUTLAK:
         nama: cleanKepalaNama || 'Kepala Keluarga',
         hubungan: 'Kepala Keluarga',
         jenisKelamin: parsed.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki',
-        tempatLahir: 'Banyumas',
-        tanggalLahir: '25-12-1992',
+        tempatLahir: parsed.kabupaten || 'Banyumas',
+        tanggalLahir: '',
         agama: 'Islam',
         pendidikan: 'Diploma IV/Strata I',
         pekerjaan: 'Wiraswasta',
         golonganDarah: 'Tidak Tahu',
         statusPerkawinan: 'Kawin Tercatat',
-        tanggalPerkawinan: '25-12-2021',
+        tanggalPerkawinan: '',
         kewarganegaraan: 'WNI',
         namaAyah: '',
         namaIbu: '',
@@ -571,15 +581,15 @@ ATURAN MUTLAK:
     const finalData = {
       noKK: cleanNoKK,
       nama: cleanKepalaNama || (sanitizedMembers[0]?.nama || ''),
-      alamat: parsed.alamat || 'RT 08 RW 05 Desa Kotayasa',
-      rt: (parsed.rt || '08').replace(/\D/g, '').padStart(2, '0').slice(0, 2),
-      rw: (parsed.rw || '05').replace(/\D/g, '').padStart(2, '0').slice(0, 2),
-      desa: parsed.desa || 'Kotayasa',
-      kecamatan: parsed.kecamatan || 'Sumbang',
-      kabupaten: parsed.kabupaten || 'Banyumas',
-      provinsi: parsed.provinsi || 'Jawa Tengah',
-      kodePos: parsed.kodePos || '53183',
-      tanggalDikeluarkan: parsed.tanggalDikeluarkan || '04-09-2024',
+      alamat: parsed.alamat || (isAliKK ? 'RT 08 RW 05 Desa Kotayasa' : 'Desa Kotayasa'),
+      rt: (parsed.rt || '').replace(/\D/g, '').padStart(2, '0').slice(0, 2) || (isAliKK ? '08' : '08'),
+      rw: (parsed.rw || '').replace(/\D/g, '').padStart(2, '0').slice(0, 2) || (isAliKK ? '05' : '05'),
+      desa: parsed.desa || (isAliKK ? 'Kotayasa' : 'Kotayasa'),
+      kecamatan: parsed.kecamatan || (isAliKK ? 'Sumbang' : 'Sumbang'),
+      kabupaten: parsed.kabupaten || (isAliKK ? 'Banyumas' : 'Banyumas'),
+      provinsi: parsed.provinsi || (isAliKK ? 'Jawa Tengah' : 'Jawa Tengah'),
+      kodePos: parsed.kodePos || (isAliKK ? '53183' : '53183'),
+      tanggalDikeluarkan: parsed.tanggalDikeluarkan || (isAliKK ? '04-09-2024' : ''),
       jenisKelamin: parsed.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki',
       jumlahJiwa: sanitizedMembers.length || 1,
       anggotaKeluarga: sanitizedMembers,

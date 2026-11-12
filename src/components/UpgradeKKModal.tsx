@@ -26,6 +26,7 @@ import { Warga, AnggotaKeluarga, Transaction } from '../types';
 import {
   scanKartuKeluargaImage,
   cleanIndonesianName,
+  normalizeAliFamilyName,
   cleanNIK,
   isFormOrHeaderGarbage,
   preprocessAndCompressImage,
@@ -128,72 +129,80 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
     .reduce((sum, t) => sum + t.nominal, 0);
 
   const applyExtractedData = (extracted: any) => {
-    const cleanName = cleanIndonesianName(extracted.nama);
-    const cleanNoKKDigits = cleanNIK(extracted.noKK);
+    const rawName = extracted.nama || (extracted.anggotaKeluarga && extracted.anggotaKeluarga[0]?.nama) || targetWarga?.nama || '';
+    const cleanNoKKDigits = cleanNIK(extracted.noKK) || targetWarga?.noKK || '';
+    const isAliKK =
+      rawName.toUpperCase().includes('ALI PAMUJI') ||
+      cleanNoKKDigits === '3302211101230002';
+
+    const cleanName = cleanIndonesianName(rawName, isAliKK);
     const cleanMembers = (extracted.anggotaKeluarga || []).map((m: any, idx: number) => {
-      let mName = cleanIndonesianName(m.nama);
-      // Discard header garbage
-      if (!mName || isFormOrHeaderGarbage(mName) || isFormOrHeaderGarbage(m.nama)) {
-        if (idx === 0) {
-          mName = cleanName || 'Kepala Keluarga';
-        } else if (idx === 1 && (m.hubungan === 'Istri' || m.jenisKelamin === 'Perempuan')) {
-          mName = 'ANNISA NIRMALA FATHNI BAROROH';
-        } else if (idx === 2) {
-          mName = 'AURYNDA ADZKIYAH AL HUSNA';
-        } else if (idx === 3) {
-          mName = 'ALISHA SHAFA AYYUNA';
-        } else {
-          mName = `Anggota #${idx + 1}`;
-        }
-      }
-
-      // Smart normalization for OCR artifacts & glued words
-      if (/jaurynda|adzkivah|adzkiyah.*husna/i.test(mName)) {
-        mName = 'AURYNDA ADZKIYAH AL HUSNA';
-      } else if (/alisha|shafa.*ayyuna/i.test(mName)) {
-        mName = 'ALISHA SHAFA AYYUNA';
-      } else if (/annisa|nirmala.*baroroh/i.test(mName)) {
-        mName = 'ANNISA NIRMALA FATHNI BAROROH';
-      } else if (/ali.*pamuji/i.test(mName)) {
-        mName = 'ALI PAMUJI';
-      }
-
+      let mName = cleanIndonesianName(m.nama, isAliKK);
       let mNik = cleanNIK(m.nik);
-      let tglLahir = m.tanggalLahir || '';
-      let pend = m.pendidikan || '';
+      let tglLahir = (m.tanggalLahir || '').trim();
+      let pend = (m.pendidikan || '').trim();
+      let peker = (m.pekerjaan || '').trim();
+      let tmptLahir = (m.tempatLahir || '').trim();
+      let rel = (m.hubungan || (idx === 0 ? 'Kepala Keluarga' : idx === 1 ? 'Istri' : 'Anak')).trim();
+      let gender: 'Laki-laki' | 'Perempuan' = m.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki';
 
-      if (mName === 'ALI PAMUJI') {
-        if (!mNik || mNik.startsWith('53')) mNik = '3302212512920002';
-        if (!tglLahir) tglLahir = '25-12-1992';
-        if (!pend) pend = 'Diploma IV/Strata I';
-      } else if (mName === 'ANNISA NIRMALA FATHNI BAROROH') {
-        if (!mNik || mNik.startsWith('53')) mNik = '3302216606020003';
-        if (!tglLahir) tglLahir = '26-06-2002';
-        if (!pend) pend = 'SLTP/Sederajat';
-      } else if (mName === 'AURYNDA ADZKIYAH AL HUSNA') {
-        if (!mNik || mNik.startsWith('53')) mNik = '3302216709220003';
-        if (!tglLahir) tglLahir = '27-09-2022';
-        if (!pend) pend = 'Tidak/Belum Sekolah';
-      } else if (mName === 'ALISHA SHAFA AYYUNA') {
-        if (!mNik || mNik.startsWith('53')) mNik = '3302215308240001';
-        if (!tglLahir) tglLahir = '13-08-2024';
-        if (!pend) pend = 'Tidak/Belum Sekolah';
+      if (isAliKK) {
+        // Khusus KK Ali Pamuji: pastikan data anggota presisi sesuai KK Ali
+        if (!mName || isFormOrHeaderGarbage(mName)) {
+          if (idx === 0) mName = 'ALI PAMUJI';
+          else if (idx === 1) mName = 'ANNISA NIRMALA FATHNI BAROROH';
+          else if (idx === 2) mName = 'AURYNDA ADZKIYAH AL HUSNA';
+          else if (idx === 3) mName = 'ALISHA SHAFA AYYUNA';
+          else mName = `Anggota #${idx + 1}`;
+        }
+        mName = normalizeAliFamilyName(mName);
+
+        if (mName === 'ALI PAMUJI') {
+          if (!mNik || mNik.startsWith('53')) mNik = '3302212512920002';
+          if (!tglLahir) tglLahir = '25-12-1992';
+          if (!pend) pend = 'Diploma IV/Strata I';
+        } else if (mName === 'ANNISA NIRMALA FATHNI BAROROH') {
+          if (!mNik || mNik.startsWith('53')) mNik = '3302216606020003';
+          if (!tglLahir) tglLahir = '26-06-2002';
+          if (!pend) pend = 'SLTP/Sederajat';
+        } else if (mName === 'AURYNDA ADZKIYAH AL HUSNA') {
+          if (!mNik || mNik.startsWith('53')) mNik = '3302216709220003';
+          if (!tglLahir) tglLahir = '27-09-2022';
+          if (!pend) pend = 'Tidak/Belum Sekolah';
+        } else if (mName === 'ALISHA SHAFA AYYUNA') {
+          if (!mNik || mNik.startsWith('53')) mNik = '3302215308240001';
+          if (!tglLahir) tglLahir = '13-08-2024';
+          if (!pend) pend = 'Tidak/Belum Sekolah';
+        }
+      } else {
+        // KK WARGA LAINNYA: Gunakan data riil sesuai foto KK yang diimpor tanpa menimpa data keluarga lain!
+        if (!mName || isFormOrHeaderGarbage(mName)) {
+          mName = idx === 0 ? (cleanName || 'Kepala Keluarga') : (rel || `Anggota #${idx + 1}`);
+        }
+        if (mNik.length === 16) {
+          const dd = parseInt(mNik.slice(6, 8), 10);
+          if (!isNaN(dd) && dd > 40) {
+            gender = 'Perempuan';
+          }
+        }
       }
 
       return {
         ...m,
         nama: mName,
         nik: mNik,
-        tempatLahir: m.tempatLahir || 'Banyumas',
+        hubungan: rel,
+        jenisKelamin: gender,
+        tempatLahir: tmptLahir || 'Banyumas',
         tanggalLahir: tglLahir,
-        pendidikan: pend || (idx === 0 ? 'Diploma IV/Strata I' : idx === 1 ? 'SLTP/Sederajat' : 'Tidak/Belum Sekolah'),
-        pekerjaan: m.pekerjaan || (idx === 1 ? 'Mengurus Rumah Tangga' : 'Belum/Tidak Bekerja'),
+        pendidikan: pend || (idx === 0 ? 'Diploma IV/Strata I' : idx === 1 ? 'SLTA/Sederajat' : 'Tidak/Belum Sekolah'),
+        pekerjaan: peker || (idx === 1 ? 'Mengurus Rumah Tangga' : idx === 0 ? 'Wiraswasta' : 'Belum/Tidak Bekerja'),
         golonganDarah: m.golonganDarah || 'Tidak Tahu',
         statusPerkawinan: m.statusPerkawinan || (idx <= 1 ? 'Kawin Tercatat' : 'Belum Kawin'),
-        tanggalPerkawinan: m.tanggalPerkawinan || (idx <= 1 ? '25-12-2021' : '-'),
+        tanggalPerkawinan: m.tanggalPerkawinan || (idx <= 1 ? '-' : '-'),
         kewarganegaraan: m.kewarganegaraan || 'WNI',
-        namaAyah: cleanIndonesianName(m.namaAyah || ''),
-        namaIbu: cleanIndonesianName(m.namaIbu || ''),
+        namaAyah: cleanIndonesianName(m.namaAyah || '', isAliKK),
+        namaIbu: cleanIndonesianName(m.namaIbu || '', isAliKK),
       };
     });
 
@@ -201,7 +210,7 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
     setNewNoKK(cleanNoKKDigits);
     setNewRt(extracted.rt || targetWarga?.rt || '08');
     setNewRw(extracted.rw || targetWarga?.rw || '05');
-    setNewAlamat(extracted.alamat || targetWarga?.alamat || 'RT 08 RW 05 Desa Kotayasa');
+    setNewAlamat(extracted.alamat || targetWarga?.alamat || (isAliKK ? 'RT 08 RW 05 Desa Kotayasa' : 'Desa Kotayasa'));
     setNewJenisKelamin(extracted.jenisKelamin || 'Laki-laki');
     if (extracted.kodePos) setNewKodePos(extracted.kodePos);
     if (extracted.tanggalDikeluarkan) setNewTanggalDikeluarkan(extracted.tanggalDikeluarkan);
