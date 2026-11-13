@@ -7,37 +7,40 @@ export interface TemplateProfilRT {
   desa?: string;
 }
 
+/**
+ * Header struktur Blok Kartu Keluarga (sesuai format Data_KK_Warga_RT):
+ * - Kolom A (NAMA LENGKAP): Baris 1 keluarga berisi Nama Kepala Keluarga, baris tepat di bawahnya berisi No/ID KK 16 digit.
+ * - Kolom B s.d. X: Daftar seluruh Anggota Keluarga + identitas lengkap + Bantuan Pemerintah.
+ */
 export const TEMPLATE_HEADERS = [
-  'No',
-  'No KK',
-  'No Rumah',
+  'NAMA LENGKAP',
+  'ANGGOTA KELUARGA',
+  'NIK',
+  'JENIS KELAMIN',
+  'STATUS HUBUNGAN',
+  'TEMPAT LAHIR',
+  'TGL LAHIR',
+  'STATUS PERKAWINAN',
+  'NIKAH',
+  'AGAMA',
+  'PENDIDIKAN',
+  'PEKERJAAN',
+  'GOLONGAN DARAH',
+  'KEWARGANEGARAAN',
+  'NAMA AYAH',
+  'NAMA IBU',
+  'NO HP',
+  'ALAMAT',
   'RT',
   'RW',
-  'Alamat',
-  'Kode Pos',
-  'NIK',
-  'Nama Lengkap',
-  'Status Hubungan',
-  'Jenis Kelamin',
-  'Tempat Lahir',
-  'Tanggal Lahir',
-  'Agama',
-  'Pendidikan Terakhir',
-  'Jenis Pekerjaan',
-  'Golongan Darah',
-  'Status Perkawinan',
-  'Tanggal Perkawinan',
-  'Kewarganegaraan',
-  'Nama Ayah',
-  'Nama Ibu',
-  'No HP / Telepon',
-  'Status Iuran',
-  'Jenis Bantuan',
-  'Nominal / Barang Bantuan',
-  'Tanggal Bantuan',
-  'Status Bantuan',
-  'Sumber Dana Bantuan',
-  'Keterangan Bantuan',
+  'NO RUMAH',
+  'STATUS IURAN',
+  'JENIS BANTUAN',
+  'NOMINAL BANTUAN',
+  'TANGGAL BANTUAN',
+  'STATUS BANTUAN',
+  'SUMBER DANA BANTUAN',
+  'KETERANGAN BANTUAN',
 ];
 
 export const BANTUAN_SHEET_HEADERS = [
@@ -95,32 +98,36 @@ export function buildTemplateExcelWorkbook(profilRT?: TemplateProfilRT): XLSX.Wo
   const desaDefault = profilRT?.desa || 'Desa Kotayasa';
   const alamatDefault = `RT ${rtDefault} RW ${rwDefault} ${desaDefault}`;
 
+  // Susunan persis format Blok KK:
+  // Baris pemisah berisi Nomor KK (1, 2, 3...) di kolom A,
+  // Baris 1 keluarga: Kolom A = NAMA KEPALA KELUARGA, Kolom B+ = Anggota 1 (Kepala Keluarga)
+  // Baris 2 keluarga: Kolom A = ID/NO KK (di bawah nama Kepala Keluarga), Kolom B+ = Anggota 2 (Istri) atau kosong bila KK tunggal
+  // Baris 3+ keluarga: Kolom A = kosong, Kolom B+ = Anak / anggota berikutnya
   const sampleRows: (string | number)[][] = [
     TEMPLATE_HEADERS,
+    [1],
     [
-      1,
-      '3302210101850001',
-      '01',
-      rtDefault,
-      rwDefault,
-      alamatDefault,
-      '53183',
-      '3302210101850001',
       'BUDI SANTOSO',
-      'Kepala Keluarga',
-      'Laki-laki',
+      'Budi Santoso',
+      '3302210101850001',
+      'L',
+      'Kep.Keluarga',
       'Banyumas',
       '01-01-1985',
+      'Kawin tercatat',
+      '10-05-2012',
       'Islam',
       'SLTA/Sederajat',
       'Wiraswasta',
       'O',
-      'Kawin Tercatat',
-      '10-05-2012',
       'WNI',
       'SUKIRMAN',
       'PARTINAH',
       '081234567890',
+      alamatDefault,
+      rtDefault,
+      rwDefault,
+      '01',
       'Sudah',
       'BPNT (Bantuan Pangan Non Tunai)',
       'Rp 600.000 / Triwulan',
@@ -130,30 +137,28 @@ export function buildTemplateExcelWorkbook(profilRT?: TemplateProfilRT): XLSX.Wo
       'Penyaluran tahap berjalan via Kantor Pos',
     ],
     [
-      2,
-      '3302210101850001',
-      '01',
-      rtDefault,
-      rwDefault,
-      alamatDefault,
-      '53183',
+      '330221-010185-0001',
+      'Siti Aminah',
       '3302215206880002',
-      'SITI AMINAH',
+      'P',
       'Istri',
-      'Perempuan',
       'Banyumas',
       '12-06-1988',
+      'Kawin tercatat',
+      '10-05-2012',
       'Islam',
       'SLTP/Sederajat',
       'Mengurus Rumah Tangga',
       'A',
-      'Kawin Tercatat',
-      '10-05-2012',
       'WNI',
       'DARSONO',
       'SUMIYATI',
       '',
-      'Sudah',
+      '',
+      '',
+      '',
+      '',
+      '',
       '',
       '',
       '',
@@ -162,30 +167,28 @@ export function buildTemplateExcelWorkbook(profilRT?: TemplateProfilRT): XLSX.Wo
       '',
     ],
     [
-      3,
-      '3302210101850001',
-      '01',
-      rtDefault,
-      rwDefault,
-      alamatDefault,
-      '53183',
+      '',
+      'Rafa Pratama',
       '3302211408140003',
-      'RAFA PRATAMA',
+      'L',
       'Anak',
-      'Laki-laki',
       'Banyumas',
       '14-08-2014',
+      'Belum kawin',
+      '-',
       'Islam',
       'Tamat SD/Sederajat',
       'Pelajar/Mahasiswa',
       'O',
-      'Belum Kawin',
-      '-',
       'WNI',
       'BUDI SANTOSO',
       'SITI AMINAH',
       '',
-      'Sudah',
+      '',
+      '',
+      '',
+      '',
+      '',
       'KIP / PIP Siswa & Pelajar',
       'Rp 450.000 / Semester',
       '2026-09-15',
@@ -193,30 +196,29 @@ export function buildTemplateExcelWorkbook(profilRT?: TemplateProfilRT): XLSX.Wo
       'Kemendikbud RI',
       'Bantuan pendidikan siswa SD/SMP',
     ],
+    [2],
     [
-      4,
-      '3302210506880002',
-      '02',
-      rtDefault,
-      rwDefault,
-      alamatDefault,
-      '53183',
-      '3302210506880002',
       'HENDRA WIJAYA',
-      'Kepala Keluarga',
-      'Laki-laki',
+      'Hendra Wijaya',
+      '3302210506880002',
+      'L',
+      'Kep.Keluarga',
       'Banyumas',
       '05-06-1988',
+      'Kawin tercatat',
+      '20-11-2016',
       'Islam',
       'Diploma IV/Strata I',
       'Karyawan Swasta',
       'B',
-      'Kawin Tercatat',
-      '20-11-2016',
       'WNI',
       'SLAMET RIYADI',
       'MURTININGSIH',
       '085612345678',
+      alamatDefault,
+      rtDefault,
+      rwDefault,
+      '02',
       'Belum',
       'PKH (Program Keluarga Harapan)',
       'Rp 750.000 / Triwulan',
@@ -226,30 +228,28 @@ export function buildTemplateExcelWorkbook(profilRT?: TemplateProfilRT): XLSX.Wo
       'Menunggu jadwal penyaluran tahap berikutnya',
     ],
     [
-      5,
-      '3302210506880002',
-      '02',
-      rtDefault,
-      rwDefault,
-      alamatDefault,
-      '53183',
+      '330221-050688-0002',
+      'Ratna Sari',
       '3302214809900001',
-      'RATNA SARI',
+      'P',
       'Istri',
-      'Perempuan',
       'Purwokerto',
       '08-09-1990',
+      'Kawin tercatat',
+      '20-11-2016',
       'Islam',
       'SLTA/Sederajat',
       'Mengurus Rumah Tangga',
       'AB',
-      'Kawin Tercatat',
-      '20-11-2016',
       'WNI',
       'SUWARDI',
       'TUTI HARYATI',
       '',
-      'Belum',
+      '',
+      '',
+      '',
+      '',
+      '',
       '',
       '',
       '',
@@ -257,52 +257,83 @@ export function buildTemplateExcelWorkbook(profilRT?: TemplateProfilRT): XLSX.Wo
       '',
       '',
     ],
+    [3],
+    [
+      'SUTRISNO',
+      'Sutrisno',
+      '3302211203600001',
+      'L',
+      'Kep.Keluarga',
+      'Banyumas',
+      '12-03-1960',
+      'Cerai mati',
+      '-',
+      'Islam',
+      'SD/Sederajat',
+      'Petani/Pekebun',
+      'O',
+      'WNI',
+      'KARSO',
+      'WAGINEM',
+      '085200001122',
+      alamatDefault,
+      rtDefault,
+      rwDefault,
+      '03',
+      'Sudah',
+      'Bantuan Lansia Disabilitas',
+      'Rp 300.000 / Bulan',
+      '2026-10-01',
+      'Sudah Disalurkan',
+      'Dana Desa',
+      'Contoh KK tunggal (1 anggota, No KK tepat di bawah nama)',
+    ],
+    ['330221-120360-0001'],
   ];
 
   const wb = XLSX.utils.book_new();
   wb.Props = {
-    Title: 'Template Import Warga, Anggota Keluarga & Bantuan Pemerintah',
-    Subject: 'Data Kependudukan & Bansos RT',
+    Title: 'Template Import Data KK Warga & Bantuan Pemerintah',
+    Subject: 'Data Kependudukan Blok KK & Bansos RT',
     Author: `Pengurus RT ${rtDefault} RW ${rwDefault} ${desaDefault}`,
   };
 
   const wsMain = XLSX.utils.aoa_to_sheet(sampleRows);
-  applyTextFormattingToSheet(wsMain, [1, 2, 3, 4, 6, 7, 22]);
+  // Format text on Col A (No KK & Nama), C (NIK), G (Tgl Lahir), I (Tgl Nikah), Q (No HP), S (RT), T (RW), U (No Rumah)
+  applyTextFormattingToSheet(wsMain, [0, 2, 6, 8, 16, 18, 19, 20]);
 
   wsMain['!cols'] = [
-    { wch: 5 },
-    { wch: 20 },
-    { wch: 10 },
-    { wch: 6 },
-    { wch: 6 },
-    { wch: 28 },
-    { wch: 10 },
-    { wch: 20 },
-    { wch: 26 },
-    { wch: 18 },
-    { wch: 14 },
-    { wch: 16 },
-    { wch: 14 },
-    { wch: 12 },
-    { wch: 22 },
-    { wch: 22 },
-    { wch: 14 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 22 },
-    { wch: 22 },
-    { wch: 16 },
-    { wch: 12 },
-    { wch: 30 },
-    { wch: 22 },
-    { wch: 15 },
-    { wch: 18 },
-    { wch: 22 },
-    { wch: 32 },
+    { wch: 24 }, // A: NAMA LENGKAP / NO KK
+    { wch: 26 }, // B: ANGGOTA KELUARGA
+    { wch: 20 }, // C: NIK
+    { wch: 14 }, // D: JENIS KELAMIN
+    { wch: 16 }, // E: STATUS HUBUNGAN
+    { wch: 16 }, // F: TEMPAT LAHIR
+    { wch: 14 }, // G: TGL LAHIR
+    { wch: 16 }, // H: STATUS PERKAWINAN
+    { wch: 14 }, // I: NIKAH
+    { wch: 12 }, // J: AGAMA
+    { wch: 20 }, // K: PENDIDIKAN
+    { wch: 22 }, // L: PEKERJAAN
+    { wch: 14 }, // M: GOL DARAH
+    { wch: 15 }, // N: KEWARGANEGARAAN
+    { wch: 20 }, // O: NAMA AYAH
+    { wch: 20 }, // P: NAMA IBU
+    { wch: 16 }, // Q: NO HP
+    { wch: 28 }, // R: ALAMAT
+    { wch: 6 },  // S: RT
+    { wch: 6 },  // T: RW
+    { wch: 10 }, // U: NO RUMAH
+    { wch: 12 }, // V: STATUS IURAN
+    { wch: 28 }, // W: JENIS BANTUAN
+    { wch: 22 }, // X: NOMINAL BANTUAN
+    { wch: 15 }, // Y: TANGGAL BANTUAN
+    { wch: 18 }, // Z: STATUS BANTUAN
+    { wch: 22 }, // AA: SUMBER DANA
+    { wch: 32 }, // AB: KETERANGAN BANTUAN
   ];
 
-  XLSX.utils.book_append_sheet(wb, wsMain, 'Data Warga & Bantuan');
+  XLSX.utils.book_append_sheet(wb, wsMain, 'Data KK Halaman 1');
 
   const wsBantuan = XLSX.utils.aoa_to_sheet([BANTUAN_SHEET_HEADERS]);
   applyTextFormattingToSheet(wsBantuan, [1, 2]);
@@ -321,33 +352,34 @@ export function buildTemplateExcelWorkbook(profilRT?: TemplateProfilRT): XLSX.Wo
   XLSX.utils.book_append_sheet(wb, wsBantuan, 'Data Bantuan Tambahan');
 
   const guideRows: string[][] = [
-    ['PANDUAN PENGISIAN TEMPLATE IMPORT EXCEL WARGA, ANGGOTA KELUARGA & BANTUAN PEMERINTAH'],
+    ['PANDUAN PENGISIAN TEMPLATE IMPORT DATA KK WARGA & BANTUAN PEMERINTAH'],
     [''],
-    ['1. CARA PENGELOMPOKAN ANGGOTA KELUARGA OTOMATIS'],
-    ['- Isi 1 baris untuk setiap orang (Kepala Keluarga, Istri, Anak, Orang Tua, dll).'],
-    ['- Berikan Nomor Kartu Keluarga (No KK) yang SAMA persis pada seluruh anggota keluarga yang berada dalam 1 KK.'],
-    ['- Saat file di-import, aplikasi otomatis mengelompokkan semua baris dengan No KK yang sama menjadi 1 Kartu Keluarga utuh.'],
-    ['- Contoh pada sheet Data Warga & Bantuan: Baris 1-3 memiliki No KK sama (3302210101850001) sehingga otomatis menjadi 1 KK (Budi Santoso, Istri, Anak).'],
+    ['1. FORMAT BLOK KARTU KELUARGA (SESUAI DATA_KK_WARGA_RT)'],
+    ['- Kolom A (NAMA LENGKAP):'],
+    ['  * Baris pemisah keluarga boleh diberi nomor urut (1, 2, 3, ...).'],
+    ['  * Baris pertama anggota (Kepala Keluarga): isi Nama Kepala Keluarga pada Kolom A.'],
+    ['  * Baris tepat di bawah Nama Kepala Keluarga pada Kolom A: isi Nomor/ID KK 16 digit (boleh pakai strip seperti 330221-010185-0001 atau angka murni 3302210101850001).'],
+    ['  * Jika Kepala Keluarga hanya 1 orang (tidak punya istri/anak), tetap tuliskan Nomor KK pada baris kosong tepat di bawah namanya di Kolom A.'],
+    ['- Kolom B (ANGGOTA KELUARGA) s.d. Kolom L: isi semua anggota keluarga (Kep.Keluarga, Istri, Anak, dll).'],
+    ['- Aplikasi juga tetap mendukung format tabel biasa yang memiliki kolom "No KK" di setiap baris.'],
     [''],
-    ['2. ATURAN PENULISAN KOLOM PENTING'],
-    ['- No KK & NIK: Wajib 16 digit angka (format Teks agar tidak berubah menjadi 3,30221E+15 di Excel).'],
-    ['- Status Hubungan: Gunakan salah satu dari: Kepala Keluarga | Istri | Anak | Orang Tua | Mertua | Famili Lain'],
-    ['- Jenis Kelamin: Laki-laki atau Perempuan'],
-    ['- Tanggal Lahir / Tanggal Perkawinan: Format DD-MM-YYYY (contoh: 25-12-1992) atau format tanggal Excel biasa.'],
-    ['- Status Iuran: Isi "Sudah" atau "Belum" (diambil dari baris Kepala Keluarga).'],
+    ['2. ATURAN PENULISAN KOLOM'],
+    ['- NIK & ID KK: 16 digit (format dengan tanda strip "-" maupun tanpa strip sama-sama terbaca otomatis).'],
+    ['- Jenis Kelamin: L / P / Laki-laki / Perempuan.'],
+    ['- Status Hubungan: Kep.Keluarga / Kepala Keluarga | Istri | Anak | Orang Tua | Mertua | Famili Lain.'],
+    ['- Tanggal Lahir / Tanggal Nikah: DD-MM-YYYY (contoh: 31-12-1950) atau format tanggal Excel biasa.'],
     [''],
-    ['3. DATA PENERIMAAN BANTUAN PEMERINTAH (SEKALI IMPORT LANGSUNG BERES)'],
-    ['- Jika keluarga atau anggota tertentu menerima bantuan pemerintah, langsung isi kolom "Jenis Bantuan" s.d. "Keterangan Bantuan" di baris orang tersebut.'],
-    ['- Jika tidak menerima bantuan, cukup kosongkan kolom Jenis Bantuan.'],
-    ['- Jika 1 orang menerima lebih dari 1 bantuan sekaligus, pisahkan dengan tanda koma (misal: "BPNT, Sembako Beras") atau gunakan sheet "Data Bantuan Tambahan".'],
-    ['- Pilihan Status Bantuan: Sudah Disalurkan | Baru Diusulkan | Proses Verifikasi | Ditolak'],
+    ['3. DATA PENERIMAAN BANTUAN PEMERINTAH (SEKALI IMPORT BERES SEMUA)'],
+    ['- Isi kolom JENIS BANTUAN s.d. KETERANGAN BANTUAN pada baris warga penerima, atau gunakan sheet "Data Bantuan Tambahan".'],
+    ['- Jika 1 warga menerima lebih dari 1 bantuan, pisahkan dengan tanda koma (misal: "BPNT, Sembako Beras").'],
     ['- Contoh Program Bantuan Standar:', ...PRESET_JENIS_BANTUAN],
     [''],
-    ['4. CATATAN PENTING'],
-    ['- Hapus atau timpa 5 baris contoh (BUDI SANTOSO & HENDRA WIJAYA) pada sheet "Data Warga & Bantuan" dengan data warga RT Anda sebelum melakukan import.'],
+    ['4. CATATAN'],
+    ['- Hapus atau timpa 3 keluarga contoh (BUDI SANTOSO, HENDRA WIJAYA, SUTRISNO) dengan data warga RT Anda sebelum import.'],
+    ['- Jika file Excel Anda memiliki beberapa sheet seperti "Data KK Halaman 1", "Data KK Halaman 2", seluruh sheet akan otomatis digabung saat import.'],
   ];
   const wsGuide = XLSX.utils.aoa_to_sheet(guideRows);
-  wsGuide['!cols'] = [{ wch: 110 }];
+  wsGuide['!cols'] = [{ wch: 115 }];
   XLSX.utils.book_append_sheet(wb, wsGuide, 'Panduan Pengisian');
 
   return wb;

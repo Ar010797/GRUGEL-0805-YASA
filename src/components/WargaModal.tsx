@@ -283,11 +283,11 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                     1
                   </span>
                   <h4 className="text-xs font-extrabold text-slate-900">
-                    Download Template Excel Resmi (.xlsx)
+                    Download Template Excel Resmi (.xlsx) — Format Blok KK & Bansos
                   </h4>
                 </div>
                 <p className="text-[11px] text-slate-600 leading-relaxed pl-8">
-                  Isi semua warga & anggota keluarga dengan <strong>No KK yang sama</strong> untuk pengelompokan otomatis. Kolom <strong>Jenis Bantuan</strong> sudah tersedia agar data bansos langsung masuk sekali import.
+                  Format template sudah disesuaikan dengan struktur <strong>Data KK Warga (Blok KK)</strong>: isi <strong>Nama Kepala Keluarga</strong> di Kolom A dan <strong>ID / No KK 16 digit tepat di baris bawahnya</strong>, lalu seluruh anggota keluarga (Kep.Keluarga, Istri, Anak) dan kolom <strong>Jenis Bantuan</strong> akan otomatis terkelompokkan sekali import.
                 </p>
               </div>
               <button
@@ -333,7 +333,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                   2. Upload File Excel Data Warga & Bantuan (.xlsx / .xls / .csv)
                 </h4>
                 <p className="text-[11px] text-slate-500 max-w-md mx-auto mt-0.5">
-                  Semua baris dengan Nomor KK sama akan otomatis dikelompokkan menjadi 1 Kartu Keluarga beserta susunan Kepala, Istri, Anak, dan catatan penerima bantuannya.
+                  Mendukung file format Blok KK (seperti <strong>Data KK Halaman 1</strong> dengan ID KK di bawah Nama Kepala Keluarga) maupun tabel No KK biasa. Semua anggota keluarga (termasuk KK tunggal) & bansos langsung terbaca cepat.
                 </p>
               </div>
 
