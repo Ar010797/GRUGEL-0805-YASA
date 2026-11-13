@@ -73,12 +73,42 @@ function writeServerData(data: any) {
   }
 }
 
+// Monotonic revision counter persisted inside data_store.json for fast multi-device polling
+let currentRevision = (() => {
+  const existing = readServerData();
+  const rev = Number(existing?.revision);
+  return Number.isFinite(rev) && rev > 0 ? rev : Date.now();
+})();
+
+function nextRevision(): number {
+  const now = Date.now();
+  currentRevision = now > currentRevision ? now : currentRevision + 1;
+  return currentRevision;
+}
+
 // API Routes
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     app: 'Sistem Informasi Kas Warga & Server Desa Kotayasa',
+    revision: currentRevision,
     time: new Date().toISOString(),
+  });
+});
+
+// Lightweight revision check for mobile WebViews / browsers where SSE may stall
+app.get('/api/sync-check', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const since = Number(req.query.since || 0);
+  const existing = readServerData();
+  const rev = Number(existing?.revision) || currentRevision;
+  if (rev > currentRevision) currentRevision = rev;
+  res.json({
+    success: true,
+    revision: currentRevision,
+    lastUpdated: existing?.lastUpdated || null,
+    hasData: Boolean(existing),
+    changed: Boolean(existing) && since !== currentRevision,
   });
 });
 
@@ -188,9 +218,13 @@ app.get('/api/stream', (req, res) => {
 app.get('/api/data', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const data = readServerData();
+  if (data && typeof data.revision === 'number' && data.revision > currentRevision) {
+    currentRevision = data.revision;
+  }
   res.json({
     success: true,
-    data,
+    data: data ? { ...data, revision: data.revision || currentRevision } : null,
+    revision: currentRevision,
     timestamp: new Date().toISOString(),
   });
 });
@@ -204,9 +238,11 @@ app.post('/api/data', (req, res) => {
 
   // Jika admin secara sadar melakukan Hard Reset via menu server
   if (payload.isHardReset === true) {
+    const rev = nextRevision();
     const cleanPayload = {
       ...payload,
       isHardReset: undefined,
+      revision: rev,
       deletedIds: {
         warga: [],
         transactions: [],
@@ -223,6 +259,7 @@ app.post('/api/data', (req, res) => {
     return res.json({
       success: ok,
       data: cleanPayload,
+      revision: rev,
       message: 'Database server berhasil direset secara bersih',
       timestamp: new Date().toISOString(),
     });
@@ -298,8 +335,10 @@ app.post('/api/data', (req, res) => {
       ? payload.tahunAktif || existing.tahunAktif || 2026
       : existing.tahunAktif || payload.tahunAktif || 2026;
 
+  const rev = nextRevision();
   const mergedData = {
     version: 2,
+    revision: rev,
     lastUpdated: new Date().toISOString(),
     tahunAktif: mergedTahunAktif,
     pengaturanKas: mergedPengaturanKas,
@@ -320,6 +359,7 @@ app.post('/api/data', (req, res) => {
     success: ok,
     message: ok ? 'Data berhasil disinkronisasi & diamankan permanen di server' : 'Gagal menyimpan ke server',
     data: mergedData,
+    revision: rev,
     timestamp: new Date().toISOString(),
   });
 });
@@ -358,6 +398,7 @@ app.post('/api/warga', (req, res) => {
   }
 
   current.wargaList = updatedList;
+  current.revision = nextRevision();
   current.lastUpdated = nowIso;
   writeServerData(current);
   broadcastSyncEvent('sync', current);
@@ -367,6 +408,7 @@ app.post('/api/warga', (req, res) => {
     message: `Data warga ${stampedWarga.nama} berhasil tersimpan aman di server`,
     warga: stampedWarga,
     totalWarga: updatedList.length,
+    revision: current.revision,
     timestamp: nowIso,
   });
 });
@@ -384,6 +426,7 @@ app.delete('/api/warga/:id', (req, res) => {
     warga: unionIdLists(existingDeleted.warga, [id]),
   };
   current.wargaList = updatedList;
+  current.revision = nextRevision();
   current.lastUpdated = new Date().toISOString();
   writeServerData(current);
   broadcastSyncEvent('sync', current);
@@ -392,6 +435,7 @@ app.delete('/api/warga/:id', (req, res) => {
     success: true,
     message: 'Data warga berhasil dihapus dari server',
     totalWarga: updatedList.length,
+    revision: current.revision,
     timestamp: new Date().toISOString(),
   });
 });
@@ -410,6 +454,7 @@ app.post('/api/sync-monthly', (req, res) => {
   ];
 
   currentData.laporanBulananRT = updatedReports;
+  currentData.revision = nextRevision();
   currentData.lastUpdated = nowIso;
   writeServerData(currentData);
   broadcastSyncEvent('sync', currentData);
@@ -417,6 +462,7 @@ app.post('/api/sync-monthly', (req, res) => {
   res.json({
     success: true,
     message: `Laporan bulanan ${report.rt || 'RT'} berhasil diterima server desa`,
+    revision: currentData.revision,
     timestamp: nowIso,
   });
 });

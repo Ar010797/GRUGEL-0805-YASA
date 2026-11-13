@@ -31,6 +31,7 @@ export const EMPTY_DELETED_IDS: DeletedIdsMap = {
 
 export interface AppDatabaseSchema {
   version: number;
+  revision?: number;
   lastUpdated: string;
   tahunAktif: number;
   pengaturanKas: PengaturanKas;
@@ -210,10 +211,13 @@ export function readLocalCache(): AppDatabaseSchema | null {
 }
 
 /**
- * Loads data from Server backend API (master source of truth across Median, Web & devices),
- * merging cleanly without letting stale localStorage overwrite newer server records.
+ * Loads data from Server backend API and returns both merged data and raw server snapshot
+ * so caller knows accurately whether local/cloud items still need pushing to server.
  */
-export async function loadAppData(defaultData: AppDatabaseSchema): Promise<AppDatabaseSchema> {
+export async function loadAppDataWithMeta(defaultData: AppDatabaseSchema): Promise<{
+  resolved: AppDatabaseSchema;
+  serverData: AppDatabaseSchema | null;
+}> {
   const localData = readLocalCache();
 
   try {
@@ -227,14 +231,44 @@ export async function loadAppData(defaultData: AppDatabaseSchema): Promise<AppDa
         const remoteData = serverPayload.data as AppDatabaseSchema;
         const resolvedData = mergeDatabaseStates(remoteData, localData);
         writeLocalCache(resolvedData);
-        return resolvedData;
+        return { resolved: resolvedData, serverData: remoteData };
       }
     }
   } catch {
     // Server fetch error fallback to local
   }
 
-  return localData || defaultData;
+  return { resolved: localData || defaultData, serverData: null };
+}
+
+export async function loadAppData(defaultData: AppDatabaseSchema): Promise<AppDatabaseSchema> {
+  const { resolved } = await loadAppDataWithMeta(defaultData);
+  return resolved;
+}
+
+/**
+ * Checks lightweight server revision so mobile WebViews polling every few seconds
+ * only download the full payload when a remote device actually saved new data.
+ */
+export async function checkServerRevision(
+  sinceRevision: number
+): Promise<{ changed: boolean; revision: number; hasData: boolean } | null> {
+  try {
+    const res = await fetch(`/api/sync-check?since=${encodeURIComponent(String(sinceRevision))}&t=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (!json || typeof json.revision !== 'number') return null;
+    return {
+      changed: Boolean(json.changed),
+      revision: json.revision,
+      hasData: Boolean(json.hasData),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -268,6 +302,7 @@ export async function saveAppData(
     deletedIds?: Partial<DeletedIdsMap>;
     deletedWargaIds?: string[];
     deletedPengumumanIds?: string[];
+    keepalive?: boolean;
   }
 ): Promise<{ ok: boolean; serverData?: AppDatabaseSchema }> {
   const updatedData: AppDatabaseSchema = {
@@ -296,6 +331,7 @@ export async function saveAppData(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      keepalive: options?.keepalive ?? false,
     });
     if (!res.ok) return { ok: false };
     const json = await res.json();
@@ -306,6 +342,38 @@ export async function saveAppData(
     return { ok: true };
   } catch {
     return { ok: false };
+  }
+}
+
+/**
+ * Fire-and-forget keepalive flush for pagehide/backgrounding in Median WebView & mobile browsers.
+ */
+export function flushSaveAppDataKeepalive(
+  data: AppDatabaseSchema,
+  deletedIds?: Partial<DeletedIdsMap>
+) {
+  const updatedData: AppDatabaseSchema = {
+    ...data,
+    lastUpdated: new Date().toISOString(),
+  };
+  writeLocalCache(updatedData);
+
+  try {
+    const payloadStr = JSON.stringify({
+      ...updatedData,
+      isHardReset: false,
+      deletedIds: deletedIds || {},
+    });
+    if (typeof fetch !== 'undefined') {
+      fetch('/api/data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payloadStr,
+        keepalive: true,
+      }).catch(() => {});
+    }
+  } catch {
+    // ignore unload flush error
   }
 }
 

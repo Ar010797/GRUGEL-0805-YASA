@@ -69,12 +69,14 @@ import {
 } from './types';
 import { isPengumumanExpired } from './utils/security';
 import {
-  loadAppData,
+  loadAppDataWithMeta,
   saveAppData,
   clearAppData,
   saveSingleWargaToServer,
   deleteWargaFromServer,
   fetchServerSnapshot,
+  checkServerRevision,
+  flushSaveAppDataKeepalive,
   mergeDatabaseStates,
   mergeEntityList,
   subscribeServerStream,
@@ -120,17 +122,44 @@ import { DokumenPdfWargaView } from './views/DokumenPdfWargaView';
 import { KebijakanPrivasiView } from './views/KebijakanPrivasiView';
 import { ServerKontrolView } from './views/ServerKontrolView';
 
-export default function App() {
-  // Authentication State (Role: 'server' | 'admin' | 'warga')
-  const [currentUser, setCurrentUser] = useState<AuthUser | null>({
-    role: 'server',
-    username: 'RW05GLEMPANG',
-    nama: 'Super Admin Server RW 05 Glempang',
-    rtScope: 'Semua RT se-RW 05 Glempang',
-    isPinAuthenticated: true,
-  });
+const ACTIVE_SESSION_KEY = 'kaswarga_active_session_v1';
 
-  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
+function readSavedSession(): AuthUser | null {
+  try {
+    const raw = localStorage.getItem(ACTIVE_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AuthUser;
+    if (
+      parsed &&
+      (parsed.role === 'server' || parsed.role === 'admin' || parsed.role === 'warga') &&
+      typeof parsed.username === 'string' &&
+      parsed.username.trim().length > 0
+    ) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function saveActiveSession(user: AuthUser | null) {
+  try {
+    if (user) {
+      localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(user));
+    } else {
+      localStorage.removeItem(ACTIVE_SESSION_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export default function App() {
+  // Authentication State (Role: 'server' | 'admin' | 'warga') - ALWAYS starts null on fresh install
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => readSavedSession());
+
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(() => !readSavedSession());
   const [isLupaPasswordOpen, setIsLupaPasswordOpen] = useState<boolean>(false);
   const [isKirimLaporanModalOpen, setIsKirimLaporanModalOpen] = useState<boolean>(false);
 
@@ -149,6 +178,7 @@ export default function App() {
   // Cloud Sync Notification indicator
   const [syncStatus, setSyncStatus] = useState<'synced' | 'saving' | 'offline'>('synced');
   const [sseConnected, setSseConnected] = useState<boolean>(false);
+  const [dataLoadedReady, setDataLoadedReady] = useState<boolean>(false);
   const [cloudUser, setCloudUser] = useState<FirebaseUser | null>(null);
   const [isCloudAdmin, setIsCloudAdmin] = useState<boolean>(false);
   const [cloudAuthReadyUid, setCloudAuthReadyUid] = useState<string | null>(null);
@@ -156,7 +186,12 @@ export default function App() {
   const [cloudError, setCloudError] = useState<string | null>(null);
 
   // Navigation active tab
-  const [currentView, setCurrentView] = useState<string>('server-kontrol');
+  const [currentView, setCurrentView] = useState<string>(() => {
+    const saved = readSavedSession();
+    if (saved?.role === 'server') return 'server-kontrol';
+    if (saved?.role === 'warga') return 'dasbor-warga';
+    return 'beranda';
+  });
 
   // Mobile sidebar open state
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
@@ -277,10 +312,11 @@ export default function App() {
   // Monthly Submissions sent by RT Admins to the Server (Siap Pakai - Bersih 0 Data)
   const [laporanBulananRT, setLaporanBulananRT] = useState<PembaruanBulananRT[]>([]);
 
-  // Real-time Bidirectional Sync Refs (Express SSE + Cloud Firestore + Local Cache)
+  // Real-time Bidirectional Sync Refs (Express SSE + Polling + Cloud Firestore + Local Cache)
   const isLoadedRef = useRef(false);
   const deletedIdsRef = useRef<DeletedIdsMap>({ ...EMPTY_DELETED_IDS });
   const lastServerHashRef = useRef<string>('');
+  const lastServerRevisionRef = useRef<number>(0);
   const lastFirestoreHashRef = useRef<string>('');
   const knownFirestoreMetaRef = useRef<KnownMetaRegistry>({
     warga: new Map<string, KnownDocMeta>(),
@@ -386,9 +422,11 @@ export default function App() {
     const currentHash = computeStateHash(latestStateRef.current);
     const nextHash = computeStateHash(nextState);
 
-    if (source === 'init') {
-      lastServerHashRef.current = nextHash;
-    } else if (source === 'sse' || source === 'refresh') {
+    if (typeof nextState.revision === 'number' && nextState.revision > lastServerRevisionRef.current) {
+      lastServerRevisionRef.current = nextState.revision;
+    }
+
+    if (source === 'sse' || source === 'refresh') {
       lastServerHashRef.current = nextHash;
     } else if (source === 'firestore') {
       lastFirestoreHashRef.current = nextHash;
@@ -408,39 +446,77 @@ export default function App() {
     setBantuanList(Array.isArray(nextState.bantuanList) ? nextState.bantuanList : []);
     setPengumumanList(Array.isArray(nextState.pengumumanList) ? nextState.pengumumanList : []);
     setDokumenList(Array.isArray(nextState.dokumenList) ? nextState.dokumenList : []);
-    if (Array.isArray(nextState.adminAccounts) && nextState.adminAccounts.length > 0) {
+    if (
+      Array.isArray(nextState.adminAccounts) &&
+      (nextState.adminAccounts.length > 0 ||
+        (nextState.deletedIds?.adminAccounts?.length ?? 0) > 0 ||
+        isReset)
+    ) {
       setAdminAccounts(nextState.adminAccounts);
-    } else if (isReset) {
-      setAdminAccounts(Array.isArray(nextState.adminAccounts) ? nextState.adminAccounts : []);
     }
     setLaporanBulananRT(Array.isArray(nextState.laporanBulananRT) ? nextState.laporanBulananRT : []);
   };
 
-  // Initial Data Load + Live SSE Subscription + Visibility/Focus/Online Refresh
+  // Initial Data Load + Live SSE Subscription + Lightweight 3.5s Polling + Keepalive Background Flush
   useEffect(() => {
     let active = true;
 
     async function initData() {
       const defaultState = latestStateRef.current;
       try {
-        const loaded = await loadAppData(defaultState);
-        if (active && loaded) {
-          applyMergedStateToReact(loaded, 'init');
+        const { resolved, serverData } = await loadAppDataWithMeta(defaultState);
+        if (!active) return;
+
+        if (serverData) {
+          lastServerHashRef.current = computeStateHash(serverData);
+          if (typeof serverData.revision === 'number') {
+            lastServerRevisionRef.current = serverData.revision;
+          }
+        } else {
+          // Server has no saved state yet -> force Auto-Save to push resolved state to server
+          lastServerHashRef.current = '';
         }
+
+        // Merge with latestStateRef so early Firestore snapshots are never clobbered
+        const combined = mergeDatabaseStates(
+          resolved,
+          latestStateRef.current,
+          deletedIdsRef.current
+        );
+        applyMergedStateToReact(combined, 'init');
       } catch (err) {
         console.warn('Init data load notice:', err);
       } finally {
         if (active) {
           isLoadedRef.current = true;
+          setDataLoadedReady(true);
         }
       }
     }
 
     initData();
 
+    const handleRefreshFromServer = async () => {
+      if (!active || !isLoadedRef.current) return;
+      const remoteData = await fetchServerSnapshot();
+      if (!active || !remoteData) return;
+      if (typeof remoteData.revision === 'number') {
+        lastServerRevisionRef.current = Math.max(lastServerRevisionRef.current, remoteData.revision);
+      }
+      const merged = mergeDatabaseStates(
+        remoteData,
+        latestStateRef.current,
+        deletedIdsRef.current
+      );
+      applyMergedStateToReact(merged, 'refresh');
+    };
+
     const unsubscribeStream = subscribeServerStream(
       (remoteData, isReset) => {
         if (!active || !isLoadedRef.current) return;
+        if (typeof remoteData.revision === 'number') {
+          lastServerRevisionRef.current = remoteData.revision;
+        }
         if (isReset) {
           deletedIdsRef.current = { ...EMPTY_DELETED_IDS };
           applyMergedStateToReact(remoteData, 'sse', true);
@@ -458,33 +534,49 @@ export default function App() {
       }
     );
 
-    const handleRefreshFromServer = async () => {
+    // Lightweight 3.5s polling fallback for Median Android WebView & mobile browsers where SSE buffers/drops
+    const pollInterval = setInterval(async () => {
       if (!active || !isLoadedRef.current) return;
-      const remoteData = await fetchServerSnapshot();
-      if (!active || !remoteData) return;
-      const merged = mergeDatabaseStates(
-        remoteData,
-        latestStateRef.current,
-        deletedIdsRef.current
-      );
-      applyMergedStateToReact(merged, 'refresh');
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const status = await checkServerRevision(lastServerRevisionRef.current);
+      if (!active || !status) return;
+      if (status.hasData && (status.changed || lastServerRevisionRef.current === 0)) {
+        await handleRefreshFromServer();
+      }
+    }, 3500);
+
+    const flushPendingIfHidden = () => {
+      if (!isLoadedRef.current) return;
+      const currentSnapshot = latestStateRef.current;
+      if (computeStateHash(currentSnapshot) !== lastServerHashRef.current) {
+        flushSaveAppDataKeepalive(currentSnapshot, deletedIdsRef.current);
+      }
     };
 
     const onVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         handleRefreshFromServer();
+      } else if (document.visibilityState === 'hidden') {
+        flushPendingIfHidden();
       }
     };
 
     window.addEventListener('focus', handleRefreshFromServer);
+    window.addEventListener('pageshow', handleRefreshFromServer);
     window.addEventListener('online', handleRefreshFromServer);
+    window.addEventListener('pagehide', flushPendingIfHidden);
+    window.addEventListener('beforeunload', flushPendingIfHidden);
     document.addEventListener('visibilitychange', onVisibilityChange);
 
     return () => {
       active = false;
+      clearInterval(pollInterval);
       unsubscribeStream();
       window.removeEventListener('focus', handleRefreshFromServer);
+      window.removeEventListener('pageshow', handleRefreshFromServer);
       window.removeEventListener('online', handleRefreshFromServer);
+      window.removeEventListener('pagehide', flushPendingIfHidden);
+      window.removeEventListener('beforeunload', flushPendingIfHidden);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, []);
@@ -646,7 +738,7 @@ export default function App() {
       },
     });
 
-    // After initial Firestore snapshots settle, upload any local/Express data missing in Cloud Firestore
+    // After initial Firestore snapshots & initData settle, upload any local/Express data missing in Cloud Firestore
     const initialPushTimer = setTimeout(async () => {
       if (!isCloudAdmin) return;
       try {
@@ -660,7 +752,7 @@ export default function App() {
       } catch (err: any) {
         setCloudError(err?.message || 'Gagal menyinkronkan data awal ke Cloud Firestore.');
       }
-    }, 1500);
+    }, 1200);
 
     return () => {
       clearTimeout(initialPushTimer);
@@ -668,7 +760,7 @@ export default function App() {
     };
   }, [cloudUser, isCloudAdmin, cloudAuthReadyUid]);
 
-  // Auto-Save when core states change -> pushes to Express SSE Server & Cloud Firestore
+  // Auto-Save when core states change -> pushes immediately to Express SSE Server & Cloud Firestore
   useEffect(() => {
     if (!isLoadedRef.current) return;
 
@@ -688,12 +780,20 @@ export default function App() {
       let ok = true;
 
       if (needsServerSync) {
-        lastServerHashRef.current = currentHash;
         const res = await saveAppData(stateToPersist, {
           deletedIds: deletedIdsRef.current,
         });
         ok = res.ok;
+        if (res.ok) {
+          lastServerHashRef.current = currentHash;
+        }
         if (res.serverData) {
+          if (typeof res.serverData.revision === 'number') {
+            lastServerRevisionRef.current = Math.max(
+              lastServerRevisionRef.current,
+              res.serverData.revision
+            );
+          }
           const mergedBack = mergeDatabaseStates(
             res.serverData,
             latestStateRef.current,
@@ -707,13 +807,14 @@ export default function App() {
 
       if (needsCloudSync && cloudUser && isCloudAdmin) {
         try {
-          lastFirestoreHashRef.current = currentHash;
           await syncStateToFirestore(
             cloudUser,
             latestStateRef.current,
             knownFirestoreMetaRef.current,
             deletedIdsRef.current
           );
+          lastFirestoreHashRef.current = computeStateHash(latestStateRef.current);
+          setCloudError(null);
         } catch (err: any) {
           ok = false;
           setCloudError(err?.message || 'Gagal sinkron ke Cloud Firestore.');
@@ -721,10 +822,11 @@ export default function App() {
       }
 
       setSyncStatus(ok ? 'synced' : 'offline');
-    }, 150);
+    }, 60);
 
     return () => clearTimeout(timer);
   }, [
+    dataLoadedReady,
     tahunAktif,
     pengaturanKas,
     wargaList,
@@ -750,7 +852,14 @@ export default function App() {
         setTimeout(() => setRolloverNotice(null), 5000);
       }
     } catch (err: any) {
-      setCloudError(err?.message || 'Gagal login Google untuk Cloud Sync.');
+      const msg = String(err?.message || '');
+      if (msg.includes('disallowed_useragent') || msg.includes('popup')) {
+        setCloudError(
+          'Login Google diblokir oleh browser/WebView APK. Gunakan Sinkronisasi Server Live di alamat server yang sama, atau hubungkan Cloud Firestore lewat browser Chrome.'
+        );
+      } else {
+        setCloudError(msg || 'Gagal login Google untuk Cloud Sync.');
+      }
     } finally {
       setCloudSyncBusy(false);
     }
@@ -800,8 +909,9 @@ export default function App() {
     }
   };
 
-  // Inactivity Auto-Logout Timer (5 Minutes)
+  // Inactivity Auto-Logout Timer (5 Minutes) - active only when authenticated
   useEffect(() => {
+    if (!currentUser) return;
     const recordActivity = () => setLastActivity(Date.now());
     const events = ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart'];
     events.forEach((ev) => window.addEventListener(ev, recordActivity));
@@ -819,7 +929,7 @@ export default function App() {
       events.forEach((ev) => window.removeEventListener(ev, recordActivity));
       clearInterval(checkInterval);
     };
-  }, [lastActivity, isPinLocked]);
+  }, [lastActivity, isPinLocked, currentUser]);
 
   // Floating announcement trigger (Checks permanent dismissal so it NEVER reappears once closed/deleted)
   useEffect(() => {
@@ -965,10 +1075,11 @@ export default function App() {
 
   // Sample data loader for demo
   const handleLoadSample = () => {
+    const nowIso = new Date().toISOString();
     setTransactions([
-      { id: '1', tanggal: `${tahunAktif}-10-12`, kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan Periode Aktif', nominal: 250000, tipe: 'masuk', namaWarga: 'Ahmad Fauzi', tahun: tahunAktif },
-      { id: '2', tanggal: `${tahunAktif}-10-10`, kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan & Kas Kematian', nominal: 350000, tipe: 'masuk', namaWarga: 'Siti Aminah', tahun: tahunAktif },
-      { id: '3', tanggal: `${tahunAktif}-10-08`, kategori: 'Kas Kematian', keterangan: 'Pengadaan Kain Mori & Perlengkapan Jenazah', nominal: 200000, tipe: 'keluar', namaWarga: 'Bendahara Kas', tahun: tahunAktif },
+      { id: '1', tanggal: `${tahunAktif}-10-12`, kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan Periode Aktif', nominal: 250000, tipe: 'masuk', namaWarga: 'Ahmad Fauzi', tahun: tahunAktif, updatedAt: nowIso },
+      { id: '2', tanggal: `${tahunAktif}-10-10`, kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan & Kas Kematian', nominal: 350000, tipe: 'masuk', namaWarga: 'Siti Aminah', tahun: tahunAktif, updatedAt: nowIso },
+      { id: '3', tanggal: `${tahunAktif}-10-08`, kategori: 'Kas Kematian', keterangan: 'Pengadaan Kain Mori & Perlengkapan Jenazah', nominal: 200000, tipe: 'keluar', namaWarga: 'Bendahara Kas', tahun: tahunAktif, updatedAt: nowIso },
     ]);
   };
 
@@ -1093,11 +1204,13 @@ export default function App() {
             prevUser.username.toLowerCase() === 'admin' ||
             (oldKetua && prevUser.nama.toLowerCase().includes(oldKetua.toLowerCase()));
           if (!isPrimaryUser) return prevUser;
-          return {
+          const nextUser: AuthUser = {
             ...prevUser,
             nama: `${newKetua} (Ketua RT ${newRT})`,
             rtScope: `RT ${newRT} RW ${newRW}`,
           };
+          saveActiveSession(nextUser);
+          return nextUser;
         });
       }
     }
@@ -1543,22 +1656,29 @@ export default function App() {
 
   // Restore entire database from backup JSON
   const handleRestoreDatabase = (db: AppDatabaseSchema) => {
+    const nowIso = new Date().toISOString();
+    const stampAll = <T extends { updatedAt?: string }>(list?: T[]): T[] =>
+      Array.isArray(list) ? list.map((item) => ({ ...item, updatedAt: item.updatedAt || nowIso })) : [];
     if (db.tahunAktif) setTahunAktif(db.tahunAktif);
-    if (db.pengaturanKas) setPengaturanKas({ ...db.pengaturanKas, updatedAt: new Date().toISOString() });
-    if (db.wargaList) setWargaList(db.wargaList);
-    if (db.transactions) setTransactions(db.transactions);
-    if (db.bantuanList) setBantuanList(db.bantuanList);
-    if (db.pengumumanList) setPengumumanList(db.pengumumanList);
-    if (db.dokumenList) setDokumenList(db.dokumenList);
-    if (db.adminAccounts) setAdminAccounts(db.adminAccounts);
-    if (db.laporanBulananRT) setLaporanBulananRT(db.laporanBulananRT);
+    if (db.pengaturanKas) setPengaturanKas({ ...db.pengaturanKas, updatedAt: nowIso });
+    if (db.wargaList) setWargaList(stampAll(db.wargaList));
+    if (db.transactions) setTransactions(stampAll(db.transactions));
+    if (db.bantuanList) setBantuanList(stampAll(db.bantuanList));
+    if (db.pengumumanList) setPengumumanList(stampAll(db.pengumumanList));
+    if (db.dokumenList) setDokumenList(stampAll(db.dokumenList));
+    if (db.adminAccounts) setAdminAccounts(stampAll(db.adminAccounts));
+    if (db.laporanBulananRT) setLaporanBulananRT(stampAll(db.laporanBulananRT));
     setRolloverNotice('Database berhasil dipulihkan dari cadangan JSON!');
     setTimeout(() => setRolloverNotice(null), 4000);
   };
 
   // Handle Login
   const handleLoginSuccess = (user: AuthUser) => {
+    saveActiveSession(user);
     setCurrentUser(user);
+    setIsLoginModalOpen(false);
+    setIsPinLocked(false);
+    setLastActivity(Date.now());
     if (user.role === 'server') {
       setCurrentView('server-kontrol');
     } else if (user.role === 'warga') {
@@ -1566,34 +1686,49 @@ export default function App() {
     } else {
       setCurrentView('beranda');
     }
+    // Pull latest server & cloud updates right after sign-in
+    handleForceSyncNow();
   };
 
-  // Quick switch role buttons for easy testing
+  // Handle Explicit Logout -> returns straight to Login Gate
+  const handleLogout = () => {
+    saveActiveSession(null);
+    setCurrentUser(null);
+    setIsPinLocked(false);
+    setIsSidebarOpen(false);
+    setIsLoginModalOpen(true);
+  };
+
+  // Quick switch role helper (only triggered from inside Server control view)
   const handleSwitchToRole = (targetRole: 'server' | 'admin' | 'warga') => {
     if (targetRole === 'server') {
-      setCurrentUser({
+      const nextUser: AuthUser = {
         role: 'server',
         username: 'RW05GLEMPANG',
         nama: 'Super Admin Server RW 05 Glempang',
         rtScope: 'Semua RT se-RW 05 Glempang',
         isPinAuthenticated: true,
-      });
+      };
+      saveActiveSession(nextUser);
+      setCurrentUser(nextUser);
       setCurrentView('server-kontrol');
     } else if (targetRole === 'admin') {
       const rtStr = pengaturanKas.profilRT?.namaRT || '08';
       const rwStr = pengaturanKas.profilRT?.namaRW || '05';
       const ketuaStr = pengaturanKas.kontakKetuaRT?.nama?.trim();
-      setCurrentUser({
+      const nextUser: AuthUser = {
         role: 'admin',
         username: 'Admin',
         nama: ketuaStr ? `${ketuaStr} (Ketua RT ${rtStr})` : `Administrator RT ${rtStr} RW ${rwStr}`,
         rtScope: `RT ${rtStr} RW ${rwStr}`,
         isPinAuthenticated: true,
-      });
+      };
+      saveActiveSession(nextUser);
+      setCurrentUser(nextUser);
       setCurrentView('beranda');
     } else {
       const sampleWarga = wargaList[0];
-      setCurrentUser({
+      const nextUser: AuthUser = {
         role: 'warga',
         username: sampleWarga?.nama || 'Budi Santoso',
         nama: sampleWarga?.nama || 'Budi Santoso',
@@ -1601,7 +1736,9 @@ export default function App() {
         wargaId: sampleWarga?.id || 'w3',
         rtScope: sampleWarga ? `RT ${sampleWarga.rt || '08'} RW ${sampleWarga.rw || '05'}` : 'RT 08 RW 05',
         isPinAuthenticated: true,
-      });
+      };
+      saveActiveSession(nextUser);
+      setCurrentUser(nextUser);
       setCurrentView('dasbor-warga');
     }
   };
@@ -1655,6 +1792,32 @@ export default function App() {
   ];
 
   const currentNavItems: NavItem[] = isServer ? serverNavItems : isAdminRT ? adminNavItems : wargaNavItems;
+
+  // SECURITY GATE: Fresh installs & logged-out users MUST enter via the Login Menu first
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen w-full bg-gradient-to-br from-[#063A27] via-[#0B5D3F] to-[#0F172A]">
+        <LoginModal
+          isOpen={true}
+          canClose={false}
+          onClose={() => {}}
+          onLoginSuccess={handleLoginSuccess}
+          wargaList={wargaList}
+          adminAccounts={adminAccounts}
+          pengaturanKas={pengaturanKas}
+          onOpenLupaPassword={() => setIsLupaPasswordOpen(true)}
+          onRefreshSync={handleForceSyncNow}
+          sseConnected={sseConnected}
+          isCloudConnected={Boolean(cloudUser && isCloudAdmin)}
+        />
+        <LupaPasswordModal
+          isOpen={isLupaPasswordOpen}
+          onClose={() => setIsLupaPasswordOpen(false)}
+          pengaturanKas={pengaturanKas}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-[#F4F7F5] text-slate-800 font-sans">
@@ -1863,11 +2026,11 @@ export default function App() {
           )}
 
           <button
-            onClick={() => setIsLoginModalOpen(true)}
+            onClick={handleLogout}
             className="w-full flex items-center justify-center gap-2 rounded-xl bg-white/10 hover:bg-white/15 px-3 py-2 text-xs font-bold text-white transition-all cursor-pointer"
           >
             <LogOut size={14} />
-            <span>Ganti Akun / Keluar</span>
+            <span>Keluar ke Menu Login</span>
           </button>
         </div>
       </aside>
@@ -1957,6 +2120,30 @@ export default function App() {
               </button>
             )}
 
+            {/* Cloud Quick Connect / Status (Admin RT & Server) */}
+            {(isServer || isAdminRT) && !cloudUser && (
+              <button
+                type="button"
+                onClick={handleConnectCloud}
+                disabled={cloudSyncBusy}
+                className="hidden md:flex items-center gap-1.5 rounded-xl bg-indigo-50 border border-indigo-200 px-2.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100 transition-all cursor-pointer disabled:opacity-60"
+                title="Hubungkan Google Cloud Firestore agar semua aplikasi & perangkat berbeda server otomatis sinkron"
+              >
+                <Cloud size={13} />
+                <span>Hubungkan Cloud</span>
+              </button>
+            )}
+
+            {(isServer || isAdminRT) && cloudUser && isCloudAdmin && (
+              <span
+                className="hidden md:inline-flex items-center gap-1 rounded-xl bg-emerald-50 border border-emerald-200 px-2.5 py-1.5 text-[11px] font-bold text-emerald-700"
+                title={`Cloud Sync aktif (${cloudUser.email})`}
+              >
+                <CloudCheck size={13} />
+                <span>Cloud Live</span>
+              </span>
+            )}
+
             {/* Login / Ganti Akun */}
             <button
               onClick={() => setIsLoginModalOpen(true)}
@@ -1967,6 +2154,33 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        {/* Visible Cloud Error Banner so Firestore issues are never silent */}
+        {cloudError && (
+          <div className="bg-rose-600 text-white px-4 py-2 text-xs font-bold flex items-center justify-between gap-2 shadow-sm">
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertCircle size={15} className="shrink-0" />
+              <span className="truncate">{cloudError}</span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleForceSyncNow}
+                className="rounded-lg bg-white/20 hover:bg-white/30 px-2.5 py-1 text-[11px] font-bold cursor-pointer"
+              >
+                Coba Sinkron
+              </button>
+              <button
+                type="button"
+                onClick={() => setCloudError(null)}
+                className="hover:text-rose-200 cursor-pointer"
+                aria-label="Tutup error cloud"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Rollover / Annual Notification Banner */}
         {rolloverNotice && (
@@ -2314,16 +2528,20 @@ export default function App() {
         </main>
       </div>
 
-      {/* Login Modal */}
+      {/* Login Modal (Switch Account or Logout) */}
       <LoginModal
         isOpen={isLoginModalOpen}
+        canClose={Boolean(currentUser)}
         onClose={() => setIsLoginModalOpen(false)}
         onLoginSuccess={handleLoginSuccess}
+        onLogout={handleLogout}
         wargaList={wargaList}
         adminAccounts={adminAccounts}
         pengaturanKas={pengaturanKas}
         onOpenLupaPassword={() => setIsLupaPasswordOpen(true)}
         onRefreshSync={handleForceSyncNow}
+        sseConnected={sseConnected}
+        isCloudConnected={Boolean(cloudUser && isCloudAdmin)}
       />
 
       {/* Lupa Password Modal */}

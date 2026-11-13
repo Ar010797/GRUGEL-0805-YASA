@@ -82,22 +82,44 @@ export function sanitizeFirestoreId(raw: string): string {
   return (cleaned || 'doc_' + Date.now()).slice(0, 128);
 }
 
-function stripUndefined(obj: Record<string, any>): Record<string, any> {
-  const out: Record<string, any> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (v !== undefined) {
-      out[k] = v;
-    }
+function deepCleanFirestoreValue(val: any): any {
+  if (val === undefined) return undefined;
+  if (val === null) return null;
+  if (typeof val === 'number') {
+    return Number.isFinite(val) ? val : 0;
   }
-  return out;
+  if (typeof val === 'string' || typeof val === 'boolean') return val;
+  if (Array.isArray(val)) {
+    return val
+      .map((item) => deepCleanFirestoreValue(item))
+      .filter((item) => item !== undefined);
+  }
+  if (typeof val === 'object') {
+    if (val instanceof Timestamp || typeof val?.toDate === 'function') {
+      return val;
+    }
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val)) {
+      const cleaned = deepCleanFirestoreValue(v);
+      if (cleaned !== undefined) {
+        out[k] = cleaned;
+      }
+    }
+    return out;
+  }
+  return undefined;
 }
 
-function tsToIso(val: any): string | undefined {
-  if (!val) return undefined;
+function stripUndefined(obj: Record<string, any>): Record<string, any> {
+  return deepCleanFirestoreValue(obj) || {};
+}
+
+function tsToIso(val: any, isPendingWrite = false): string | undefined {
+  if (!val) return isPendingWrite ? new Date().toISOString() : undefined;
   if (val instanceof Timestamp) return val.toDate().toISOString();
   if (typeof val?.toDate === 'function') return val.toDate().toISOString();
   if (typeof val === 'string') return val;
-  return undefined;
+  return isPendingWrite ? new Date().toISOString() : undefined;
 }
 
 export async function checkIsCloudAdmin(user: User): Promise<boolean> {
@@ -179,7 +201,7 @@ export function subscribeFirestoreCollections(
         const settings: PengaturanKas = {
           ...(rest as PengaturanKas),
           tahunAktif: typeof tahunAktif === 'number' ? tahunAktif : 2026,
-          updatedAt: tsToIso(updatedAt),
+          updatedAt: tsToIso(updatedAt, snap.metadata.hasPendingWrites),
         };
         const normalizedForHash = sanitizeSettingsForFirestore(
           settings,
@@ -218,7 +240,7 @@ export function subscribeFirestoreCollections(
           const item: Warga = {
             ...(rest as Warga),
             id: d.id || docSnap.id,
-            updatedAt: tsToIso(updatedAt),
+            updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
           };
           metas.set(docSnap.id, {
             ownerUid,
@@ -254,7 +276,7 @@ export function subscribeFirestoreCollections(
           const item: Transaction = {
             ...(rest as Transaction),
             id: d.id || docSnap.id,
-            updatedAt: tsToIso(updatedAt),
+            updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
           };
           metas.set(docSnap.id, {
             ownerUid,
@@ -290,7 +312,7 @@ export function subscribeFirestoreCollections(
           const item: PengumumanRT = {
             ...(rest as PengumumanRT),
             id: d.id || docSnap.id,
-            updatedAt: tsToIso(updatedAt),
+            updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
           };
           metas.set(docSnap.id, {
             ownerUid,
@@ -324,7 +346,7 @@ export function subscribeFirestoreCollections(
             const item: BantuanPemerintah = {
               ...(rest as BantuanPemerintah),
               id: d.id || docSnap.id,
-              updatedAt: tsToIso(updatedAt),
+              updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
             };
             metas.set(docSnap.id, {
               ownerUid,
@@ -356,7 +378,7 @@ export function subscribeFirestoreCollections(
             const item: DokumenPdfWarga = {
               ...(rest as DokumenPdfWarga),
               id: d.id || docSnap.id,
-              updatedAt: tsToIso(updatedAt),
+              updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
             };
             metas.set(docSnap.id, {
               ownerUid,
@@ -388,7 +410,7 @@ export function subscribeFirestoreCollections(
             const item: AdminRTAccount = {
               ...(rest as AdminRTAccount),
               id: d.id || docSnap.id,
-              updatedAt: tsToIso(updatedAt),
+              updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
             };
             metas.set(docSnap.id, {
               ownerUid,
@@ -420,7 +442,7 @@ export function subscribeFirestoreCollections(
             const item: PembaruanBulananRT = {
               ...(rest as PembaruanBulananRT),
               id: d.id || docSnap.id,
-              updatedAt: tsToIso(updatedAt),
+              updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
             };
             metas.set(docSnap.id, {
               ownerUid,

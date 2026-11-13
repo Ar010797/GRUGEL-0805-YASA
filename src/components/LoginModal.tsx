@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check, Eye, EyeOff, RefreshCw } from 'lucide-react';
+import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check, Eye, EyeOff, RefreshCw, LogOut, Wifi } from 'lucide-react';
 import { AuthUser, Warga, AdminRTAccount, PengaturanKas } from '../types';
 import { HouseLogo } from './HouseLogo';
 
@@ -12,6 +12,10 @@ interface LoginModalProps {
   pengaturanKas?: PengaturanKas;
   onOpenLupaPassword: () => void;
   onRefreshSync?: () => Promise<void> | void;
+  canClose?: boolean;
+  onLogout?: () => void;
+  sseConnected?: boolean;
+  isCloudConnected?: boolean;
 }
 
 export const LoginModal: React.FC<LoginModalProps> = ({
@@ -23,13 +27,18 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   pengaturanKas,
   onOpenLupaPassword,
   onRefreshSync,
+  canClose = true,
+  onLogout,
+  sseConnected = false,
+  isCloudConnected = false,
 }) => {
   const desaStr = pengaturanKas?.profilRT?.desa || 'Desa Kotayasa';
   const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
   const rwStr = pengaturanKas?.profilRT?.namaRW || '05';
   const [isRefreshing, setIsRefreshing] = useState(false);
-  // Default to 'warga' or 'admin' so Server tab is NOT visible by default to citizens
-  const [activeTab, setActiveTab] = useState<'server' | 'admin' | 'warga'>('admin');
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  // Default to 'warga' so new installs start at citizen/admin login and Server tab is hidden
+  const [activeTab, setActiveTab] = useState<'server' | 'admin' | 'warga'>('warga');
   const [showServerTab, setShowServerTab] = useState(false);
 
   // Password visibility toggles
@@ -37,9 +46,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [showAdminPassword, setShowAdminPassword] = useState(false);
   const [showWargaPassword, setShowWargaPassword] = useState(false);
 
-  // Server form (Credentials: RW05GLEMPANG / Rw05glempang)
-  const [serverUsername, setServerUsername] = useState('RW05GLEMPANG');
-  const [serverPassword, setServerPassword] = useState('Rw05glempang');
+  // Server form (NEVER pre-fill password for security on fresh installs)
+  const [serverUsername, setServerUsername] = useState('');
+  const [serverPassword, setServerPassword] = useState('');
   const [serverError, setServerError] = useState('');
 
   // Admin form
@@ -187,24 +196,40 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="w-full max-w-md rounded-3xl bg-white shadow-2xl border border-emerald-900/10 overflow-hidden">
+    <div
+      className={`fixed inset-0 z-50 flex items-center justify-center p-4 animate-in fade-in duration-200 overflow-y-auto ${
+        canClose
+          ? 'bg-black/65 backdrop-blur-sm'
+          : 'bg-gradient-to-br from-[#063A27] via-[#0B5D3F] to-[#0F172A]'
+      }`}
+    >
+      <div className="w-full max-w-md rounded-3xl bg-white shadow-2xl border border-emerald-900/10 overflow-hidden my-auto">
         {/* Top Header */}
         <div className="relative bg-gradient-to-r from-[#0B5D3F] to-[#06442D] px-6 pt-6 pb-5 text-white">
-          <button
-            onClick={onClose}
-            className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full bg-white/10 hover:bg-white/20 transition-colors cursor-pointer"
-          >
-            <X size={18} />
-          </button>
+          {canClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full bg-white/10 hover:bg-white/20 transition-colors cursor-pointer"
+              aria-label="Tutup"
+            >
+              <X size={18} />
+            </button>
+          )}
 
           <div className="flex items-center gap-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/15 backdrop-blur-xs p-1">
               <HouseLogo size={36} variant="white" />
             </div>
             <div>
-              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-200">
-                Sistem Login 3 Tingkat
+              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-200 flex items-center gap-1.5">
+                <span>Menu Login Aplikasi</span>
+                {(sseConnected || isCloudConnected) && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-400/20 px-1.5 py-0.5 text-[9px] text-emerald-100">
+                    <Wifi size={9} />
+                    <span>{isCloudConnected ? 'Cloud & Server Live' : 'Server Live'}</span>
+                  </span>
+                )}
               </span>
               <h2 className="text-lg font-extrabold tracking-tight">Aplikasi {desaStr}</h2>
             </div>
@@ -500,8 +525,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 disabled={isRefreshing}
                 onClick={async () => {
                   setIsRefreshing(true);
+                  setSyncNotice(null);
                   try {
                     await onRefreshSync();
+                    setSyncNotice('Data terbaru berhasil disinkronkan dari server.');
+                    setTimeout(() => setSyncNotice(null), 3500);
                   } finally {
                     setIsRefreshing(false);
                   }
@@ -514,6 +542,26 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     ? 'Menyinkronkan data server...'
                     : `Sinkronkan Data Server (${wargaList.length} KK, ${adminAccounts.length} Admin)`}
                 </span>
+              </button>
+            )}
+
+            {syncNotice && (
+              <p className="text-[11px] font-bold text-emerald-700 flex items-center gap-1">
+                <Check size={12} />
+                <span>{syncNotice}</span>
+              </p>
+            )}
+
+            {canClose && onLogout && (
+              <button
+                type="button"
+                onClick={() => {
+                  onLogout();
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-rose-50 px-3 py-1.5 text-[11px] font-bold text-rose-700 hover:bg-rose-100 transition-colors cursor-pointer"
+              >
+                <LogOut size={12} />
+                <span>Keluar ke Menu Login Utama</span>
               </button>
             )}
 
@@ -533,6 +581,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 setShowServerTab((prev) => {
                   const nextState = !prev;
                   if (nextState) setActiveTab('server');
+                  else if (activeTab === 'server') setActiveTab('warga');
                   return nextState;
                 });
               }}
