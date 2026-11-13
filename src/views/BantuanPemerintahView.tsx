@@ -16,12 +16,13 @@ import {
   Eye,
   Trash2,
 } from 'lucide-react';
-import { BantuanPemerintah, Warga } from '../types';
+import { BantuanPemerintah, Warga, PengaturanKas } from '../types';
 import { downloadTemplateExcelWargaBansos } from '../utils/excelWargaImport';
 
 interface BantuanPemerintahViewProps {
   bantuanList: BantuanPemerintah[];
   wargaList: Warga[];
+  pengaturanKas?: PengaturanKas;
   onAddBantuan: (data: Omit<BantuanPemerintah, 'id'>) => void;
   onUpdateStatus: (id: string, newStatus: BantuanPemerintah['status']) => void;
   onDeleteBantuan: (id: string) => void;
@@ -32,12 +33,16 @@ interface BantuanPemerintahViewProps {
 export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
   bantuanList,
   wargaList,
+  pengaturanKas,
   onAddBantuan,
   onUpdateStatus,
   onDeleteBantuan,
   onOpenImportExcel,
   onBack,
 }) => {
+  const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
+  const rwStr = pengaturanKas?.profilRT?.namaRW || '05';
+  const desaStr = pengaturanKas?.profilRT?.desa || 'Desa Kotayasa';
   const [search, setSearch] = useState('');
   const [filterJenis, setFilterJenis] = useState<string>('semua');
   const [filterStatus, setFilterStatus] = useState<string>('semua');
@@ -152,7 +157,7 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-500">
-              Pencatatan BPNT, PKH, Bansos, Sembako, dan BLT Desa untuk warga RT 08 RW 05 Desa Kotayasa
+              Pencatatan BPNT, PKH, Bansos, Sembako, dan BLT Desa untuk warga RT {rtStr} RW {rwStr} {desaStr}
             </p>
           </div>
         </div>
@@ -205,7 +210,7 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
           <span className="text-xs font-bold text-slate-500">Total Bantuan Terdata</span>
           <p className="mt-2 text-2xl font-extrabold text-slate-900">{totalPenerima} Alokasi</p>
           <span className="text-[11px] font-semibold text-emerald-700 mt-1 block">
-            RT 08 RW 05 Desa Kotayasa
+            RT {rtStr} RW {rwStr} {desaStr}
           </span>
         </div>
 
@@ -395,7 +400,7 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
                   required
                   className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-800 focus:border-[#0B5D3F] outline-hidden cursor-pointer"
                 >
-                  <option value="">-- Pilih dari Daftar Warga RT 08 --</option>
+                  <option value="">-- Pilih dari Daftar Warga RT {rtStr} --</option>
                   {wargaList.map((w) => (
                     <option key={w.id} value={w.nama}>
                       {w.nama} (No Rumah: {w.noRumah}, KK: {w.noKK})

@@ -88,7 +88,7 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
 
         <h2 className="text-xl font-extrabold text-slate-900">Kunci Aplikasi (PIN 6 Digit)</h2>
         <p className="mt-1 text-xs text-slate-500">
-          RT 08 RW 05 Desa Kotayasa &bull; {currentUser?.role === 'admin' ? 'Akun Admin' : 'Akun Warga'}
+          RT {pengaturanKas?.profilRT?.namaRT || '08'} RW {pengaturanKas?.profilRT?.namaRW || '05'} {pengaturanKas?.profilRT?.desa || 'Desa Kotayasa'} &bull; {currentUser?.role === 'admin' ? 'Akun Admin' : 'Akun Warga'}
         </p>
 
         {currentUser && (

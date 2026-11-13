@@ -1,13 +1,14 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
-import { Transaction, Warga, AnggotaKeluarga, PengumumanRT, BantuanPemerintah, ProfilRT } from '../types';
+import { Transaction, Warga, AnggotaKeluarga, PengumumanRT, BantuanPemerintah, ProfilRT, PengaturanKas } from '../types';
 
 export const exportRekapTahunanPDF = (
   transactions: Transaction[],
   wargaList: Warga[],
   tahun: string = '2026',
-  profilRT?: ProfilRT
+  profilRT?: ProfilRT,
+  pengaturanKas?: PengaturanKas
 ) => {
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -15,13 +16,18 @@ export const exportRekapTahunanPDF = (
     format: 'a4',
   });
 
-  const rtStr = profilRT?.namaRT || '08';
-  const rwStr = profilRT?.namaRW || '05';
-  const desaStr = profilRT?.desa || 'Desa Kotayasa';
-  const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
-  const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
-  const judulKop = profilRT?.judulKopSurat || `RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
-  const alamatKop = profilRT?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} ${profilRT?.kodePos || '53183'}`;
+  const effectiveProfil = pengaturanKas?.profilRT || profilRT;
+  const rtStr = effectiveProfil?.namaRT || '08';
+  const rwStr = effectiveProfil?.namaRW || '05';
+  const desaStr = effectiveProfil?.desa || 'Desa Kotayasa';
+  const kecStr = effectiveProfil?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = effectiveProfil?.kabupaten || 'Kabupaten Banyumas';
+  const judulKop = effectiveProfil?.judulKopSurat || `RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
+  const alamatKop = effectiveProfil?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} ${effectiveProfil?.kodePos || '53183'}`;
+  const namaKetua = pengaturanKas?.kontakKetuaRT?.nama?.trim() || `Ketua RT ${rtStr}`;
+  const namaBendahara = pengaturanKas?.kontakBendahara?.nama?.trim() || `Bendahara RT ${rtStr}`;
+  const desaShort = desaStr.replace(/^Desa\s+/i, '');
+  const desaClean = desaShort.replace(/[^a-zA-Z0-9]/g, '_');
 
   const totalMasuk = transactions
     .filter((t) => t.tipe === 'masuk')
@@ -153,26 +159,39 @@ export const exportRekapTahunanPDF = (
   doc.setTextColor(30, 30, 30);
 
   doc.text('Mengetahui,', 40, signY, { align: 'center' });
-  doc.text('Ketua RT 08 RW 05', 40, signY + 5, { align: 'center' });
-  doc.text('( Bapak Suwardi )', 40, signY + 26, { align: 'center' });
+  doc.text(`Ketua RT ${rtStr} RW ${rwStr}`, 40, signY + 5, { align: 'center' });
+  doc.text(`( ${namaKetua} )`, 40, signY + 26, { align: 'center' });
 
-  doc.text(`Kotayasa, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, 160, signY, { align: 'center' });
-  doc.text('Bendahara RT 08', 160, signY + 5, { align: 'center' });
-  doc.text('( Bapak Bambang S. )', 160, signY + 26, { align: 'center' });
+  doc.text(`${desaShort}, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, 160, signY, { align: 'center' });
+  doc.text(`Bendahara RT ${rtStr}`, 160, signY + 5, { align: 'center' });
+  doc.text(`( ${namaBendahara} )`, 160, signY + 26, { align: 'center' });
 
   // Save the PDF
-  doc.save(`Rekap_Tahunan_Kas_RT08_RW05_Kotayasa_${tahun}.pdf`);
+  doc.save(`Rekap_Tahunan_Kas_RT${rtStr}_RW${rwStr}_${desaClean}_${tahun}.pdf`);
 };
 
 export const exportPengeluaranPDF = (
   transactions: Transaction[],
-  tahun: string = '2026'
+  tahun: string = '2026',
+  profilRT?: ProfilRT,
+  pengaturanKas?: PengaturanKas
 ) => {
   const doc = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',
     format: 'a4',
   });
+
+  const effectiveProfil = pengaturanKas?.profilRT || profilRT;
+  const rtStr = effectiveProfil?.namaRT || '08';
+  const rwStr = effectiveProfil?.namaRW || '05';
+  const desaStr = effectiveProfil?.desa || 'Desa Kotayasa';
+  const kecStr = effectiveProfil?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = effectiveProfil?.kabupaten || 'Kabupaten Banyumas';
+  const judulKop = effectiveProfil?.judulKopSurat || `RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
+  const namaKetua = pengaturanKas?.kontakKetuaRT?.nama?.trim() || `Ketua RT ${rtStr}`;
+  const namaBendahara = pengaturanKas?.kontakBendahara?.nama?.trim() || `Bendahara RT ${rtStr}`;
+  const desaShort = desaStr.replace(/^Desa\s+/i, '');
 
   const keluarList = transactions.filter((t) => t.tipe === 'keluar' || t.tipe === 'kematian');
   const totalKeluar = keluarList.reduce((acc, t) => acc + t.nominal, 0);
@@ -186,11 +205,11 @@ export const exportPengeluaranPDF = (
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(14);
   doc.setTextColor(11, 93, 63);
-  doc.text('RUKUN TETANGGA 08 RUKUN WARGA 05', 105, 20, { align: 'center' });
+  doc.text(judulKop.toUpperCase(), 105, 20, { align: 'center' });
 
   doc.setFontSize(11);
   doc.setTextColor(50, 50, 50);
-  doc.text('DESA KOTAYASA, KECAMATAN SUMBANG, KABUPATEN BANYUMAS', 105, 26, { align: 'center' });
+  doc.text(`${desaStr.toUpperCase()}, ${kecStr.toUpperCase()}, ${kabStr.toUpperCase()}`, 105, 26, { align: 'center' });
 
   doc.setDrawColor(220, 38, 38);
   doc.setLineWidth(0.8);
@@ -260,14 +279,14 @@ export const exportPengeluaranPDF = (
   doc.setTextColor(30, 30, 30);
 
   doc.text('Mengetahui,', 40, signY, { align: 'center' });
-  doc.text('Ketua RT 08 RW 05', 40, signY + 5, { align: 'center' });
-  doc.text('( Bapak Suwardi )', 40, signY + 25, { align: 'center' });
+  doc.text(`Ketua RT ${rtStr} RW ${rwStr}`, 40, signY + 5, { align: 'center' });
+  doc.text(`( ${namaKetua} )`, 40, signY + 25, { align: 'center' });
 
-  doc.text(`Kotayasa, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, 160, signY, { align: 'center' });
-  doc.text('Bendahara RT 08', 160, signY + 5, { align: 'center' });
-  doc.text('( Bapak Bambang S. )', 160, signY + 25, { align: 'center' });
+  doc.text(`${desaShort}, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, 160, signY, { align: 'center' });
+  doc.text(`Bendahara RT ${rtStr}`, 160, signY + 5, { align: 'center' });
+  doc.text(`( ${namaBendahara} )`, 160, signY + 25, { align: 'center' });
 
-  doc.save(`Laporan_Pengeluaran_Kas_RT08_RW05_${tahun}.pdf`);
+  doc.save(`Laporan_Pengeluaran_Kas_RT${rtStr}_RW${rwStr}_${tahun}.pdf`);
 };
 
 /**
@@ -278,7 +297,8 @@ export const exportSuratPengumumanPDF = (
   pengumuman: PengumumanRT,
   profilRT?: ProfilRT,
   namaKetuaRT?: string,
-  jabatanPengurus?: string
+  jabatanPengurus?: string,
+  pengaturanKas?: PengaturanKas
 ) => {
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -286,17 +306,25 @@ export const exportSuratPengumumanPDF = (
     format: 'a4',
   });
 
-  const rtStr = profilRT?.namaRT || '08';
-  const rwStr = profilRT?.namaRW || '05';
-  const desaStr = profilRT?.desa || 'Desa Kotayasa';
-  const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
-  const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
-  const judulKop = profilRT?.judulKopSurat || `PENGURUS RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
-  const alamatKop = profilRT?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} Kode Pos ${profilRT?.kodePos || '53183'}`;
+  const effectiveProfil = pengaturanKas?.profilRT || profilRT;
+  const rtStr = effectiveProfil?.namaRT || '08';
+  const rwStr = effectiveProfil?.namaRW || '05';
+  const desaStr = effectiveProfil?.desa || 'Desa Kotayasa';
+  const kecStr = effectiveProfil?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = effectiveProfil?.kabupaten || 'Kabupaten Banyumas';
+  const judulKop = effectiveProfil?.judulKopSurat || `PENGURUS RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
+  const alamatKop = effectiveProfil?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} Kode Pos ${effectiveProfil?.kodePos || '53183'}`;
   
-  // Nama & Jabatan Penandatangan (Dapat diatur admin atau otomatis dari data RT)
-  const namaPenandatangan = pengumuman.namaPengurus || namaKetuaRT || 'Bpk. Suwardi';
+  // Nama & Jabatan Penandatangan (Selalu menyesuaikan pengaturan pengurus terbaru bila namaPengurus belum diisi custom)
   const jabatanTtd = pengumuman.jabatanPengurus || jabatanPengurus || `Ketua RT ${rtStr}`;
+  const fallbackByRole = jabatanTtd.toLowerCase().includes('bendahara')
+    ? (pengaturanKas?.kontakBendahara?.nama?.trim() || namaKetuaRT?.trim() || pengaturanKas?.kontakKetuaRT?.nama?.trim())
+    : (namaKetuaRT?.trim() || pengaturanKas?.kontakKetuaRT?.nama?.trim());
+  const rawNama = pengumuman.namaPengurus?.trim() || '';
+  const isLegacyPlaceholder = !rawNama || rawNama === 'Bpk. Suwardi' || rawNama === 'Bapak Suwardi';
+  const namaPenandatangan = isLegacyPlaceholder
+    ? (fallbackByRole || pengumuman.penulis || `Ketua RT ${rtStr}`)
+    : rawNama;
 
   // Letterhead Resmi (KOP SURAT RESMI HITAM-PUTIH / MONOKROM TANPA WARNA)
   doc.setFont('helvetica', 'bold');
@@ -456,7 +484,8 @@ export const exportSuratPengumumanPDF = (
 export const exportDataWargaPerKK_PDF = (
   wargaList: Warga[],
   bantuanList: BantuanPemerintah[] = [],
-  profilRT?: ProfilRT
+  profilRT?: ProfilRT,
+  pengaturanKas?: PengaturanKas
 ) => {
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -464,13 +493,18 @@ export const exportDataWargaPerKK_PDF = (
     format: 'a4',
   });
 
-  const rtStr = profilRT?.namaRT || '08';
-  const rwStr = profilRT?.namaRW || '05';
-  const desaStr = profilRT?.desa || 'Desa Kotayasa';
-  const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
-  const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
-  const judulKop = profilRT?.judulKopSurat || `PENGURUS RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
-  const alamatKop = profilRT?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} ${profilRT?.kodePos || '53183'}`;
+  const effectiveProfil = pengaturanKas?.profilRT || profilRT;
+  const rtStr = effectiveProfil?.namaRT || '08';
+  const rwStr = effectiveProfil?.namaRW || '05';
+  const desaStr = effectiveProfil?.desa || 'Desa Kotayasa';
+  const kecStr = effectiveProfil?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = effectiveProfil?.kabupaten || 'Kabupaten Banyumas';
+  const judulKop = effectiveProfil?.judulKopSurat || `PENGURUS RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
+  const alamatKop = effectiveProfil?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} ${effectiveProfil?.kodePos || '53183'}`;
+  const namaKetua = pengaturanKas?.kontakKetuaRT?.nama?.trim() || `Ketua RT ${rtStr}`;
+  const namaBendahara = pengaturanKas?.kontakBendahara?.nama?.trim() || `Bendahara RT ${rtStr}`;
+  const desaShort = desaStr.replace(/^Desa\s+/i, '');
+  const desaClean = desaShort.replace(/[^a-zA-Z0-9]/g, '_');
 
   const pageWidth = 210;
   const pageHeight = 297;
@@ -567,7 +601,7 @@ export const exportDataWargaPerKK_PDF = (
     doc.setFontSize(8);
     doc.setTextColor(50, 50, 50);
     doc.text(`Nomor KK : ${w.noKK || '330214050800000' + (index + 1)}`, margin + 7, currentY + 11);
-    doc.text(`Alamat   : ${w.alamat || 'RT 08 RW 05 Desa Kotayasa'} (Rumah No. ${w.noRumah})`, margin + 7, currentY + 15.5);
+    doc.text(`Alamat   : ${w.alamat || `RT ${rtStr} RW ${rwStr} ${desaStr}`} (Rumah No. ${w.noRumah})`, margin + 7, currentY + 15.5);
 
     doc.setFont('helvetica', 'bold');
     doc.text(`Status Iuran: ${w.statusIuran === 'Sudah' ? 'LUNAS' : 'BELUM BAYAR'}`, margin + 115, currentY + 11);
@@ -709,15 +743,15 @@ export const exportDataWargaPerKK_PDF = (
   doc.setTextColor(30, 30, 30);
 
   doc.text('Mengetahui,', 45, signY, { align: 'center' });
-  doc.text('Ketua RT 08 RW 05 Desa Kotayasa', 45, signY + 5, { align: 'center' });
+  doc.text(`Ketua RT ${rtStr} RW ${rwStr} ${desaStr}`, 45, signY + 5, { align: 'center' });
   doc.setFont('helvetica', 'bold');
-  doc.text('( Bapak Suwardi )', 45, signY + 25, { align: 'center' });
+  doc.text(`( ${namaKetua} )`, 45, signY + 25, { align: 'center' });
 
   doc.setFont('helvetica', 'normal');
-  doc.text(`Kotayasa, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, 165, signY, { align: 'center' });
-  doc.text('Sekretaris / Bendahara RT 08', 165, signY + 5, { align: 'center' });
+  doc.text(`${desaShort}, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, 165, signY, { align: 'center' });
+  doc.text(`Sekretaris / Bendahara RT ${rtStr}`, 165, signY + 5, { align: 'center' });
   doc.setFont('helvetica', 'bold');
-  doc.text('( Bapak Bambang S. )', 165, signY + 25, { align: 'center' });
+  doc.text(`( ${namaBendahara} )`, 165, signY + 25, { align: 'center' });
 
   // Add Page Numbers to all pages
   const totalPages = doc.internal.pages.length - 1;
@@ -727,7 +761,7 @@ export const exportDataWargaPerKK_PDF = (
     doc.setFontSize(7.5);
     doc.setTextColor(140, 140, 140);
     doc.text(
-      `Halaman ${i} dari ${totalPages} • Dokumen Resmi Register Warga RT 08 RW 05 Desa Kotayasa (UU PDP No. 27/2022)`,
+      `Halaman ${i} dari ${totalPages} • Dokumen Resmi Register Warga RT ${rtStr} RW ${rwStr} ${desaStr} (UU PDP No. 27/2022)`,
       pageWidth / 2,
       pageHeight - 8,
       { align: 'center' }
@@ -735,7 +769,7 @@ export const exportDataWargaPerKK_PDF = (
   }
 
   // Save the PDF
-  doc.save(`Data_Warga_PerKK_Bansos_RT08_RW05_Kotayasa.pdf`);
+  doc.save(`Data_Warga_PerKK_Bansos_RT${rtStr}_RW${rwStr}_${desaClean}.pdf`);
 };
 
 /**
@@ -743,9 +777,11 @@ export const exportDataWargaPerKK_PDF = (
  */
 export const exportSingleKK_PDF = (
   warga: Warga,
-  bantuanList: BantuanPemerintah[] = []
+  bantuanList: BantuanPemerintah[] = [],
+  profilRT?: ProfilRT,
+  pengaturanKas?: PengaturanKas
 ) => {
-  exportDataWargaPerKK_PDF([warga], bantuanList);
+  exportDataWargaPerKK_PDF([warga], bantuanList, profilRT, pengaturanKas);
 };
 
 /**

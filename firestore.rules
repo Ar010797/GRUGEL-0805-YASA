@@ -313,7 +313,8 @@ service cloud.firestore {
     // Collection: /settings/{settingId}
     match /settings/{settingId} {
       allow get: if isValidId(settingId) && isVerified();
-      allow list: if isVerified() && resource.data.ownerUid is string;
+      allow list: if isBootstrappedAdmin() ||
+        (isVerified() && resource.data.ownerUid == request.auth.uid);
       allow create: if isValidId(settingId) && isAdmin() &&
         isValidAppSettings(incoming()) &&
         incoming().ownerUid == request.auth.uid &&
@@ -369,7 +370,8 @@ service cloud.firestore {
     // Collection: /transactions/{txId}
     match /transactions/{txId} {
       allow get: if isValidId(txId) && isVerified();
-      allow list: if isVerified() && resource.data.ownerUid is string;
+      allow list: if isBootstrappedAdmin() ||
+        (isVerified() && resource.data.ownerUid == request.auth.uid);
       allow create: if isValidId(txId) && isAdmin() &&
         isValidTransaction(incoming()) &&
         incoming().id == txId &&
@@ -415,7 +417,8 @@ service cloud.firestore {
     // Collection: /pengumuman/{pengumumanId}
     match /pengumuman/{pengumumanId} {
       allow get: if isValidId(pengumumanId) && isVerified();
-      allow list: if isVerified() && resource.data.ownerUid is string;
+      allow list: if isBootstrappedAdmin() ||
+        (isVerified() && resource.data.ownerUid == request.auth.uid);
       allow create: if isValidId(pengumumanId) && isAdmin() &&
         isValidPengumuman(incoming()) &&
         incoming().id == pengumumanId &&

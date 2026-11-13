@@ -24,7 +24,7 @@ import {
   Sparkles,
   History,
 } from 'lucide-react';
-import { Warga, BantuanPemerintah, ProfilRT } from '../types';
+import { Warga, BantuanPemerintah, ProfilRT, PengaturanKas } from '../types';
 import { exportDataWargaPerKK_PDF, exportSingleKK_PDF, exportKartuKeluargaPemerintah_PDF } from '../utils/pdfExport';
 import { downloadTemplateExcelWargaBansos } from '../utils/excelWargaImport';
 import { ConfirmationModal } from '../components/ConfirmationModal';
@@ -33,6 +33,7 @@ interface DataWargaViewProps {
   wargaList: Warga[];
   bantuanList?: BantuanPemerintah[];
   profilRT?: ProfilRT;
+  pengaturanKas?: PengaturanKas;
   isServer?: boolean;
   onOpenWargaModal: () => void;
   onOpenUpgradeModal?: (targetWarga?: Warga) => void;
@@ -44,12 +45,20 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
   wargaList,
   bantuanList = [],
   profilRT,
+  pengaturanKas,
   isServer = false,
   onOpenWargaModal,
   onOpenUpgradeModal,
   onDeleteWarga,
   onBack,
 }) => {
+  const effectiveProfil = pengaturanKas?.profilRT || profilRT;
+  const rtStr = effectiveProfil?.namaRT || '08';
+  const rwStr = effectiveProfil?.namaRW || '05';
+  const desaStr = effectiveProfil?.desa || 'Desa Kotayasa';
+  const kecStr = effectiveProfil?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = effectiveProfil?.kabupaten || 'Kabupaten Banyumas';
+
   const [filterGender, setFilterGender] = useState<'semua' | 'Laki-laki' | 'Perempuan'>('semua');
   const [search, setSearch] = useState('');
   const [selectedWarga, setSelectedWarga] = useState<Warga | null>(null);
@@ -110,7 +119,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Data Warga & Rekapitulasi KK</h1>
             <p className="text-xs text-slate-500">
-              Daftar Kartu Keluarga, Anggota Keluarga & Alokasi Bantuan Sosial RT 08 RW 05 Desa Kotayasa
+              Daftar Kartu Keluarga, Anggota Keluarga &amp; Alokasi Bantuan Sosial RT {rtStr} RW {rwStr} {desaStr}
             </p>
           </div>
         </div>
@@ -118,7 +127,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           {/* Download PDF Data Warga Per-KK */}
           <button
-            onClick={() => exportDataWargaPerKK_PDF(wargaList, bantuanList)}
+            onClick={() => exportDataWargaPerKK_PDF(wargaList, bantuanList, effectiveProfil, pengaturanKas)}
             className="flex items-center gap-2 rounded-xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#084831] transition-all cursor-pointer"
             title="Download Dokumen PDF Data Seluruh Warga Per KK beserta Bantuan Sosial"
           >
@@ -255,16 +264,16 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
             <p className="mt-1 max-w-sm text-xs text-slate-500 leading-relaxed">
               {search
                 ? 'Coba periksa ejaan nama kepala keluarga atau nomor KK yang dicari.'
-                : 'Database kependudukan RT 08 RW 05 saat ini masih kosong (0 KK). Anda dapat langsung mengimport seluruh warga, anggota keluarga, dan bantuan lewat file Excel.'}
+                : `Database kependudukan RT ${rtStr} RW ${rwStr} saat ini masih kosong (0 KK). Anda dapat langsung mengimport seluruh warga, anggota keluarga, dan bantuan lewat file Excel.`}
             </p>
             <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
               <button
                 type="button"
                 onClick={() =>
                   downloadTemplateExcelWargaBansos({
-                    rt: profilRT?.namaRT || '08',
-                    rw: profilRT?.namaRW || '05',
-                    desa: profilRT?.desa || 'Desa Kotayasa',
+                    rt: rtStr,
+                    rw: rwStr,
+                    desa: desaStr,
                   })
                 }
                 className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-xs font-bold text-[#0B5D3F] hover:bg-emerald-100 active:scale-95 transition-all cursor-pointer"
@@ -329,7 +338,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                       <td className="py-3.5 px-4">
                         <div className="text-slate-700 font-semibold">Rumah {w.noRumah}</div>
                         <div className="text-[10px] text-slate-400 truncate max-w-[140px]">
-                          {w.alamat || 'RT 08 / RW 05'}
+                          {w.alamat || `RT ${w.rt || rtStr} / RW ${w.rw || rwStr}`}
                         </div>
                       </td>
                       <td className="py-3.5 px-4 text-center">
@@ -424,7 +433,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                     Detail Kartu Keluarga & Riwayat Bantuan
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Data Kependudukan Resmi RT 08 RW 05 Desa Kotayasa
+                    Data Kependudukan Resmi RT {selectedWarga.rt || rtStr} RW {selectedWarga.rw || rwStr} {desaStr}
                   </p>
                 </div>
               </div>
@@ -486,7 +495,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
 
                 <div className="text-xs text-slate-600 pt-1 border-t border-slate-200">
                   <span className="text-slate-400 block text-[10px]">Alamat Lengkap</span>
-                  <p>{selectedWarga.alamat || 'RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas'}</p>
+                  <p>{selectedWarga.alamat || `RT ${selectedWarga.rt || rtStr} RW ${selectedWarga.rw || rwStr} ${desaStr}, ${kecStr}, ${kabStr}`}</p>
                 </div>
               </div>
 
@@ -654,7 +663,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
 
                 {/* Download Standar Register RT */}
                 <button
-                  onClick={() => exportSingleKK_PDF(selectedWarga, bantuanList)}
+                  onClick={() => exportSingleKK_PDF(selectedWarga, bantuanList, effectiveProfil, pengaturanKas)}
                   className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 px-3.5 py-2 text-xs font-bold text-slate-700 shadow-xs cursor-pointer"
                   title="Cetak Ringkasan Register Warga RT"
                 >
@@ -672,7 +681,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                       targetName: `KARTU KELUARGA RESMI: ${selectedWarga.nama} (${selectedWarga.noKK})`,
                       variant: 'warning',
                       onConfirm: () => {
-                        exportKartuKeluargaPemerintah_PDF(selectedWarga, profilRT, true);
+                        exportKartuKeluargaPemerintah_PDF(selectedWarga, effectiveProfil, true);
                       },
                     });
                   }}

@@ -63,6 +63,14 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
     onConfirm: () => {},
   });
 
+  const profilRT = pengaturanKas.profilRT;
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const tahunAktif = pengaturanKas.tahunAktif || 2026;
+  const namaKetua = pengaturanKas.kontakKetuaRT?.nama?.trim() || `Ketua RT ${rtStr}`;
+  const namaBendahara = pengaturanKas.kontakBendahara?.nama?.trim() || `Bendahara RT ${rtStr}`;
+
   // Strictly find current resident data by No KK or matching name/id
   const wargaData = wargaList.find(
     (w) =>
@@ -75,9 +83,9 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
     nama: currentUser.nama || currentUser.username,
     noKK: currentUser.noKK || '3302140000000001',
     noRumah: '—',
-    rt: '08',
-    rw: '05',
-    alamat: pengaturanKas.profilRT?.alamatSekretariat || 'RT 08 RW 05 Desa Kotayasa',
+    rt: rtStr,
+    rw: rwStr,
+    alamat: profilRT?.alamatSekretariat || `RT ${rtStr} RW ${rwStr} ${desaStr}`,
     jenisKelamin: 'Laki-laki',
     jumlahJiwa: 1,
     statusIuran: 'Belum',
@@ -146,7 +154,7 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
             <div className="flex items-center gap-2 mb-2">
               <span className="rounded-full bg-emerald-400/20 px-3 py-1 text-xs font-bold text-emerald-200 border border-emerald-400/30 flex items-center gap-1.5">
                 <ShieldCheck size={14} />
-                <span>Akun Warga &bull; RT 08 RW 05 Desa Kotayasa</span>
+                <span>Akun Warga &bull; RT {wargaData.rt || rtStr} RW {wargaData.rw || rwStr} {desaStr}</span>
               </span>
               <span className="text-xs text-emerald-200/80">Privasi Terjaga</span>
             </div>
@@ -155,7 +163,7 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
               Assalamu'alaikum, Bpk/Ibu {wargaData.nama}
             </h1>
             <p className="mt-1 text-sm text-emerald-100/90 leading-relaxed">
-              Berikut adalah informasi data keluarga, riwayat iuran jimpitan, kas kematian, dan warta pengumuman resmi RT 08 RW 05.
+              Berikut adalah informasi data keluarga, riwayat iuran jimpitan, kas kematian, dan warta pengumuman resmi RT {rtStr} RW {rwStr}.
             </p>
 
             <div className="mt-4 flex flex-wrap items-center gap-3 text-xs">
@@ -165,7 +173,7 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
               </div>
               <div className="flex items-center gap-1.5 rounded-xl bg-white/10 px-3 py-1.5 backdrop-blur-xs border border-white/10">
                 <MapPin size={14} className="text-emerald-300" />
-                <span>Rumah No. {wargaData.noRumah} &bull; RT 08 RW 05</span>
+                <span>Rumah No. {wargaData.noRumah} &bull; RT {wargaData.rt || rtStr} RW {wargaData.rw || rwStr}</span>
               </div>
             </div>
           </div>
@@ -423,7 +431,7 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
         <div className="rounded-3xl bg-white p-6 border border-slate-200 shadow-xs space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">
-              Riwayat Pembayaran Iuran Per Bulan (Tahun 2026)
+              Riwayat Pembayaran Iuran Per Bulan (Tahun {tahunAktif})
             </h3>
             <span className="text-xs font-bold text-[#0B5D3F]">
               {bulanLunasCount} / 12 Bulan Terpenuhi
@@ -467,26 +475,29 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
             <span>Keterangan Alokasi Kas Kematian Warga ({formatRp(kematianTahunan)}/tahun = {formatRp(kematianBulanan)}/bulan):</span>
           </div>
           <p className="text-xs text-slate-600 leading-relaxed">
-            Kas kematian dikumpulkan untuk menjamin kepastian pertolongan musibah warga RT 08 RW 05 Desa Kotayasa. Dana ini disiapkan siap pakai untuk pengadaan <strong>kain mori/kafan lengkap</strong>, minyak wangi pemulasaraan, sabun, kapas, perlengkapan mandi jenazah, tenda duka, serta santunan duka bagi keluarga yang ditinggalkan.
+            Kas kematian dikumpulkan untuk menjamin kepastian pertolongan musibah warga RT {rtStr} RW {rwStr} {desaStr}. Dana ini disiapkan siap pakai untuk pengadaan <strong>kain mori/kafan lengkap</strong>, minyak wangi pemulasaraan, sabun, kapas, perlengkapan mandi jenazah, tenda duka, serta santunan duka bagi keluarga yang ditinggalkan.
           </p>
         </div>
       </div>
 
       {/* SECTION 3: WARTA PENGUMUMAN RT UNTUK WARGA */}
       <div className="rounded-3xl bg-white p-6 shadow-xs border border-slate-200 space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-4">
           <div className="flex items-center gap-3">
             <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-amber-50 text-amber-700">
               <Megaphone size={22} />
             </div>
             <div>
               <h2 className="text-base font-extrabold text-slate-900">
-                Warta & Surat Edaran Resmi RT 08
+                Warta &amp; Surat Edaran Resmi RT {rtStr}
               </h2>
               <p className="text-xs text-slate-500">
-                Pengumuman kegiatan, ronda malam, dan informasi penting untuk warga
+                Pengumuman kegiatan, ronda malam, dan informasi resmi dari Pengurus RT {rtStr}
               </p>
             </div>
+          </div>
+          <div className="text-[11px] text-slate-500 bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200">
+            Ketua RT: <strong className="text-slate-800">{namaKetua}</strong> &bull; Bendahara: <strong className="text-slate-800">{namaBendahara}</strong>
           </div>
         </div>
 
@@ -496,48 +507,56 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
               Belum ada warta pengumuman aktif dari pengurus RT.
             </div>
           ) : (
-            pengumumanList.map((p) => (
-              <div
-                key={p.id}
-                className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 space-y-2 hover:bg-white hover:border-emerald-300 transition-all"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="rounded-md bg-emerald-100 px-2.5 py-0.5 text-[10px] font-bold text-[#0B5D3F]">
-                      {p.kategori}
-                    </span>
-                    <span className="text-xs font-bold text-slate-900">{p.judul}</span>
-                  </div>
-                  <span className="text-[11px] text-slate-400">{p.tanggal}</span>
-                </div>
-
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  {p.isi}
-                </p>
-
-                {(p.hariTanggalAcara || p.tempatAcara) && (
-                  <div className="rounded-xl bg-white p-2.5 text-[11px] text-slate-600 border border-slate-200 grid grid-cols-2 gap-2">
-                    <div>
-                      <strong>Waktu:</strong> {p.hariTanggalAcara || '-'} ({p.waktuAcara || '08.00 WIB'})
+            pengumumanList.map((p) => {
+              const jabatanTtd = p.jabatanPengurus?.trim() || `Ketua RT ${rtStr}`;
+              const rawNama = p.namaPengurus?.trim() || '';
+              const isLegacy = !rawNama || rawNama === 'Bpk. Suwardi' || rawNama === 'Bapak Suwardi';
+              const resolvedNama = isLegacy
+                ? (jabatanTtd.toLowerCase().includes('bendahara') ? namaBendahara : namaKetua)
+                : rawNama;
+              return (
+                <div
+                  key={p.id}
+                  className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 space-y-2 hover:bg-white hover:border-emerald-300 transition-all"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-md bg-emerald-100 px-2.5 py-0.5 text-[10px] font-bold text-[#0B5D3F]">
+                        {p.kategori}
+                      </span>
+                      <span className="text-xs font-bold text-slate-900">{p.judul}</span>
                     </div>
-                    <div>
-                      <strong>Tempat:</strong> {p.tempatAcara || 'Pos Kamling RT 08'}
-                    </div>
+                    <span className="text-[11px] text-slate-400">{p.tanggal}</span>
                   </div>
-                )}
 
-                <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1">
-                  <span>Diterbitkan oleh: {p.penulis}</span>
-                  <button
-                    onClick={() => kirimWhatsAppPengumuman(p)}
-                    className="flex items-center gap-1 font-bold text-[#25D366] hover:underline cursor-pointer"
-                  >
-                    <Share2 size={12} />
-                    <span>Bagikan ke Grup WA</span>
-                  </button>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    {p.isi}
+                  </p>
+
+                  {(p.hariTanggalAcara || p.tempatAcara) && (
+                    <div className="rounded-xl bg-white p-2.5 text-[11px] text-slate-600 border border-slate-200 grid grid-cols-2 gap-2">
+                      <div>
+                        <strong>Waktu:</strong> {p.hariTanggalAcara || '-'} ({p.waktuAcara || '08.00 WIB'})
+                      </div>
+                      <div>
+                        <strong>Tempat:</strong> {p.tempatAcara || `Pos Kamling RT ${rtStr}`}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1">
+                    <span>Diterbitkan oleh: {jabatanTtd} ({resolvedNama})</span>
+                    <button
+                      onClick={() => kirimWhatsAppPengumuman(p, pengaturanKas)}
+                      className="flex items-center gap-1 font-bold text-[#25D366] hover:underline cursor-pointer"
+                    >
+                      <Share2 size={12} />
+                      <span>Bagikan ke Grup WA</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </div>

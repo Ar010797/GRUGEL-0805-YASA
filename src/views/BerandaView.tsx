@@ -22,11 +22,12 @@ import {
 } from 'lucide-react';
 import { HouseLogo, LeafIcon } from '../components/HouseLogo';
 import { GreetingVillageIllustration } from '../components/VillageLandscape';
-import { Transaction, Warga } from '../types';
+import { Transaction, Warga, PengaturanKas } from '../types';
 
 interface BerandaViewProps {
   transactions: Transaction[];
   wargaList: Warga[];
+  pengaturanKas?: PengaturanKas;
   onNavigate: (view: string) => void;
   onOpenTxModal: (type?: 'masuk' | 'keluar' | 'kematian') => void;
   onOpenWargaModal: () => void;
@@ -37,12 +38,20 @@ interface BerandaViewProps {
 export const BerandaView: React.FC<BerandaViewProps> = ({
   transactions,
   wargaList,
+  pengaturanKas,
   onNavigate,
   onOpenTxModal,
   onOpenWargaModal,
   onOpenPengumumanModal,
   onOpenSaldoAwalModal,
 }) => {
+  const profilRT = pengaturanKas?.profilRT;
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const kecShort = (profilRT?.kecamatan || 'Kecamatan Sumbang').replace(/^Kecamatan\s+/i, 'Kec. ');
+  const ketuaNama = pengaturanKas?.kontakKetuaRT?.nama?.trim();
+  const bendaharaNama = pengaturanKas?.kontakBendahara?.nama?.trim();
   // Calculate real balances
   const totalMasuk = transactions
     .filter((t) => t.tipe === 'masuk')
@@ -112,7 +121,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
     {
       id: 'data-warga',
       title: 'Data Warga',
-      desc: 'Daftar seluruh warga RT 08',
+      desc: `Daftar seluruh warga RT ${rtStr}`,
       icon: <Users size={24} className="text-white" />,
       color: 'bg-[#0D9488]',
       badge: 'Data KK & Jiwa',
@@ -150,11 +159,11 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
               <span className="rounded-full bg-emerald-400/20 px-3 py-1 text-xs font-bold text-emerald-200 border border-emerald-400/30">
                 Aplikasi Pengelolaan Kas Warga
               </span>
-              <span className="text-xs text-emerald-200/80">• Desa Kotayasa</span>
+              <span className="text-xs text-emerald-200/80">• {desaStr}</span>
             </div>
             
             <h1 className="text-2xl lg:text-3xl font-extrabold tracking-tight">
-              Assalamu'alaikum, Warga RT 08 RW 05
+              Assalamu'alaikum, Warga RT {rtStr} RW {rwStr}
             </h1>
             <p className="mt-1 text-sm text-emerald-100/90 leading-relaxed">
               Semoga selalu sehat dan mendapat keberkahan. Sistem keuangan transparan dan terbuka untuk kemaslahatan bersama warga.
@@ -223,7 +232,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold tracking-wider text-emerald-200 uppercase">
-              Total Kas RT 08 RW 05
+              Total Kas RT {rtStr} RW {rwStr}
             </span>
             <div className="flex h-7 w-7 items-center justify-center rounded-full bg-white/10 group-hover:translate-x-1 transition-transform">
               <ChevronRight size={16} />
@@ -314,7 +323,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
               </div>
               <div>
                 <h3 className="text-sm font-bold text-slate-900">Status Pembayaran Iuran Warga</h3>
-                <p className="text-xs text-slate-500">Periode Kas RT 08 RW 05 Desa Kotayasa</p>
+                <p className="text-xs text-slate-500">Periode Kas RT {rtStr} RW {rwStr} {desaStr}</p>
               </div>
             </div>
             <button
@@ -403,9 +412,18 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
             </blockquote>
           </div>
 
-          <div className="mt-4 pt-4 border-t border-emerald-900/10 flex items-center justify-between text-xs text-[#0B5D3F] font-semibold">
-            <span>RT 08 RW 05 Desa Kotayasa</span>
-            <span className="italic">Kec. Sumbang</span>
+          <div className="mt-4 pt-4 border-t border-emerald-900/10 space-y-1.5 text-xs text-[#0B5D3F]">
+            <div className="flex items-center justify-between font-semibold">
+              <span>RT {rtStr} RW {rwStr} {desaStr}</span>
+              <span className="italic">{kecShort}</span>
+            </div>
+            {(ketuaNama || bendaharaNama) && (
+              <p className="text-[11px] font-medium text-emerald-900/80">
+                {ketuaNama ? `Ketua RT: ${ketuaNama}` : ''}
+                {ketuaNama && bendaharaNama ? ' • ' : ''}
+                {bendaharaNama ? `Bendahara: ${bendaharaNama}` : ''}
+              </p>
+            )}
           </div>
         </div>
       </div>

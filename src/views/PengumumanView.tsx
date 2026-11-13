@@ -42,14 +42,29 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
   const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
   const judulKop = profilRT?.judulKopSurat || `PENGURUS RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
   const alamatKop = profilRT?.alamatSekretariat || `Sekretariat: RT ${rtStr} RW ${rwStr} ${desaStr}, Kec. ${kecStr}, Kab. ${kabStr} ${profilRT?.kodePos || '53183'}`;
-  const namaKetua = pengaturanKas?.kontakKetuaRT?.nama || 'Bpk. Suwardi';
+  const namaKetua = pengaturanKas?.kontakKetuaRT?.nama?.trim() || `Ketua RT ${rtStr}`;
+  const namaBendahara = pengaturanKas?.kontakBendahara?.nama?.trim() || `Bendahara RT ${rtStr}`;
+
+  const resolvePengurus = (p: PengumumanRT) => {
+    const jabatanTtd = p.jabatanPengurus?.trim() || `Ketua RT ${rtStr}`;
+    const rawNama = p.namaPengurus?.trim() || '';
+    const isLegacy = !rawNama || rawNama === 'Bpk. Suwardi' || rawNama === 'Bapak Suwardi';
+    const namaTtd = isLegacy
+      ? (jabatanTtd.toLowerCase().includes('bendahara') ? namaBendahara : namaKetua)
+      : rawNama;
+    return {
+      namaTtd,
+      jabatanTtd,
+      penulisTampil: `${jabatanTtd} (${namaTtd})`,
+    };
+  };
 
   const [filterCategory, setFilterCategory] = useState<string>('Semua');
   const [search, setSearch] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const handleCopy = async (p: PengumumanRT) => {
-    const ok = await salinTeksPengumuman(p);
+    const ok = await salinTeksPengumuman(p, pengaturanKas);
     if (ok) {
       setCopiedId(p.id);
       setTimeout(() => setCopiedId(null), 2000);
@@ -86,7 +101,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
               Pengumuman & Warta Warga
             </h1>
             <p className="text-xs text-slate-500">
-              Pemberitahuan resmi RT 08 RW 05 Desa Kotayasa dengan Kop Surat Resmi, WhatsApp & PDF
+              Pemberitahuan resmi RT {rtStr} RW {rwStr} {desaStr} dengan Kop Surat Resmi, WhatsApp &amp; PDF
             </p>
           </div>
         </div>
@@ -156,13 +171,13 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
                 {/* KOP SURAT RESMI RT PADA KARTU PENGUMUMAN */}
                 <div className="bg-slate-50/80 rounded-2xl p-3 mb-4 border border-slate-200/80 text-center">
                   <p className="text-[9px] font-black uppercase tracking-wider text-slate-500">
-                    PEMERINTAH KABUPATEN BANYUMAS &bull; KECAMATAN SUMBANG
+                    PEMERINTAH {kabStr.toUpperCase()} &bull; {kecStr.toUpperCase()}
                   </p>
                   <p className="text-[11px] font-extrabold uppercase text-[#0B5D3F] mt-0.5">
-                    RUKUN TETANGGA 08 RUKUN WARGA 05 DESA KOTAYASA
+                    {judulKop.toUpperCase()} {desaStr.toUpperCase()}
                   </p>
                   <p className="text-[8px] text-slate-400 mt-0.5">
-                    Sekretariat: RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas 53183
+                    {alamatKop}
                   </p>
                   <div className="h-[1.5px] bg-[#0B5D3F] mt-2 w-full" />
                   <div className="h-[0.5px] bg-[#0B5D3F] mt-[1.5px] w-full" />
@@ -200,7 +215,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
                 </p>
 
                 <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
-                  <span>Diterbitkan oleh: <strong>{p.penulis}</strong></span>
+                  <span>Diterbitkan oleh: <strong>{resolvePengurus(p).penulisTampil}</strong></span>
                   {p.tanggalBerakhir && (
                     <span className="text-[10px] text-rose-600 font-semibold">
                       Berlaku s/d: {p.tanggalBerakhir}
@@ -224,7 +239,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
 
                   {/* Tombol Kirim WhatsApp */}
                   <button
-                    onClick={() => kirimWhatsAppPengumuman(p)}
+                    onClick={() => kirimWhatsAppPengumuman(p, pengaturanKas)}
                     className="flex items-center gap-1.5 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] px-3.5 py-2 text-xs font-bold text-white shadow-xs transition-all cursor-pointer"
                     title="Bagikan format pesan resmi ke grup WhatsApp Warga"
                   >
@@ -234,9 +249,9 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
 
                   {/* Tombol Download PDF Surat Pengumuman */}
                   <button
-                    onClick={() => exportSuratPengumumanPDF(p, profilRT, p.namaPengurus || namaKetua, p.jabatanPengurus)}
+                    onClick={() => exportSuratPengumumanPDF(p, profilRT, namaKetua, p.jabatanPengurus, pengaturanKas)}
                     className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] px-3.5 py-2 text-xs font-bold text-white shadow-xs transition-all cursor-pointer"
-                    title="Unduh PDF Surat Edaran Resmi RT 08 RW 05"
+                    title={`Unduh PDF Surat Edaran Resmi RT ${rtStr} RW ${rwStr}`}
                   >
                     <Download size={13} />
                     <span>Surat PDF</span>
@@ -280,7 +295,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
               <div className="flex items-center gap-2">
                 <FileText size={18} className="text-[#0B5D3F]" />
                 <h3 className="text-xs sm:text-sm font-extrabold text-[#0B5D3F]">
-                  Format Surat Edaran Resmi RT 08 RW 05
+                  Format Surat Edaran Resmi RT {rtStr} RW {rwStr}
                 </h3>
               </div>
               <button
@@ -315,7 +330,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
               {/* Metadata Surat */}
               <div className="flex flex-col sm:flex-row justify-between text-xs text-slate-700 gap-2 pt-2">
                 <div className="space-y-0.5">
-                  <p>Nomor&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: 0{selectedSurat.id.replace(/\D/g, '') || '01'}/EDR/RT{rtStr}-RW{rwStr}/X/2026</p>
+                  <p>Nomor&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: 0{selectedSurat.id.replace(/\D/g, '') || '01'}/EDR/RT{rtStr}-RW{rwStr}/{pengaturanKas?.tahunAktif || new Date().getFullYear()}</p>
                   <p>Lampiran : -</p>
                   <p>Perihal&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: <strong className="text-slate-900">PENGUMUMAN - {selectedSurat.judul.toUpperCase()}</strong></p>
                 </div>
@@ -355,7 +370,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
               <div className="pt-4 flex justify-end">
                 <div className="text-center w-56 relative">
                   <p className="text-xs text-slate-700">Pengurus RT {rtStr} RW {rwStr} {desaStr}</p>
-                  <p className="text-xs font-bold text-slate-900">{selectedSurat.jabatanPengurus || `Ketua RT ${rtStr}`},</p>
+                  <p className="text-xs font-bold text-slate-900">{resolvePengurus(selectedSurat).jabatanTtd},</p>
 
                   {/* Stempel Visual Digital */}
                   <div className="my-2 flex justify-center">
@@ -366,7 +381,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
                     </div>
                   </div>
 
-                  <p className="text-xs font-bold underline text-slate-900">{selectedSurat.namaPengurus || namaKetua}</p>
+                  <p className="text-xs font-bold underline text-slate-900">{resolvePengurus(selectedSurat).namaTtd}</p>
                 </div>
               </div>
             </div>
@@ -382,14 +397,14 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
               </button>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => kirimWhatsAppPengumuman(selectedSurat)}
+                  onClick={() => kirimWhatsAppPengumuman(selectedSurat, pengaturanKas)}
                   className="flex items-center gap-1.5 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] px-4 py-2 text-xs font-bold text-white shadow-xs cursor-pointer"
                 >
                   <Share2 size={13} />
                   <span>Kirim ke WA Warga</span>
                 </button>
                 <button
-                  onClick={() => exportSuratPengumumanPDF(selectedSurat, profilRT, selectedSurat.namaPengurus || namaKetua, selectedSurat.jabatanPengurus)}
+                  onClick={() => exportSuratPengumumanPDF(selectedSurat, profilRT, namaKetua, selectedSurat.jabatanPengurus, pengaturanKas)}
                   className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] px-4 py-2 text-xs font-bold text-white shadow-xs cursor-pointer"
                 >
                   <Download size={13} />

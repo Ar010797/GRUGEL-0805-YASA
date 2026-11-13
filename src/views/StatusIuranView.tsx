@@ -30,6 +30,11 @@ export const StatusIuranView: React.FC<StatusIuranViewProps> = ({
   const [filter, setFilter] = useState<'semua' | 'sudah' | 'belum'>('semua');
   const [search, setSearch] = useState('');
 
+  const profilRT = pengaturanKas?.profilRT;
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+
   const totalKK = wargaList.length;
   const sudahCount = wargaList.filter((w) => w.statusIuran === 'Sudah').length;
   const belumCount = totalKK - sudahCount;
@@ -57,7 +62,7 @@ export const StatusIuranView: React.FC<StatusIuranViewProps> = ({
           </button>
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Status Pembayaran Iuran</h1>
-            <p className="text-xs text-slate-500">Monitoring pembayaran iuran kas warga RT 08 RW 05 Desa Kotayasa</p>
+            <p className="text-xs text-slate-500">Monitoring pembayaran iuran kas warga RT {rtStr} RW {rwStr} {desaStr}</p>
           </div>
         </div>
 

@@ -151,6 +151,7 @@ export default function App() {
   const [sseConnected, setSseConnected] = useState<boolean>(false);
   const [cloudUser, setCloudUser] = useState<FirebaseUser | null>(null);
   const [isCloudAdmin, setIsCloudAdmin] = useState<boolean>(false);
+  const [cloudAuthReadyUid, setCloudAuthReadyUid] = useState<string | null>(null);
   const [cloudSyncBusy, setCloudSyncBusy] = useState<boolean>(false);
   const [cloudError, setCloudError] = useState<string | null>(null);
 
@@ -492,25 +493,30 @@ export default function App() {
   useEffect(() => {
     completeGoogleRedirectIfPending().catch(() => {});
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
-      setCloudUser(user);
       setCloudError(null);
       if (!user) {
+        setCloudUser(null);
         setIsCloudAdmin(false);
+        setCloudAuthReadyUid(null);
         return;
       }
+      setCloudUser(user);
+      setCloudAuthReadyUid(null);
       try {
         const adminOk = await checkIsCloudAdmin(user);
         setIsCloudAdmin(adminOk);
       } catch (err: any) {
         setIsCloudAdmin(false);
         setCloudError(err?.message || 'Gagal memeriksa izin Cloud Firestore.');
+      } finally {
+        setCloudAuthReadyUid(user.uid);
       }
     });
     return () => unsubAuth();
   }, []);
 
   useEffect(() => {
-    if (!cloudUser) return;
+    if (!cloudUser || cloudAuthReadyUid !== cloudUser.uid) return;
 
     firestoreSeenIdsRef.current = {
       warga: null,
@@ -660,7 +666,7 @@ export default function App() {
       clearTimeout(initialPushTimer);
       unsubFirestore();
     };
-  }, [cloudUser, isCloudAdmin]);
+  }, [cloudUser, isCloudAdmin, cloudAuthReadyUid]);
 
   // Auto-Save when core states change -> pushes to Express SSE Server & Cloud Firestore
   useEffect(() => {
@@ -997,7 +1003,104 @@ export default function App() {
 
   const handleUpdatePengaturan = (newSetting: Partial<PengaturanKas>) => {
     const nowIso = new Date().toISOString();
-    setPengaturanKas((prev) => ({ ...prev, ...newSetting, updatedAt: nowIso }));
+    const prev = latestStateRef.current.pengaturanKas || pengaturanKas;
+    const merged: PengaturanKas = { ...prev, ...newSetting, updatedAt: nowIso };
+    setPengaturanKas(merged);
+
+    const oldKetua = (prev.kontakKetuaRT?.nama || '').trim();
+    const newKetua = (merged.kontakKetuaRT?.nama || '').trim();
+    const oldBendahara = (prev.kontakBendahara?.nama || '').trim();
+    const newBendahara = (merged.kontakBendahara?.nama || '').trim();
+    const oldRT = (prev.profilRT?.namaRT || '08').trim();
+    const newRT = (merged.profilRT?.namaRT || '08').trim();
+    const newRW = (merged.profilRT?.namaRW || '05').trim();
+    const newKetuaTelp = (merged.kontakKetuaRT?.telp || '').trim();
+
+    const pengurusChanged =
+      (newKetua && newKetua !== oldKetua) ||
+      (newBendahara && newBendahara !== oldBendahara) ||
+      newRT !== oldRT;
+
+    if (pengurusChanged) {
+      const legacyKetuaPlaceholders = ['bpk. suwardi', 'bapak suwardi', oldKetua.toLowerCase()].filter(Boolean);
+      const legacyBendaharaPlaceholders = ['bpk. bambang s.', 'bapak bambang s.', 'bpk. bambang', 'bapak bambang', oldBendahara.toLowerCase()].filter(Boolean);
+
+      const syncPengumumanItem = (p: PengumumanRT): PengumumanRT => {
+        const curNama = (p.namaPengurus || '').trim().toLowerCase();
+        const curJabatan = (p.jabatanPengurus || '').trim();
+        const curJabatanLower = curJabatan.toLowerCase();
+        const isBendaharaTarget =
+          curJabatanLower.includes('bendahara') ||
+          (curNama !== '' && legacyBendaharaPlaceholders.includes(curNama));
+        const shouldSyncName =
+          !curNama ||
+          legacyKetuaPlaceholders.includes(curNama) ||
+          legacyBendaharaPlaceholders.includes(curNama);
+
+        const nextNama = shouldSyncName
+          ? (isBendaharaTarget ? newBendahara || newKetua : newKetua || p.namaPengurus)
+          : p.namaPengurus;
+
+        let nextJabatan = curJabatan;
+        if (!curJabatan) {
+          nextJabatan = isBendaharaTarget ? `Bendahara RT ${newRT}` : `Ketua RT ${newRT}`;
+        } else if (/^ketua\s+rt\b/i.test(curJabatan)) {
+          nextJabatan = `Ketua RT ${newRT}`;
+        } else if (/^bendahara\s+rt\b/i.test(curJabatan)) {
+          nextJabatan = `Bendahara RT ${newRT}`;
+        }
+
+        const nextPenulis =
+          nextNama && (!p.penulis || p.penulis.startsWith('Pengurus RT') || p.penulis.startsWith('Ketua RT') || p.penulis.startsWith('Bendahara RT') || legacyKetuaPlaceholders.includes(p.penulis.toLowerCase()) || legacyBendaharaPlaceholders.includes(p.penulis.toLowerCase()))
+            ? `${nextJabatan} (${nextNama})`
+            : p.penulis;
+
+        return {
+          ...p,
+          namaPengurus: nextNama,
+          jabatanPengurus: nextJabatan,
+          penulis: nextPenulis,
+          updatedAt: nowIso,
+        };
+      };
+
+      setPengumumanList((prevList) => prevList.map(syncPengumumanItem));
+      setFloatingAnnouncement((prevFloat) => (prevFloat ? syncPengumumanItem(prevFloat) : prevFloat));
+
+      if (newKetua) {
+        setAdminAccounts((prevAdmins) =>
+          prevAdmins.map((acc) => {
+            const isPrimaryAdmin =
+              acc.id === 'adm_rt08' ||
+              acc.username.toLowerCase() === 'admin' ||
+              (oldKetua && acc.nama.toLowerCase().includes(oldKetua.toLowerCase()));
+            if (!isPrimaryAdmin) return acc;
+            return {
+              ...acc,
+              nama: `${newKetua} (Ketua RT ${newRT})`,
+              rt: newRT,
+              rw: newRW,
+              kontak: newKetuaTelp || acc.kontak,
+              jabatan: `Ketua RT ${newRT} RW ${newRW}`,
+              updatedAt: nowIso,
+            };
+          })
+        );
+
+        setCurrentUser((prevUser) => {
+          if (!prevUser || prevUser.role !== 'admin') return prevUser;
+          const isPrimaryUser =
+            prevUser.username.toLowerCase() === 'admin' ||
+            (oldKetua && prevUser.nama.toLowerCase().includes(oldKetua.toLowerCase()));
+          if (!isPrimaryUser) return prevUser;
+          return {
+            ...prevUser,
+            nama: `${newKetua} (Ketua RT ${newRT})`,
+            rtScope: `RT ${newRT} RW ${newRW}`,
+          };
+        });
+      }
+    }
   };
 
   const handleSaveSaldoAwal = (
@@ -1477,11 +1580,14 @@ export default function App() {
       });
       setCurrentView('server-kontrol');
     } else if (targetRole === 'admin') {
+      const rtStr = pengaturanKas.profilRT?.namaRT || '08';
+      const rwStr = pengaturanKas.profilRT?.namaRW || '05';
+      const ketuaStr = pengaturanKas.kontakKetuaRT?.nama?.trim();
       setCurrentUser({
         role: 'admin',
         username: 'Admin',
-        nama: 'Administrator RT 08 RW 05',
-        rtScope: 'RT 08 RW 05',
+        nama: ketuaStr ? `${ketuaStr} (Ketua RT ${rtStr})` : `Administrator RT ${rtStr} RW ${rwStr}`,
+        rtScope: `RT ${rtStr} RW ${rwStr}`,
         isPinAuthenticated: true,
       });
       setCurrentView('beranda');
@@ -1516,7 +1622,7 @@ export default function App() {
     { id: 'server-kontrol', label: 'Pusat Server & RT', icon: <Server size={18} /> },
     { id: 'data-warga', label: 'Data Warga Desa', icon: <Users size={18} /> },
     { id: 'bantuan-pemerintah', label: 'Bantuan Sosial Desa', icon: <HandHeart size={18} /> },
-    { id: 'beranda', label: 'Lihat Kas RT 08', icon: <LayoutDashboard size={18} /> },
+    { id: 'beranda', label: `Lihat Kas RT ${pengaturanKas.profilRT?.namaRT || '08'}`, icon: <LayoutDashboard size={18} /> },
     { id: 'status-iuran', label: 'Monitoring Iuran', icon: <CalendarCheck size={18} /> },
     { id: 'pengumuman', label: 'Warta Pengumuman', icon: <Megaphone size={18} /> },
     { id: 'laporan', label: 'Laporan Rekap', icon: <FileText size={18} /> },
@@ -1575,6 +1681,7 @@ export default function App() {
         }}
         profilRT={pengaturanKas.profilRT}
         namaKetua={pengaturanKas.kontakKetuaRT?.nama}
+        pengaturanKas={pengaturanKas}
       />
 
       {/* KIRIM LAPORAN BULANAN MODAL (Admin RT -> Server) */}
@@ -1590,6 +1697,8 @@ export default function App() {
         saldoKasUmum={saldoKasUmumBerjalan}
         saldoKasKematian={saldoKasKematianBerjalan}
         tahunAktif={tahunAktif}
+        rw={pengaturanKas.profilRT?.namaRW}
+        desa={pengaturanKas.profilRT?.desa}
       />
 
       {/* SIDEBAR NAVIGATION */}
@@ -1777,7 +1886,7 @@ export default function App() {
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-sm font-extrabold text-slate-900">
-                  {currentNavItems.find((n) => n.id === currentView)?.label || 'Aplikasi Desa Kotayasa'}
+                  {currentNavItems.find((n) => n.id === currentView)?.label || `Aplikasi ${pengaturanKas.profilRT?.desa || 'Desa Kotayasa'}`}
                 </h2>
                 {isServer && (
                   <span className="hidden sm:inline-flex items-center gap-1 rounded-md bg-indigo-100 px-2 py-0.5 text-[10px] font-black text-indigo-700">
@@ -1786,7 +1895,7 @@ export default function App() {
                 )}
               </div>
               <p className="text-[11px] text-slate-500 hidden sm:block">
-                Desa Kotayasa &bull; {currentUser?.nama} ({currentUser?.rtScope || 'RT 08'})
+                {pengaturanKas.profilRT?.desa || 'Desa Kotayasa'} &bull; {currentUser?.nama} ({currentUser?.rtScope || `RT ${pengaturanKas.profilRT?.namaRT || '08'}`})
               </p>
             </div>
           </div>
@@ -1917,6 +2026,8 @@ export default function App() {
                 <DataWargaView
                   wargaList={wargaList}
                   bantuanList={bantuanList}
+                  profilRT={pengaturanKas.profilRT}
+                  pengaturanKas={pengaturanKas}
                   isServer={true}
                   onOpenWargaModal={() => setIsWargaModalOpen(true)}
                   onOpenUpgradeModal={(w) => {
@@ -1930,6 +2041,7 @@ export default function App() {
                 <BantuanPemerintahView
                   bantuanList={bantuanList}
                   wargaList={wargaList}
+                  pengaturanKas={pengaturanKas}
                   onAddBantuan={handleAddBantuan}
                   onUpdateStatus={handleUpdateStatusBantuan}
                   onDeleteBantuan={handleDeleteBantuan}
@@ -1940,6 +2052,7 @@ export default function App() {
                 <BerandaView
                   transactions={transactions}
                   wargaList={wargaList}
+                  pengaturanKas={pengaturanKas}
                   onNavigate={(view) => setCurrentView(view)}
                   onOpenTxModal={(type) => {
                     setTxModalType(type || 'masuk');
@@ -1989,7 +2102,7 @@ export default function App() {
                   onBack={() => setCurrentView('server-kontrol')}
                 />
               ) : (
-                <KebijakanPrivasiView onBack={() => setCurrentView('server-kontrol')} />
+                <KebijakanPrivasiView onBack={() => setCurrentView('server-kontrol')} pengaturanKas={pengaturanKas} />
               )
             ) : isWarga ? (
               /* WARGA ROLE VIEWS */
@@ -2024,7 +2137,7 @@ export default function App() {
                   onBack={() => setCurrentView('dasbor-warga')}
                 />
               ) : currentView === 'kebijakan-privasi' ? (
-                <KebijakanPrivasiView onBack={() => setCurrentView('dasbor-warga')} />
+                <KebijakanPrivasiView onBack={() => setCurrentView('dasbor-warga')} pengaturanKas={pengaturanKas} />
               ) : (
                 <DasborWargaView
                   currentUser={currentUser!}
@@ -2041,6 +2154,7 @@ export default function App() {
                   <BerandaView
                     transactions={transactions}
                     wargaList={wargaList}
+                    pengaturanKas={pengaturanKas}
                     onNavigate={(view) => setCurrentView(view)}
                     onOpenTxModal={(type) => {
                       setTxModalType(type || 'masuk');
@@ -2055,6 +2169,7 @@ export default function App() {
                 {currentView === 'kas-warga' && (
                   <KasWargaView
                     transactions={transactions}
+                    pengaturanKas={pengaturanKas}
                     onOpenTxModal={(type) => {
                       setTxModalType(type || 'masuk');
                       setIsTxModalOpen(true);
@@ -2067,6 +2182,7 @@ export default function App() {
                 {currentView === 'kas-masuk' && (
                   <KasMasukView
                     transactions={transactions}
+                    pengaturanKas={pengaturanKas}
                     onOpenTxModal={() => {
                       setTxModalType('masuk');
                       setIsTxModalOpen(true);
@@ -2078,6 +2194,7 @@ export default function App() {
                 {currentView === 'kas-keluar' && (
                   <KasKeluarView
                     transactions={transactions}
+                    pengaturanKas={pengaturanKas}
                     onOpenTxModal={() => {
                       setTxModalType('keluar');
                       setIsTxModalOpen(true);
@@ -2114,6 +2231,7 @@ export default function App() {
                     wargaList={wargaList}
                     bantuanList={bantuanList}
                     profilRT={pengaturanKas.profilRT}
+                    pengaturanKas={pengaturanKas}
                     isServer={isServer}
                     onOpenWargaModal={() => setIsWargaModalOpen(true)}
                     onOpenUpgradeModal={(w) => {
@@ -2129,6 +2247,7 @@ export default function App() {
                   <BantuanPemerintahView
                     bantuanList={bantuanList}
                     wargaList={wargaList}
+                    pengaturanKas={pengaturanKas}
                     onAddBantuan={handleAddBantuan}
                     onUpdateStatus={handleUpdateStatusBantuan}
                     onDeleteBantuan={handleDeleteBantuan}
@@ -2140,6 +2259,7 @@ export default function App() {
                 {currentView === 'dokumen-pdf' && (
                   <DokumenPdfWargaView
                     dokumenList={dokumenList}
+                    pengaturanKas={pengaturanKas}
                     onUploadDokumen={handleUploadDokumen}
                     onDeleteDokumen={handleDeleteDokumen}
                     onBack={() => setCurrentView('beranda')}
@@ -2184,7 +2304,7 @@ export default function App() {
                 )}
 
                 {currentView === 'kebijakan-privasi' && (
-                  <KebijakanPrivasiView onBack={() => setCurrentView('beranda')} />
+                  <KebijakanPrivasiView onBack={() => setCurrentView('beranda')} pengaturanKas={pengaturanKas} />
                 )}
               </>
             )}
@@ -2201,6 +2321,7 @@ export default function App() {
         onLoginSuccess={handleLoginSuccess}
         wargaList={wargaList}
         adminAccounts={adminAccounts}
+        pengaturanKas={pengaturanKas}
         onOpenLupaPassword={() => setIsLupaPasswordOpen(true)}
         onRefreshSync={handleForceSyncNow}
       />
@@ -2219,6 +2340,7 @@ export default function App() {
           onClose={() => setIsTxModalOpen(false)}
           onSave={handleSaveTransaction}
           defaultType={txModalType}
+          pengaturanKas={pengaturanKas}
         />
       )}
 

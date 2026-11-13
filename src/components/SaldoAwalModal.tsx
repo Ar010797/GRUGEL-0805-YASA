@@ -106,7 +106,7 @@ export const SaldoAwalModal: React.FC<SaldoAwalModalProps> = ({
               />
             </div>
             <p className="mt-1 text-[11px] text-slate-400">
-              Dana khusus cadangan kain mori dan santunan pemulasaraan jenazah warga RT 08.
+              Dana khusus cadangan kain mori dan santunan pemulasaraan jenazah warga RT {pengaturanKas?.profilRT?.namaRT || '08'}.
             </p>
           </div>
 

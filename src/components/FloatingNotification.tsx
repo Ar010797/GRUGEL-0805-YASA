@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { Megaphone, X, Share2, Download, ArrowUpRight, Volume2, BellRing, EyeOff } from 'lucide-react';
-import { PengumumanRT, ProfilRT } from '../types';
+import { PengumumanRT, ProfilRT, PengaturanKas } from '../types';
 import { kirimWhatsAppPengumuman } from '../utils/whatsappShare';
 import { exportSuratPengumumanPDF } from '../utils/pdfExport';
 import { playNotificationSound } from '../utils/audioNotification';
@@ -11,6 +11,7 @@ interface FloatingNotificationProps {
   onOpenDetail?: (p: PengumumanRT) => void;
   profilRT?: ProfilRT;
   namaKetua?: string;
+  pengaturanKas?: PengaturanKas;
 }
 
 export const FloatingNotification: React.FC<FloatingNotificationProps> = ({
@@ -19,6 +20,7 @@ export const FloatingNotification: React.FC<FloatingNotificationProps> = ({
   onOpenDetail,
   profilRT,
   namaKetua,
+  pengaturanKas,
 }) => {
   // Automatically ring the bell when announcement appears
   useEffect(() => {
@@ -29,7 +31,18 @@ export const FloatingNotification: React.FC<FloatingNotificationProps> = ({
 
   if (!announcement) return null;
 
-  const rtLabel = profilRT?.namaRT ? `RT ${profilRT.namaRT} RW ${profilRT.namaRW || '05'}` : 'RT 08';
+  const effectiveProfil = pengaturanKas?.profilRT || profilRT;
+  const rtStr = effectiveProfil?.namaRT || '08';
+  const rwStr = effectiveProfil?.namaRW || '05';
+  const rtLabel = `RT ${rtStr} RW ${rwStr}`;
+  const resolvedKetua = namaKetua?.trim() || pengaturanKas?.kontakKetuaRT?.nama?.trim();
+  const resolvedBendahara = pengaturanKas?.kontakBendahara?.nama?.trim();
+  const jabatanTtd = announcement.jabatanPengurus?.trim() || `Ketua RT ${rtStr}`;
+  const rawNama = announcement.namaPengurus?.trim() || '';
+  const isLegacy = !rawNama || rawNama === 'Bpk. Suwardi' || rawNama === 'Bapak Suwardi';
+  const resolvedPengurus = isLegacy
+    ? (jabatanTtd.toLowerCase().includes('bendahara') ? resolvedBendahara || resolvedKetua : resolvedKetua) || announcement.penulis
+    : rawNama;
 
   return (
     <div className="fixed top-18 sm:top-20 left-3 right-3 sm:left-auto sm:right-6 sm:w-[440px] max-w-full z-50 animate-in slide-in-from-top-4 duration-300 pointer-events-auto">
@@ -82,13 +95,18 @@ export const FloatingNotification: React.FC<FloatingNotificationProps> = ({
         <p className="mt-2.5 text-xs text-slate-600 line-clamp-2 leading-relaxed bg-slate-50 p-2.5 rounded-xl border border-slate-100">
           {announcement.isi}
         </p>
+        {resolvedPengurus && (
+          <p className="mt-1.5 text-[10px] font-semibold text-slate-500 px-1">
+            Pengirim: <span className="text-[#0B5D3F] font-bold">{jabatanTtd} ({resolvedPengurus})</span>
+          </p>
+        )}
 
         {/* Action Buttons */}
-        <div className="mt-3.5 pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+        <div className="mt-3 pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             {/* Kirim WA */}
             <button
-              onClick={() => kirimWhatsAppPengumuman(announcement)}
+              onClick={() => kirimWhatsAppPengumuman(announcement, pengaturanKas)}
               className="flex items-center gap-1.5 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] px-3 py-1.5 text-[11px] font-bold text-white shadow-xs transition-colors cursor-pointer"
               title="Kirim ke WhatsApp Warga"
             >
@@ -98,7 +116,7 @@ export const FloatingNotification: React.FC<FloatingNotificationProps> = ({
 
             {/* Download Surat PDF */}
             <button
-              onClick={() => exportSuratPengumumanPDF(announcement, profilRT, announcement.namaPengurus || namaKetua, announcement.jabatanPengurus)}
+              onClick={() => exportSuratPengumumanPDF(announcement, effectiveProfil, resolvedKetua, announcement.jabatanPengurus, pengaturanKas)}
               className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] px-3 py-1.5 text-[11px] font-bold text-white shadow-xs transition-colors cursor-pointer"
               title="Download Surat Edaran Resmi (.PDF)"
             >

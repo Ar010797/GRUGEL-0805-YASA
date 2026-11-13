@@ -15,10 +15,11 @@ import {
   AlertCircle,
   Plus,
 } from 'lucide-react';
-import { DokumenPdfWarga } from '../types';
+import { DokumenPdfWarga, PengaturanKas } from '../types';
 
 interface DokumenPdfWargaViewProps {
   dokumenList: DokumenPdfWarga[];
+  pengaturanKas?: PengaturanKas;
   onUploadDokumen: (doc: Omit<DokumenPdfWarga, 'id'>) => void;
   onDeleteDokumen: (id: string) => void;
   onBack: () => void;
@@ -26,10 +27,14 @@ interface DokumenPdfWargaViewProps {
 
 export const DokumenPdfWargaView: React.FC<DokumenPdfWargaViewProps> = ({
   dokumenList,
+  pengaturanKas,
   onUploadDokumen,
   onDeleteDokumen,
   onBack,
 }) => {
+  const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
+  const rwStr = pengaturanKas?.profilRT?.namaRW || '05';
+  const desaStr = pengaturanKas?.profilRT?.desa || 'Desa Kotayasa';
   const [search, setSearch] = useState('');
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [judul, setJudul] = useState('');
@@ -133,7 +138,7 @@ export const DokumenPdfWargaView: React.FC<DokumenPdfWargaViewProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-500">
-              Penyimpanan berkas digital sensus, rekap NIK/KK, dan dokumen resmi RT 08 RW 05 Desa Kotayasa
+              Penyimpanan berkas digital sensus, rekap NIK/KK, dan dokumen resmi RT {rtStr} RW {rwStr} {desaStr}
             </p>
           </div>
         </div>
@@ -320,7 +325,7 @@ export const DokumenPdfWargaView: React.FC<DokumenPdfWargaViewProps> = ({
                   required
                   value={judul}
                   onChange={(e) => setJudul(e.target.value)}
-                  placeholder="Contoh: Rekap Data Sensus RT 08 RW 05 Tahun 2026"
+                  placeholder={`Contoh: Rekap Data Sensus RT ${rtStr} RW ${rwStr} Tahun ${pengaturanKas?.tahunAktif || new Date().getFullYear()}`}
                   className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-[#0B5D3F] outline-hidden"
                 />
               </div>

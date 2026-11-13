@@ -24,6 +24,7 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
 
   const iuranBulan = pengaturanKas?.nominalKematianBulanan || 10000;
   const iuranTahun = pengaturanKas?.nominalKematianTahunan || (iuranBulan * 12); // Rp 120.000
+  const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
 
   return (
     <div className="space-y-6">
@@ -38,7 +39,7 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Kas Kematian & Duka</h1>
             <p className="text-xs text-slate-500">
-              Dana gotong royong warga RT 08 untuk pengadaan kain mori, pemulasaraan, dan santunan duka
+              Dana gotong royong warga RT {rtStr} untuk pengadaan kain mori, pemulasaraan, dan santunan duka
             </p>
           </div>
         </div>
@@ -157,7 +158,7 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
               {kematianList.map((t) => (
                 <tr key={t.id} className="hover:bg-slate-50 transition-colors">
                   <td className="py-3.5 px-6 text-slate-500">{t.tanggal}</td>
-                  <td className="py-3.5 px-6 font-bold text-slate-800">{t.namaWarga || 'Warga RT 08'}</td>
+                  <td className="py-3.5 px-6 font-bold text-slate-800">{t.namaWarga || `Warga RT ${rtStr}`}</td>
                   <td className="py-3.5 px-6 text-slate-600">{t.keterangan}</td>
                   <td className="py-3.5 px-6 text-right font-extrabold text-rose-600">
                     {formatRupiah(t.nominal)}

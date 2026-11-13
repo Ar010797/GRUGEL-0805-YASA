@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 import { X, ArrowUp, ArrowDown, Heart, Check } from 'lucide-react';
-import { Transaction, TransactionType } from '../types';
+import { Transaction, TransactionType, PengaturanKas } from '../types';
 
 interface TransactionModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (tx: Omit<Transaction, 'id'>) => void;
   defaultType?: TransactionType;
+  pengaturanKas?: PengaturanKas;
 }
 
 export const TransactionModal: React.FC<TransactionModalProps> = ({
@@ -14,6 +15,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   onClose,
   onSave,
   defaultType = 'masuk',
+  pengaturanKas,
 }) => {
   const [tipe, setTipe] = useState<TransactionType>(defaultType);
   const [kategori, setKategori] = useState('Iuran Bulanan');
@@ -46,7 +48,9 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
         <div className="flex items-center justify-between border-b border-slate-100 bg-[#E8F5EE]/60 px-6 py-4">
           <div>
             <h3 className="text-base font-bold text-[#0B5D3F]">Catat Transaksi Kas</h3>
-            <p className="text-xs text-slate-500">RT 08 RW 05 Desa Kotayasa</p>
+            <p className="text-xs text-slate-500">
+              RT {pengaturanKas?.profilRT?.namaRT || '08'} RW {pengaturanKas?.profilRT?.namaRW || '05'} {pengaturanKas?.profilRT?.desa || 'Desa Kotayasa'}
+            </p>
           </div>
           <button
             onClick={onClose}

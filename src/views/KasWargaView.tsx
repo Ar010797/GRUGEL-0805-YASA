@@ -12,10 +12,11 @@ import {
   History,
 } from 'lucide-react';
 import { LeafIcon } from '../components/HouseLogo';
-import { Transaction } from '../types';
+import { Transaction, PengaturanKas } from '../types';
 
 interface KasWargaViewProps {
   transactions: Transaction[];
+  pengaturanKas?: PengaturanKas;
   onOpenTxModal: (type?: 'masuk' | 'keluar' | 'kematian') => void;
   onOpenSaldoAwalModal?: () => void;
   onBack: () => void;
@@ -23,10 +24,15 @@ interface KasWargaViewProps {
 
 export const KasWargaView: React.FC<KasWargaViewProps> = ({
   transactions,
+  pengaturanKas,
   onOpenTxModal,
   onOpenSaldoAwalModal,
   onBack,
 }) => {
+  const profilRT = pengaturanKas?.profilRT;
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
   const [activeTab, setActiveTab] = useState<'semua' | 'masuk' | 'keluar' | 'kematian'>('semua');
   const [search, setSearch] = useState('');
 
@@ -67,7 +73,7 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
           </button>
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Kas Warga</h1>
-            <p className="text-xs text-slate-500">Rekapitulasi seluruh mutasi kas RT 08 RW 05 Desa Kotayasa</p>
+            <p className="text-xs text-slate-500">Rekapitulasi seluruh mutasi kas RT {rtStr} RW {rwStr} {desaStr}</p>
           </div>
         </div>
 
@@ -183,7 +189,7 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
             </div>
             <h3 className="text-base font-bold text-slate-800">Belum ada transaksi</h3>
             <p className="mt-1 max-w-md text-xs text-slate-500 leading-relaxed">
-              Data kas warga RT 08 RW 05 masih kosong (Rp 0). Belum ada riwayat transaksi pemasukan maupun pengeluaran kas yang tercatat.
+              Data kas warga RT {rtStr} RW {rwStr} masih kosong (Rp 0). Belum ada riwayat transaksi pemasukan maupun pengeluaran kas yang tercatat.
             </p>
             <button
               onClick={() => onOpenTxModal('masuk')}

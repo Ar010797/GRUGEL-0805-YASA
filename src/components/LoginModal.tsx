@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check, Eye, EyeOff, RefreshCw } from 'lucide-react';
-import { AuthUser, Warga, AdminRTAccount } from '../types';
+import { AuthUser, Warga, AdminRTAccount, PengaturanKas } from '../types';
 import { HouseLogo } from './HouseLogo';
 
 interface LoginModalProps {
@@ -9,6 +9,7 @@ interface LoginModalProps {
   onLoginSuccess: (user: AuthUser) => void;
   wargaList: Warga[];
   adminAccounts?: AdminRTAccount[];
+  pengaturanKas?: PengaturanKas;
   onOpenLupaPassword: () => void;
   onRefreshSync?: () => Promise<void> | void;
 }
@@ -19,9 +20,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onLoginSuccess,
   wargaList,
   adminAccounts = [],
+  pengaturanKas,
   onOpenLupaPassword,
   onRefreshSync,
 }) => {
+  const desaStr = pengaturanKas?.profilRT?.desa || 'Desa Kotayasa';
+  const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
+  const rwStr = pengaturanKas?.profilRT?.namaRW || '05';
   const [isRefreshing, setIsRefreshing] = useState(false);
   // Default to 'warga' or 'admin' so Server tab is NOT visible by default to citizens
   const [activeTab, setActiveTab] = useState<'server' | 'admin' | 'warga'>('admin');
@@ -201,7 +206,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-200">
                 Sistem Login 3 Tingkat
               </span>
-              <h2 className="text-lg font-extrabold tracking-tight">Aplikasi Desa Kotayasa</h2>
+              <h2 className="text-lg font-extrabold tracking-tight">Aplikasi {desaStr}</h2>
             </div>
           </div>
         </div>
@@ -379,7 +384,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     value={adminPassword}
                     onChange={(e) => setAdminPassword(e.target.value)}
                     className="w-full rounded-xl border border-slate-200 pl-10 pr-10 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-mono"
-                    placeholder="rt08rw05"
+                    placeholder={`rt${rtStr}rw${rwStr}`}
                   />
                   <button
                     type="button"

@@ -24,6 +24,12 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
   const rtStr = profilRT?.namaRT || '08';
   const rwStr = profilRT?.namaRW || '05';
   const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
+  const judulKop = profilRT?.judulKopSurat || `RUKUN TETANGGA ${rtStr} RUKUN WARGA ${rwStr}`;
+  const desaShort = desaStr.replace(/^Desa\s+/i, '');
+  const namaKetua = pengaturanKas?.kontakKetuaRT?.nama?.trim() || `Ketua RT ${rtStr}`;
+  const namaBendahara = pengaturanKas?.kontakBendahara?.nama?.trim() || `Bendahara RT ${rtStr}`;
   const tahunStr = String(tahun);
 
   const totalMasuk = transactions
@@ -67,7 +73,7 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           {/* Download Rekap Tahunan PDF */}
           <button
-            onClick={() => exportRekapTahunanPDF(transactions, wargaList, tahunStr, profilRT)}
+            onClick={() => exportRekapTahunanPDF(transactions, wargaList, tahunStr, profilRT, pengaturanKas)}
             className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] px-3.5 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#084831] transition-all cursor-pointer"
             title="Download Dokumen PDF Rekapitulasi Tahunan Lengkap"
           >
@@ -77,7 +83,7 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
 
           {/* Download PDF Data Warga Per KK & Bansos */}
           <button
-            onClick={() => exportDataWargaPerKK_PDF(wargaList, bantuanList, profilRT)}
+            onClick={() => exportDataWargaPerKK_PDF(wargaList, bantuanList, profilRT, pengaturanKas)}
             className="flex items-center gap-1.5 rounded-xl bg-emerald-800 px-3.5 py-2 text-xs font-bold text-white shadow-xs hover:bg-emerald-900 transition-all cursor-pointer"
             title="Download Dokumen PDF Data Seluruh Warga Per Kartu Keluarga Lengkap dengan Bantuan Sosial"
           >
@@ -87,7 +93,7 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
 
           {/* Download Rekap Pengeluaran PDF */}
           <button
-            onClick={() => exportPengeluaranPDF(transactions, tahunStr)}
+            onClick={() => exportPengeluaranPDF(transactions, tahunStr, profilRT, pengaturanKas)}
             className="flex items-center gap-1.5 rounded-xl bg-[#EF4444] px-3.5 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#DC2626] transition-all cursor-pointer"
             title="Download Dokumen PDF Khusus Pengeluaran Kas"
           >
@@ -110,13 +116,13 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
         {/* Header Instansi */}
         <div className="border-b-2 border-[#0B5D3F] pb-4 text-center">
           <h2 className="text-lg font-black tracking-wider text-slate-900 uppercase">
-            RUKUN TETANGGA 08 RUKUN WARGA 05
+            {judulKop}
           </h2>
-          <h3 className="text-base font-bold text-[#0B5D3F]">
-            DESA KOTAYASA, KECAMATAN SUMBANG, KABUPATEN BANYUMAS
+          <h3 className="text-base font-bold text-[#0B5D3F] uppercase">
+            {desaStr}, {kecStr}, {kabStr}
           </h3>
           <p className="text-xs text-slate-500 mt-1">
-            Laporan Rekapitulasi Kas Warga Periode Aktif 2026
+            Laporan Rekapitulasi Kas Warga Periode Aktif {tahunStr}
           </p>
         </div>
 
@@ -196,23 +202,23 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
         <div className="pt-6 grid grid-cols-2 text-center text-xs text-slate-700">
           <div>
             <p>Mengetahui,</p>
-            <p className="font-bold text-slate-900 mt-1">Ketua RT 08 RW 05</p>
+            <p className="font-bold text-slate-900 mt-1">Ketua RT {rtStr} RW {rwStr}</p>
             <div className="h-14 flex items-center justify-center">
               <span className="text-slate-300 italic">(Tanda Tangan)</span>
             </div>
             <p className="font-bold border-t border-slate-300 inline-block px-8 pt-1">
-              Bapak Suwardi
+              {namaKetua}
             </p>
           </div>
 
           <div>
-            <p>Kotayasa, 2026</p>
-            <p className="font-bold text-slate-900 mt-1">Bendahara RT 08</p>
+            <p>{desaShort}, {tahunStr}</p>
+            <p className="font-bold text-slate-900 mt-1">Bendahara RT {rtStr}</p>
             <div className="h-14 flex items-center justify-center">
               <span className="text-slate-300 italic">(Tanda Tangan)</span>
             </div>
             <p className="font-bold border-t border-slate-300 inline-block px-8 pt-1">
-              Bapak Bambang S.
+              {namaBendahara}
             </p>
           </div>
         </div>

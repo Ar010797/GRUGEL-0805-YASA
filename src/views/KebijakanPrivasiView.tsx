@@ -1,11 +1,23 @@
 import React from 'react';
 import { ShieldCheck, Lock, EyeOff, Server, FileCheck, ArrowLeft, CheckCircle2, UserCheck, AlertTriangle, Clock } from 'lucide-react';
 
+import { PengaturanKas } from '../types';
+
 interface KebijakanPrivasiViewProps {
   onBack: () => void;
+  pengaturanKas?: PengaturanKas;
 }
 
-export const KebijakanPrivasiView: React.FC<KebijakanPrivasiViewProps> = ({ onBack }) => {
+export const KebijakanPrivasiView: React.FC<KebijakanPrivasiViewProps> = ({ onBack, pengaturanKas }) => {
+  const profilRT = pengaturanKas?.profilRT;
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const kecShort = (profilRT?.kecamatan || 'Kecamatan Sumbang').replace(/^Kecamatan\s+/i, 'Kec. ');
+  const kabShort = (profilRT?.kabupaten || 'Kabupaten Banyumas').replace(/^Kabupaten\s+/i, 'Kab. ');
+  const wilayahLabel = profilRT?.sebutanWilayah?.trim() || `RT ${rtStr} RW ${rwStr} ${desaStr}`;
+  const sekretariatLabel = profilRT?.alamatSekretariat?.trim() || `${wilayahLabel}, ${kecShort}, ${kabShort}`;
+  const ketuaNama = pengaturanKas?.kontakKetuaRT?.nama?.trim();
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
       {/* Header */}
@@ -19,7 +31,7 @@ export const KebijakanPrivasiView: React.FC<KebijakanPrivasiViewProps> = ({ onBa
         <div>
           <h1 className="text-xl font-extrabold text-slate-900">Kebijakan Privasi & Keamanan Data</h1>
           <p className="text-xs text-slate-500">
-            Aplikasi Kas Warga RT 08 RW 05 Desa Kotayasa &bull; Kepatuhan UU No. 27 Tahun 2022 (UU PDP)
+            Aplikasi Kas Warga {wilayahLabel} &bull; Kepatuhan UU No. 27 Tahun 2022 (UU PDP)
           </p>
         </div>
       </div>
@@ -38,7 +50,7 @@ export const KebijakanPrivasiView: React.FC<KebijakanPrivasiViewProps> = ({ onBa
           </div>
         </div>
         <p className="text-xs lg:text-sm text-emerald-100/90 leading-relaxed">
-          Pengurus RT 08 RW 05 Desa Kotayasa berkomitmen penuh menjaga kerahasiaan seluruh data kependudukan (Nomor Kartu Keluarga, NIK, dan catatan administrasi iuran warga). Seluruh pengelolaan data dijalankan sesuai dengan prinsip Undang-Undang Perlindungan Data Pribadi Republik Indonesia.
+          Pengurus {wilayahLabel}{ketuaNama ? ` (Ketua RT: ${ketuaNama})` : ''} berkomitmen penuh menjaga kerahasiaan seluruh data kependudukan (Nomor Kartu Keluarga, NIK, dan catatan administrasi iuran warga). Seluruh pengelolaan data dijalankan sesuai dengan prinsip Undang-Undang Perlindungan Data Pribadi Republik Indonesia.
         </p>
       </div>
 
@@ -104,7 +116,7 @@ export const KebijakanPrivasiView: React.FC<KebijakanPrivasiViewProps> = ({ onBa
       <div className="rounded-2xl bg-[#E8F5EE] p-5 border border-emerald-200/80 text-xs text-[#0B5D3F] space-y-2">
         <h4 className="font-bold">Pertanyaan Terkait Data Pribadi:</h4>
         <p className="leading-relaxed text-emerald-900">
-          Jika Anda memiliki pertanyaan terkait pembaruan data anggota keluarga, koreksi NIK/No KK, atau permohonan penghapusan akun, silakan hubungi Sekretariat RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas.
+          Jika Anda memiliki pertanyaan terkait pembaruan data anggota keluarga, koreksi NIK/No KK, atau permohonan penghapusan akun, silakan hubungi Sekretariat {sekretariatLabel}{ketuaNama ? ` (Pengurus RT: ${ketuaNama})` : ''}.
         </p>
       </div>
     </div>

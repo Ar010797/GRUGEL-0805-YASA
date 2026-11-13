@@ -1,18 +1,22 @@
 import React, { useState } from 'react';
 import { ArrowLeft, ArrowDown, Plus, Search, Receipt, Heart, AlertCircle } from 'lucide-react';
-import { Transaction } from '../types';
+import { Transaction, PengaturanKas } from '../types';
 
 interface KasKeluarViewProps {
   transactions: Transaction[];
+  pengaturanKas?: PengaturanKas;
   onOpenTxModal: () => void;
   onBack: () => void;
 }
 
 export const KasKeluarView: React.FC<KasKeluarViewProps> = ({
   transactions,
+  pengaturanKas,
   onOpenTxModal,
   onBack,
 }) => {
+  const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
+  const rwStr = pengaturanKas?.profilRT?.namaRW || '05';
   const [search, setSearch] = useState('');
   const keluarList = transactions.filter((t) => t.tipe === 'keluar');
   const totalKeluar = keluarList.reduce((acc, t) => acc + t.nominal, 0);
@@ -31,7 +35,7 @@ export const KasKeluarView: React.FC<KasKeluarViewProps> = ({
           </button>
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Kas Keluar</h1>
-            <p className="text-xs text-slate-500">Pencatatan pengeluaran kegiatan warga dan operasional RT 08 RW 05</p>
+            <p className="text-xs text-slate-500">Pencatatan pengeluaran kegiatan warga dan operasional RT {rtStr} RW {rwStr}</p>
           </div>
         </div>
 

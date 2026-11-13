@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, PhoneCall, MessageSquare, ShieldAlert, UserCheck, MapPin, Clock } from 'lucide-react';
+import { X, ShieldAlert, MessageSquare, MapPin } from 'lucide-react';
 import { PengaturanKas } from '../types';
 
 interface LupaPasswordModalProps {
@@ -8,6 +8,14 @@ interface LupaPasswordModalProps {
   pengaturanKas: PengaturanKas;
 }
 
+const formatWaNumber = (telp?: string, fallback = '6281234567890'): string => {
+  const digits = (telp || '').replace(/\D/g, '');
+  if (!digits) return fallback;
+  if (digits.startsWith('62')) return digits;
+  if (digits.startsWith('0')) return '62' + digits.slice(1);
+  return '62' + digits;
+};
+
 export const LupaPasswordModal: React.FC<LupaPasswordModalProps> = ({
   isOpen,
   onClose,
@@ -15,26 +23,34 @@ export const LupaPasswordModal: React.FC<LupaPasswordModalProps> = ({
 }) => {
   if (!isOpen) return null;
 
+  const profilRT = pengaturanKas.profilRT;
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const alamatSekretariat =
+    profilRT?.alamatSekretariat ||
+    `RT ${rtStr} RW ${rwStr} ${desaStr}, ${profilRT?.kecamatan || 'Kecamatan Sumbang'}, ${profilRT?.kabupaten || 'Kabupaten Banyumas'}`;
+
   const kontakList = [
     {
-      jabatan: 'Ketua RT 08 RW 05',
-      nama: pengaturanKas.kontakKetuaRT?.nama || 'Bpk. Suwardi',
+      jabatan: `Ketua RT ${rtStr} RW ${rwStr}`,
+      nama: pengaturanKas.kontakKetuaRT?.nama?.trim() || `Ketua RT ${rtStr}`,
       telp: pengaturanKas.kontakKetuaRT?.telp || '0812-3456-7890',
-      whatsapp: '6281234567890',
+      whatsapp: formatWaNumber(pengaturanKas.kontakKetuaRT?.telp, '6281234567890'),
       tugas: 'Verifikasi identitas warga & reset sandi / PIN',
     },
     {
-      jabatan: 'Bendahara RT 08',
-      nama: pengaturanKas.kontakBendahara?.nama || 'Bpk. Bambang S.',
+      jabatan: `Bendahara RT ${rtStr}`,
+      nama: pengaturanKas.kontakBendahara?.nama?.trim() || `Bendahara RT ${rtStr}`,
       telp: pengaturanKas.kontakBendahara?.telp || '0813-9876-5432',
-      whatsapp: '6281398765432',
+      whatsapp: formatWaNumber(pengaturanKas.kontakBendahara?.telp, '6281398765432'),
       tugas: 'Konfirmasi bukti pembayaran & status iuran kas',
     },
   ];
 
   const handleHubungiWA = (whatsapp: string, namaPengurus: string) => {
     const text = encodeURIComponent(
-      `Assalamu'alaikum ${namaPengurus}, saya warga RT 08 RW 05 Desa Kotayasa. Saya membutuhkan bantuan terkait informasi akun / lupa password / PIN di Aplikasi Kas RT.`
+      `Assalamu'alaikum ${namaPengurus}, saya warga RT ${rtStr} RW ${rwStr} ${desaStr}. Saya membutuhkan bantuan terkait informasi akun / lupa password / PIN di Aplikasi Kas RT.`
     );
     window.open(`https://api.whatsapp.com/send?phone=${whatsapp}&text=${text}`, '_blank');
   };
@@ -53,7 +69,7 @@ export const LupaPasswordModal: React.FC<LupaPasswordModalProps> = ({
                 Lupa Password & Bantuan Akun
               </h3>
               <p className="text-xs text-slate-500">
-                Hubungi Pengurus Resmi RT 08 RW 05 Desa Kotayasa
+                Hubungi Pengurus Resmi RT {rtStr} RW {rwStr} {desaStr}
               </p>
             </div>
           </div>
@@ -110,8 +126,8 @@ export const LupaPasswordModal: React.FC<LupaPasswordModalProps> = ({
           <div className="mt-4 pt-3 border-t border-slate-100 flex items-start gap-2.5 text-xs text-slate-500">
             <MapPin size={16} className="text-[#0B5D3F] shrink-0 mt-0.5" />
             <div>
-              <p className="font-semibold text-slate-700">Posko Sekretariat RT 08 RW 05:</p>
-              <p className="text-[11px]">Pos Kamling RT 08, Dusun Kotayasa, Kec. Sumbang, Kab. Banyumas</p>
+              <p className="font-semibold text-slate-700">Posko Sekretariat RT {rtStr} RW {rwStr}:</p>
+              <p className="text-[11px]">{alamatSekretariat}</p>
             </div>
           </div>
         </div>

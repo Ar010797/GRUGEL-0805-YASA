@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ArrowLeft,
   Settings,
@@ -92,6 +92,36 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
   const [telpKetuaRT, setTelpKetuaRT] = useState(pengaturanKas.kontakKetuaRT?.telp || '0812-3456-7890');
   const [namaBendahara, setNamaBendahara] = useState(pengaturanKas.kontakBendahara?.nama || 'Bpk. Bambang S.');
   const [telpBendahara, setTelpBendahara] = useState(pengaturanKas.kontakBendahara?.telp || '0813-9876-5432');
+
+  // Sync local form state when pengaturanKas changes from server / Firestore / other tabs
+  useEffect(() => {
+    setJimpitanTahunan((pengaturanKas.nominalJimpitanTahunan || 300000).toString());
+    setKematianTahunan((pengaturanKas.nominalKematianTahunan || 120000).toString());
+    if (pengaturanKas.profilRT) {
+      setNamaRT(pengaturanKas.profilRT.namaRT || '08');
+      setNamaRW(pengaturanKas.profilRT.namaRW || '05');
+      setDesa(pengaturanKas.profilRT.desa || 'Desa Kotayasa');
+      setKecamatan(pengaturanKas.profilRT.kecamatan || 'Kecamatan Sumbang');
+      setKabupaten(pengaturanKas.profilRT.kabupaten || 'Kabupaten Banyumas');
+      setKodePos(pengaturanKas.profilRT.kodePos || '53183');
+      setAlamatSekretariat(
+        pengaturanKas.profilRT.alamatSekretariat ||
+          `RT ${pengaturanKas.profilRT.namaRT || '08'} RW ${pengaturanKas.profilRT.namaRW || '05'} ${pengaturanKas.profilRT.desa || 'Desa Kotayasa'}, ${pengaturanKas.profilRT.kecamatan || 'Kecamatan Sumbang'}, ${pengaturanKas.profilRT.kabupaten || 'Kabupaten Banyumas'} ${pengaturanKas.profilRT.kodePos || '53183'}`
+      );
+      setJudulKopSurat(
+        pengaturanKas.profilRT.judulKopSurat ||
+          `PENGURUS RUKUN TETANGGA ${pengaturanKas.profilRT.namaRT || '08'} RUKUN WARGA ${pengaturanKas.profilRT.namaRW || '05'}`
+      );
+    }
+    if (pengaturanKas.kontakKetuaRT) {
+      setNamaKetuaRT(pengaturanKas.kontakKetuaRT.nama || '');
+      setTelpKetuaRT(pengaturanKas.kontakKetuaRT.telp || '');
+    }
+    if (pengaturanKas.kontakBendahara) {
+      setNamaBendahara(pengaturanKas.kontakBendahara.nama || '');
+      setTelpBendahara(pengaturanKas.kontakBendahara.telp || '');
+    }
+  }, [pengaturanKas]);
 
   // Change PIN state
   const [pinLama, setPinLama] = useState('');
@@ -209,7 +239,7 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
                 </div>
               </div>
               <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-2.5 py-1 rounded-full">
-                Warga RT 08
+                Warga RT {namaRT}
               </span>
             </div>
 
@@ -347,7 +377,7 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
               onClick={onOpenPrivacyPolicy}
               className="w-full rounded-2xl border border-emerald-600 bg-[#E8F5EE] py-3 text-xs font-bold text-[#0B5D3F] hover:bg-emerald-100/70 transition-colors cursor-pointer"
             >
-              Baca Kebijakan Privasi RT 08 RW 05
+              Baca Kebijakan Privasi RT {namaRT} RW {namaRW}
             </button>
           </div>
         </div>
@@ -470,10 +500,41 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
               />
             </div>
 
+            {/* Susunan Pengurus RT (Otomatis sinkron ke seluruh Surat, Pemberitahuan, WA, Cetak & PDF) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100">
+              <div>
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">
+                  Nama Ketua RT {namaRT} (Penandatangan Surat, Cetak & Laporan)
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={namaKetuaRT}
+                  onChange={(e) => setNamaKetuaRT(e.target.value)}
+                  placeholder="Nama Lengkap Ketua RT"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800 bg-slate-50 focus:bg-white focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">
+                  Nama Bendahara RT {namaRT} (Penandatangan Laporan & PDF)
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={namaBendahara}
+                  onChange={(e) => setNamaBendahara(e.target.value)}
+                  placeholder="Nama Lengkap Bendahara RT"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800 bg-slate-50 focus:bg-white focus:border-[#0B5D3F] outline-hidden"
+                />
+              </div>
+            </div>
+
             {/* Live Pratinjau Kop Surat Resmi */}
             <div className="rounded-2xl bg-emerald-50/70 p-4 border border-emerald-200 text-center space-y-1">
               <span className="text-[9px] font-black uppercase tracking-wider text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-md inline-block mb-1">
-                Pratinjau Kop Surat Resmi Terkini
+                Pratinjau Kop Surat &amp; Penandatangan Terkini
               </span>
               <p className="text-[10px] font-bold uppercase tracking-wider text-slate-700">
                 PEMERINTAH {kabupaten.toUpperCase()} &bull; {kecamatan.toUpperCase()}
@@ -486,6 +547,9 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
               </p>
               <div className="h-[1.5px] bg-[#0B5D3F] mt-1.5 w-full" />
               <div className="h-[0.5px] bg-[#0B5D3F] mt-[1.5px] w-full" />
+              <p className="text-[10px] font-semibold text-emerald-900 pt-1.5">
+                Ketua RT {namaRT}: <strong>{namaKetuaRT || '-'}</strong> &bull; Bendahara RT {namaRT}: <strong>{namaBendahara || '-'}</strong>
+              </p>
             </div>
 
             <button
@@ -494,7 +558,7 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
               className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#0B5D3F] py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#084831] cursor-pointer"
             >
               <Save size={15} />
-              <span>Simpan Profil RT & Format Kop Surat</span>
+              <span>Simpan Profil RT, Pengurus &amp; Format Kop Surat</span>
             </button>
           </div>
 
@@ -598,7 +662,7 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="text-[11px] text-slate-600 font-semibold block mb-0.5">Ketua RT 08</label>
+                    <label className="text-[11px] text-slate-600 font-semibold block mb-0.5">Ketua RT {namaRT}</label>
                     <input
                       type="text"
                       value={namaKetuaRT}
@@ -615,7 +679,7 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
                   </div>
 
                   <div>
-                    <label className="text-[11px] text-slate-600 font-semibold block mb-0.5">Bendahara RT 08</label>
+                    <label className="text-[11px] text-slate-600 font-semibold block mb-0.5">Bendahara RT {namaRT}</label>
                     <input
                       type="text"
                       value={namaBendahara}
@@ -791,7 +855,7 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
               </h3>
 
               <p className="text-xs text-slate-500 leading-relaxed">
-                Pelajari standar keamanan data pribadi warga RT 08 RW 05 Desa Kotayasa sesuai UU No. 27 Tahun 2022 (UU PDP).
+                Pelajari standar keamanan data pribadi warga RT {namaRT} RW {namaRW} {desa} sesuai UU No. 27 Tahun 2022 (UU PDP).
               </p>
 
               <button

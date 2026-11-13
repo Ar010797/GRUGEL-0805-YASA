@@ -1,7 +1,36 @@
-import { PengumumanRT } from '../types';
+import { PengumumanRT, PengaturanKas } from '../types';
 
-export const formatPengumumanWhatsApp = (p: PengumumanRT): string => {
-  return `📢 *PENGUMUMAN RESMI RT 08 RW 05 DESA KOTAYASA* 📢
+export const formatPengumumanWhatsApp = (
+  p: PengumumanRT,
+  pengaturanKas?: PengaturanKas
+): string => {
+  const profilRT = pengaturanKas?.profilRT;
+  const rtStr = profilRT?.namaRT || '08';
+  const rwStr = profilRT?.namaRW || '05';
+  const desaStr = profilRT?.desa || 'Desa Kotayasa';
+  const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
+  const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
+
+  const namaKetua = pengaturanKas?.kontakKetuaRT?.nama?.trim() || '';
+  const namaBendahara = pengaturanKas?.kontakBendahara?.nama?.trim() || '';
+  const jabatanTtd = p.jabatanPengurus?.trim() || `Ketua RT ${rtStr}`;
+
+  let resolvedNama = p.namaPengurus?.trim() || '';
+  const isLegacyPlaceholder =
+    !resolvedNama || resolvedNama === 'Bpk. Suwardi' || resolvedNama === 'Bapak Suwardi';
+  if (isLegacyPlaceholder) {
+    if (jabatanTtd.toLowerCase().includes('bendahara') && namaBendahara) {
+      resolvedNama = namaBendahara;
+    } else if (namaKetua) {
+      resolvedNama = namaKetua;
+    }
+  }
+
+  const tertanda = resolvedNama
+    ? `${jabatanTtd} (${resolvedNama})`
+    : p.penulis || `Pengurus RT ${rtStr} RW ${rwStr}`;
+
+  return `📢 *PENGUMUMAN RESMI RT ${rtStr} RW ${rwStr} ${desaStr.toUpperCase()}* 📢
 -----------------------------------------------
 📌 *Perihal:* ${p.judul.toUpperCase()}
 📅 *Tanggal:* ${p.tanggal}
@@ -11,21 +40,27 @@ export const formatPengumumanWhatsApp = (p: PengumumanRT): string => {
 ${p.isi}
 
 -----------------------------------------------
-Demikian pemberitahuan ini kami sampaikan. Atas perhatian dan kerja sama warga RT 08 RW 05, kami ucapkan terima kasih.
+Demikian pemberitahuan ini kami sampaikan. Atas perhatian dan kerja sama warga RT ${rtStr} RW ${rwStr}, kami ucapkan terima kasih.
 
 Tertanda,
-*${p.penulis || 'Pengurus RT 08 RW 05'}*
-_Desa Kotayasa, Kec. Sumbang, Kab. Banyumas_`;
+*${tertanda}*
+_${desaStr}, ${kecStr}, ${kabStr}_`;
 };
 
-export const kirimWhatsAppPengumuman = (p: PengumumanRT) => {
-  const text = formatPengumumanWhatsApp(p);
+export const kirimWhatsAppPengumuman = (
+  p: PengumumanRT,
+  pengaturanKas?: PengaturanKas
+) => {
+  const text = formatPengumumanWhatsApp(p, pengaturanKas);
   const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
   window.open(url, '_blank', 'noopener,noreferrer');
 };
 
-export const salinTeksPengumuman = async (p: PengumumanRT): Promise<boolean> => {
-  const text = formatPengumumanWhatsApp(p);
+export const salinTeksPengumuman = async (
+  p: PengumumanRT,
+  pengaturanKas?: PengaturanKas
+): Promise<boolean> => {
+  const text = formatPengumumanWhatsApp(p, pengaturanKas);
   try {
     await navigator.clipboard.writeText(text);
     return true;

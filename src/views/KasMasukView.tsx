@@ -1,18 +1,21 @@
 import React, { useState } from 'react';
 import { ArrowLeft, ArrowUp, Calendar, Plus, Search, Receipt } from 'lucide-react';
-import { Transaction } from '../types';
+import { Transaction, PengaturanKas } from '../types';
 
 interface KasMasukViewProps {
   transactions: Transaction[];
+  pengaturanKas?: PengaturanKas;
   onOpenTxModal: () => void;
   onBack: () => void;
 }
 
 export const KasMasukView: React.FC<KasMasukViewProps> = ({
   transactions,
+  pengaturanKas,
   onOpenTxModal,
   onBack,
 }) => {
+  const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
   const [search, setSearch] = useState('');
   const [selectedMonth, setSelectedMonth] = useState('Oktober 2026');
 
@@ -145,7 +148,7 @@ export const KasMasukView: React.FC<KasMasukViewProps> = ({
                   {filtered.map((t) => (
                     <tr key={t.id} className="hover:bg-slate-50 transition-colors">
                       <td className="py-3.5 px-4 sm:px-6 text-slate-500 whitespace-nowrap">{t.tanggal}</td>
-                      <td className="py-3.5 px-4 sm:px-6 font-bold text-slate-800">{t.namaWarga || 'Warga RT 08'}</td>
+                      <td className="py-3.5 px-4 sm:px-6 font-bold text-slate-800">{t.namaWarga || `Warga RT ${rtStr}`}</td>
                       <td className="py-3.5 px-4 sm:px-6">
                         <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-200 whitespace-nowrap">
                           {t.kategori}

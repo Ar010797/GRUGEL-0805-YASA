@@ -211,7 +211,7 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-black text-slate-900">Pusat Kontrol Server Desa</h1>
               <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[10px] font-extrabold text-[#0B5D3F] border border-emerald-300">
-                Super Admin Desa Kotayasa
+                Super Admin {pengaturanKas?.profilRT?.desa || 'Desa Kotayasa'}
               </span>
             </div>
             <p className="text-xs text-slate-500">
@@ -480,7 +480,7 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
             <div>
               <h3 className="text-sm font-bold text-slate-900">Arsip Laporan & Pembaruan Bulanan RT</h3>
               <p className="text-xs text-slate-500">
-                Data resmi yang dikirimkan setiap bulan oleh Admin RT ke Server Desa Kotayasa
+                Data resmi yang dikirimkan setiap bulan oleh Admin RT ke Server {pengaturanKas?.profilRT?.desa || 'Desa Kotayasa'}
               </p>
             </div>
             <span className="text-xs font-bold text-[#0B5D3F] bg-emerald-50 px-3 py-1 rounded-full border border-emerald-200">
@@ -777,7 +777,7 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                   required
                   value={formNama}
                   onChange={(e) => setFormNama(e.target.value)}
-                  placeholder="Contoh: Bpk. Suwardi"
+                  placeholder="Nama lengkap pengurus RT"
                   className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800"
                 />
               </div>
@@ -814,7 +814,7 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                       required
                       value={formPassword}
                       onChange={(e) => setFormPassword(e.target.value)}
-                      placeholder={`rt${formRT}rw05`}
+                      placeholder={`rt${formRT}rw${formRW || '05'}`}
                       className="w-full rounded-xl border border-slate-200 pl-3 pr-9 py-2 text-xs font-mono text-slate-800"
                     />
                     <button

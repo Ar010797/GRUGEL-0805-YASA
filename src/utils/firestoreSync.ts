@@ -239,10 +239,13 @@ export function subscribeFirestoreCollections(
     )
   );
 
-  // 3. Transactions
+  // 3. Transactions (Admin gets all; non-admin scoped to ownerUid)
+  const txRef = isAdmin
+    ? collection(db, 'transactions')
+    : query(collection(db, 'transactions'), where('ownerUid', '==', user.uid));
   unsubs.push(
     onSnapshot(
-      collection(db, 'transactions'),
+      txRef,
       (snap) => {
         const metas = new Map<string, KnownDocMeta>();
         const list: Transaction[] = snap.docs.map((docSnap) => {
@@ -272,10 +275,13 @@ export function subscribeFirestoreCollections(
     )
   );
 
-  // 4. Pengumuman
+  // 4. Pengumuman (Admin gets all; non-admin scoped to ownerUid)
+  const pengumumanRef = isAdmin
+    ? collection(db, 'pengumuman')
+    : query(collection(db, 'pengumuman'), where('ownerUid', '==', user.uid));
   unsubs.push(
     onSnapshot(
-      collection(db, 'pengumuman'),
+      pengumumanRef,
       (snap) => {
         const metas = new Map<string, KnownDocMeta>();
         const list: PengumumanRT[] = snap.docs.map((docSnap) => {

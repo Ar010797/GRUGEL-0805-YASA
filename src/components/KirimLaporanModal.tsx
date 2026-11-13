@@ -14,6 +14,8 @@ interface KirimLaporanModalProps {
   saldoKasUmum: number;
   saldoKasKematian: number;
   tahunAktif: number;
+  rw?: string;
+  desa?: string;
 }
 
 export const KirimLaporanModal: React.FC<KirimLaporanModalProps> = ({
@@ -28,7 +30,11 @@ export const KirimLaporanModal: React.FC<KirimLaporanModalProps> = ({
   saldoKasUmum,
   saldoKasKematian,
   tahunAktif,
+  rw,
+  desa,
 }) => {
+  const rwNumber = rw?.trim() || rtScope.match(/RW\s*(\d+)/i)?.[1] || '05';
+  const desaStr = desa?.trim() || 'Desa Kotayasa';
   const [catatan, setCatatan] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
@@ -76,7 +82,7 @@ export const KirimLaporanModal: React.FC<KirimLaporanModalProps> = ({
     const laporan: PembaruanBulananRT = {
       id: 'lap_' + Date.now(),
       rt: rtNumber,
-      rw: '05',
+      rw: rwNumber,
       namaAdminPengirim: adminName || `Admin RT ${rtNumber}`,
       tanggalKirim: new Date().toISOString(),
       bulanTahun: bulanTahun,
@@ -142,7 +148,7 @@ export const KirimLaporanModal: React.FC<KirimLaporanModalProps> = ({
                 Laporan Berhasil Terkirim ke Server Desa!
               </h3>
               <p className="text-xs text-slate-500 max-w-md mx-auto">
-                Pembaruan data RT Anda untuk periode <strong>{bulanTahun}</strong> telah masuk ke antrean Server Pusat Desa Kotayasa dan tersimpan permanen.
+                Pembaruan data RT Anda untuk periode <strong>{bulanTahun}</strong> telah masuk ke antrean Server Pusat {desaStr} dan tersimpan permanen.
               </p>
             </div>
           ) : (
@@ -152,7 +158,7 @@ export const KirimLaporanModal: React.FC<KirimLaporanModalProps> = ({
                 <div>
                   <p className="font-bold">Alur Pengiriman Data Terpadu:</p>
                   <p className="text-emerald-800 text-[11px] mt-0.5">
-                    Data rekap dari <strong>{rtScope}</strong> akan otomatis dikompilasi ke dashboard Server Pusat Desa Kotayasa untuk pengawasan dana kas dan monitoring bansos desa.
+                    Data rekap dari <strong>{rtScope}</strong> akan otomatis dikompilasi ke dashboard Server Pusat {desaStr} untuk pengawasan dana kas dan monitoring bansos desa.
                   </p>
                 </div>
               </div>
