@@ -17,8 +17,9 @@ const DATA_FILE = path.join(__dirname, 'data_store.json');
 app.use(express.json({ limit: '25mb' }));
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('Access-Control-Expose-Headers', 'Content-Disposition, Content-Type, Content-Length');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
@@ -301,10 +302,7 @@ app.get(['/api/template-excel', '/api/template-excel/:filename'], (req, res) => 
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     );
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(safeFilename)}`
-    );
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Content-Length', String(xlsxBuffer.length));

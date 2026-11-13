@@ -21,8 +21,7 @@ import {
 import { Warga, AnggotaKeluarga, BantuanPemerintah, ProfilRT } from '../types';
 import { cleanIndonesianName, cleanNIK } from '../utils/wargaHelpers';
 import {
-  getTemplateExcelDownloadUrl,
-  getTemplateExcelFilename,
+  downloadTemplateExcelWargaBansos,
   parseExcelWargaAndBantuan,
   ExcelImportResult,
 } from '../utils/excelWargaImport';
@@ -291,18 +290,20 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                   Isi semua warga & anggota keluarga dengan <strong>No KK yang sama</strong> untuk pengelompokan otomatis. Kolom <strong>Jenis Bantuan</strong> sudah tersedia agar data bansos langsung masuk sekali import.
                 </p>
               </div>
-              <a
-                href={getTemplateExcelDownloadUrl({
-                  rt: profilRT?.namaRT || '08',
-                  rw: profilRT?.namaRW || '05',
-                  desa: profilRT?.desa || 'Desa Kotayasa',
-                })}
-                download={getTemplateExcelFilename()}
+              <button
+                type="button"
+                onClick={() =>
+                  downloadTemplateExcelWargaBansos({
+                    rt: profilRT?.namaRT || '08',
+                    rw: profilRT?.namaRW || '05',
+                    desa: profilRT?.desa || 'Desa Kotayasa',
+                  })
+                }
                 className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"
               >
                 <Download size={15} />
                 <span>Download Template Excel (.xlsx)</span>
-              </a>
+              </button>
             </div>
 
             {/* Step 2: Upload File Excel */}

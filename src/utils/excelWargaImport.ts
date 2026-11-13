@@ -20,16 +20,61 @@ export interface ExcelImportResult {
 }
 
 /**
- * Triggers download of the official Excel (.xlsx) template from the server HTTP endpoint
- * with proper MIME type (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet)
- * so Android WebView, Mobile browsers, and Desktop browsers all save a genuine .xlsx file.
+ * Builds an absolute HTTPS URL for the official Excel (.xlsx) template endpoint.
+ */
+export function getAbsoluteTemplateExcelUrl(profilRT?: TemplateProfilRT): string {
+  const relativeUrl = getTemplateExcelDownloadUrl(profilRT);
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return new URL(relativeUrl, window.location.origin).toString();
+  }
+  return relativeUrl;
+}
+
+/**
+ * Triggers download of the official Excel (.xlsx) template:
+ * 1. In Median / GoNative Android & iOS apps: calls median.share.downloadFile / gonative.share.downloadFile
+ *    with the public HTTPS .xlsx URL and open: true, or falls back to direct WebView location navigation
+ *    (which triggers Android DownloadListener via Content-Disposition: attachment without <a download> quirks).
+ * 2. In standard Desktop & Mobile browsers: triggers native .xlsx download via HTTP attachment URL.
  */
 export function downloadTemplateExcelWargaBansos(profilRT?: TemplateProfilRT) {
   const filename = getTemplateExcelFilename();
-  const url = getTemplateExcelDownloadUrl(profilRT);
+  const fullUrl = getAbsoluteTemplateExcelUrl(profilRT);
+  const w = window as any;
+  const ua = (typeof navigator !== 'undefined' ? navigator.userAgent : '').toLowerCase();
+
+  const medianBridgeDownload =
+    w?.median?.share?.downloadFile || w?.gonative?.share?.downloadFile;
+
+  if (typeof medianBridgeDownload === 'function') {
+    try {
+      medianBridgeDownload({
+        url: fullUrl,
+        open: true,
+      });
+      return;
+    } catch {
+      // Fall back to direct WebView navigation below
+    }
+  }
+
+  const isMedianOrAndroidWebView =
+    ua.includes('median') ||
+    ua.includes('gonative') ||
+    ua.includes('; wv)') ||
+    ua.includes('android') ||
+    Boolean(w?.median) ||
+    Boolean(w?.gonative);
+
+  if (isMedianOrAndroidWebView) {
+    // Do NOT use <a download> inside Android / Median WebView; direct navigation cleanly
+    // triggers WebView DownloadListener -> Android DownloadManager via Content-Disposition: attachment.
+    window.location.assign(fullUrl);
+    return;
+  }
 
   const link = document.createElement('a');
-  link.href = url;
+  link.href = fullUrl;
   link.setAttribute('download', filename);
   link.style.display = 'none';
   document.body.appendChild(link);

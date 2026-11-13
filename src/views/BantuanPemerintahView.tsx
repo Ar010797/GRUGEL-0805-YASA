@@ -17,10 +17,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { BantuanPemerintah, Warga } from '../types';
-import {
-  getTemplateExcelDownloadUrl,
-  getTemplateExcelFilename,
-} from '../utils/excelWargaImport';
+import { downloadTemplateExcelWargaBansos } from '../utils/excelWargaImport';
 
 interface BantuanPemerintahViewProps {
   bantuanList: BantuanPemerintah[];
@@ -161,15 +158,15 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
-          <a
-            href={getTemplateExcelDownloadUrl()}
-            download={getTemplateExcelFilename()}
-            className="flex items-center gap-1.5 rounded-2xl border border-emerald-300 bg-emerald-50 px-3.5 py-2.5 text-xs font-bold text-[#0B5D3F] shadow-xs hover:bg-emerald-100 transition-all cursor-pointer"
+          <button
+            type="button"
+            onClick={() => downloadTemplateExcelWargaBansos()}
+            className="flex items-center gap-1.5 rounded-2xl border border-emerald-300 bg-emerald-50 px-3.5 py-2.5 text-xs font-bold text-[#0B5D3F] shadow-xs hover:bg-emerald-100 active:scale-95 transition-all cursor-pointer"
             title="Download Template Excel (.xlsx) berisi kolom Data Warga & Penerimaan Bantuan"
           >
             <Download size={15} />
             <span>Template Excel (.xlsx)</span>
-          </a>
+          </button>
 
           {onOpenImportExcel && (
             <button
