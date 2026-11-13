@@ -3,6 +3,8 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import * as XLSX from 'xlsx';
+import { buildTemplateExcelWorkbook, getTemplateExcelFilename } from './src/utils/excelTemplateBuilder.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -275,6 +277,46 @@ app.post('/api/sync-monthly', (req, res) => {
     message: `Laporan bulanan ${report.rt || 'RT'} berhasil diterima server desa`,
     timestamp: new Date().toISOString(),
   });
+});
+
+// GET Template Excel (.xlsx) resmi dengan header MIME Excel asli (aman untuk Android WebView, Mobile & Desktop)
+app.get(['/api/template-excel', '/api/template-excel/:filename'], (req, res) => {
+  try {
+    const rt = typeof req.query.rt === 'string' ? req.query.rt : undefined;
+    const rw = typeof req.query.rw === 'string' ? req.query.rw : undefined;
+    const desa = typeof req.query.desa === 'string' ? req.query.desa : undefined;
+
+    const wb = buildTemplateExcelWorkbook({ rt, rw, desa });
+    const rawBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const xlsxBuffer = Buffer.isBuffer(rawBuffer) ? rawBuffer : Buffer.from(rawBuffer);
+
+    const requestedName = typeof req.params.filename === 'string' ? req.params.filename : '';
+    const sanitizedBase = requestedName.replace(/[^a-zA-Z0-9._-]/g, '');
+    const safeFilename =
+      sanitizedBase && sanitizedBase.toLowerCase().endsWith('.xlsx')
+        ? sanitizedBase
+        : getTemplateExcelFilename();
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(safeFilename)}`
+    );
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Length', String(xlsxBuffer.length));
+
+    return res.status(200).send(xlsxBuffer);
+  } catch (err: any) {
+    console.error('Error generating Excel template:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal membuat file template Excel (.xlsx)',
+    });
+  }
 });
 
 // Start Full-Stack Server

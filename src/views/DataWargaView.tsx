@@ -26,7 +26,10 @@ import {
 } from 'lucide-react';
 import { Warga, BantuanPemerintah, ProfilRT } from '../types';
 import { exportDataWargaPerKK_PDF, exportSingleKK_PDF, exportKartuKeluargaPemerintah_PDF } from '../utils/pdfExport';
-import { downloadTemplateExcelWargaBansos } from '../utils/excelWargaImport';
+import {
+  getTemplateExcelDownloadUrl,
+  getTemplateExcelFilename,
+} from '../utils/excelWargaImport';
 import { ConfirmationModal } from '../components/ConfirmationModal';
 
 interface DataWargaViewProps {
@@ -139,20 +142,19 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
           )}
 
           {/* Template Excel Warga & Bansos */}
-          <button
-            onClick={() =>
-              downloadTemplateExcelWargaBansos({
-                rt: profilRT?.namaRT || '08',
-                rw: profilRT?.namaRW || '05',
-                desa: profilRT?.desa || 'Desa Kotayasa',
-              })
-            }
+          <a
+            href={getTemplateExcelDownloadUrl({
+              rt: profilRT?.namaRT || '08',
+              rw: profilRT?.namaRW || '05',
+              desa: profilRT?.desa || 'Desa Kotayasa',
+            })}
+            download={getTemplateExcelFilename()}
             className="flex items-center gap-2 rounded-xl border border-emerald-300 bg-emerald-50 px-3.5 py-2.5 text-xs font-bold text-[#0B5D3F] shadow-xs hover:bg-emerald-100 transition-all cursor-pointer"
-            title="Download Template Excel untuk pengelompokan otomatis anggota keluarga & penerimaan bantuan"
+            title="Download Template Excel (.xlsx) untuk pengelompokan otomatis anggota keluarga & penerimaan bantuan"
           >
             <Download size={14} />
-            <span>Template Excel</span>
-          </button>
+            <span>Template Excel (.xlsx)</span>
+          </a>
 
           {/* Import Excel / Tambah Warga */}
           <button
@@ -257,19 +259,18 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                 : 'Database kependudukan RT 08 RW 05 saat ini masih kosong (0 KK). Anda dapat langsung mengimport seluruh warga, anggota keluarga, dan bantuan lewat file Excel.'}
             </p>
             <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-              <button
-                onClick={() =>
-                  downloadTemplateExcelWargaBansos({
-                    rt: profilRT?.namaRT || '08',
-                    rw: profilRT?.namaRW || '05',
-                    desa: profilRT?.desa || 'Desa Kotayasa',
-                  })
-                }
+              <a
+                href={getTemplateExcelDownloadUrl({
+                  rt: profilRT?.namaRT || '08',
+                  rw: profilRT?.namaRW || '05',
+                  desa: profilRT?.desa || 'Desa Kotayasa',
+                })}
+                download={getTemplateExcelFilename()}
                 className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-xs font-bold text-[#0B5D3F] hover:bg-emerald-100 transition-all cursor-pointer"
               >
                 <Download size={14} />
-                <span>Download Template Excel</span>
-              </button>
+                <span>Download Template Excel (.xlsx)</span>
+              </a>
               <button
                 onClick={onOpenWargaModal}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#084831] transition-all cursor-pointer"
