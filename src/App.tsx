@@ -35,6 +35,8 @@ import {
   CloudCheck,
   Database,
   Building,
+  FileSpreadsheet,
+  Share2,
 } from 'lucide-react';
 
 import { HouseLogo } from './components/HouseLogo';
@@ -70,6 +72,12 @@ import {
   deleteWargaFromServer,
   AppDatabaseSchema,
 } from './utils/cloudSync';
+import {
+  EXCEL_DOWNLOAD_EVENT,
+  ExcelDownloadNotificationDetail,
+  shareOrSaveExcelFile,
+  triggerServerExcelDownload,
+} from './utils/excelWargaImport';
 
 // Views
 import { BerandaView } from './views/BerandaView';
@@ -131,6 +139,28 @@ export default function App() {
   const [upgradeTargetWarga, setUpgradeTargetWarga] = useState<Warga | null>(null);
   const [isPengumumanModalOpen, setIsPengumumanModalOpen] = useState<boolean>(false);
   const [isSaldoAwalModalOpen, setIsSaldoAwalModalOpen] = useState<boolean>(false);
+
+  // Global Excel Download Notification Toast
+  const [excelDownloadNotice, setExcelDownloadNotice] =
+    useState<ExcelDownloadNotificationDetail | null>(null);
+
+  useEffect(() => {
+    let hideTimer: ReturnType<typeof setTimeout> | null = null;
+    const handleExcelNotify = (e: Event) => {
+      const customEvent = e as CustomEvent<ExcelDownloadNotificationDetail>;
+      if (!customEvent?.detail) return;
+      setExcelDownloadNotice(customEvent.detail);
+      if (hideTimer) clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => {
+        setExcelDownloadNotice(null);
+      }, 15000);
+    };
+    window.addEventListener(EXCEL_DOWNLOAD_EVENT, handleExcelNotify);
+    return () => {
+      window.removeEventListener(EXCEL_DOWNLOAD_EVENT, handleExcelNotify);
+      if (hideTimer) clearTimeout(hideTimer);
+    };
+  }, []);
 
   // System Configuration (Jimpitan Tahunan -> Auto Bulanan, Kas Kematian, Kontak RT)
   const [pengaturanKas, setPengaturanKas] = useState<PengaturanKas>({
@@ -1675,6 +1705,76 @@ export default function App() {
           onApplyUpgrade={handleApplyUpgradeKK}
         />
       )}
+
+      {/* Global Notifikasi Download Template Excel (.xlsx) */}
+      <AnimatePresence>
+        {excelDownloadNotice && (
+          <motion.div
+            initial={{ opacity: 0, y: 24, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 16, scale: 0.96 }}
+            transition={{ duration: 0.2 }}
+            className="fixed bottom-4 left-3 right-3 sm:left-auto sm:right-6 sm:w-[420px] z-[120] pointer-events-auto"
+          >
+            <div className="relative overflow-hidden rounded-2xl bg-white p-4 shadow-2xl border-2 border-emerald-500 ring-4 ring-emerald-400/20">
+              <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-[#0B5D3F] via-emerald-500 to-teal-400" />
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-[#0B5D3F]">
+                  <FileSpreadsheet size={20} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1 text-[11px] font-extrabold text-[#0B5D3F]">
+                      <CheckCircle2 size={13} />
+                      Template Excel (.xlsx) Berhasil Diunduh
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setExcelDownloadNotice(null)}
+                      className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 cursor-pointer"
+                      aria-label="Tutup notifikasi download"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                  <p className="mt-1 text-xs font-bold text-slate-900 truncate">
+                    {excelDownloadNotice.filename}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-slate-600 leading-relaxed">
+                    Ukuran {Math.max(1, Math.round(excelDownloadNotice.sizeBytes / 1024))} KB • Tersimpan otomatis di folder{' '}
+                    <strong>Download / Unduhan</strong> perangkat Anda ({excelDownloadNotice.timestamp}).
+                  </p>
+                  <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        shareOrSaveExcelFile(
+                          excelDownloadNotice.blob,
+                          excelDownloadNotice.filename
+                        )
+                      }
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B5D3F] px-3 py-1.5 text-[11px] font-bold text-white hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"
+                    >
+                      <Share2 size={12} />
+                      <span>Simpan / Bagikan (.xlsx)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        triggerServerExcelDownload(excelDownloadNotice.serverUrl)
+                      }
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-[11px] font-bold text-[#0B5D3F] hover:bg-emerald-100 active:scale-95 transition-all cursor-pointer"
+                    >
+                      <Download size={12} />
+                      <span>Unduh Ulang (.xlsx)</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

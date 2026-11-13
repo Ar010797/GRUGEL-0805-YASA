@@ -2,12 +2,33 @@ import * as XLSX from 'xlsx';
 import { AnggotaKeluarga, BantuanPemerintah, Warga } from '../types';
 import { cleanIndonesianName, cleanNIK, inferGenderFromNIK } from './wargaHelpers';
 import {
+  buildTemplateExcelWorkbook,
+  getCleanTemplateExcelDownloadUrl,
   getTemplateExcelDownloadUrl,
   getTemplateExcelFilename,
   type TemplateProfilRT,
 } from './excelTemplateBuilder.ts';
+import { playNotificationSound } from './audioNotification';
 
-export { getTemplateExcelDownloadUrl, getTemplateExcelFilename };
+export {
+  getCleanTemplateExcelDownloadUrl,
+  getTemplateExcelDownloadUrl,
+  getTemplateExcelFilename,
+};
+
+export const EXCEL_MIME_TYPE =
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+export const EXCEL_DOWNLOAD_EVENT = 'rt-excel-download-notify';
+
+export interface ExcelDownloadNotificationDetail {
+  id: string;
+  filename: string;
+  sizeBytes: number;
+  blob: Blob;
+  serverUrl: string;
+  timestamp: string;
+}
 
 export interface ExcelImportResult {
   wargaList: Omit<Warga, 'id' | 'no'>[];
@@ -20,10 +41,10 @@ export interface ExcelImportResult {
 }
 
 /**
- * Builds an absolute HTTPS URL for the official Excel (.xlsx) template endpoint.
+ * Builds an absolute HTTPS URL for the clean query-free .xlsx template endpoint.
  */
 export function getAbsoluteTemplateExcelUrl(profilRT?: TemplateProfilRT): string {
-  const relativeUrl = getTemplateExcelDownloadUrl(profilRT);
+  const relativeUrl = getCleanTemplateExcelDownloadUrl(profilRT);
   if (typeof window !== 'undefined' && window.location?.origin) {
     return new URL(relativeUrl, window.location.origin).toString();
   }
@@ -31,57 +52,179 @@ export function getAbsoluteTemplateExcelUrl(profilRT?: TemplateProfilRT): string
 }
 
 /**
- * Triggers download of the official Excel (.xlsx) template:
- * 1. In Median / GoNative Android & iOS apps: calls median.share.downloadFile / gonative.share.downloadFile
- *    with the public HTTPS .xlsx URL and open: true, or falls back to direct WebView location navigation
- *    (which triggers Android DownloadListener via Content-Disposition: attachment without <a download> quirks).
- * 2. In standard Desktop & Mobile browsers: triggers native .xlsx download via HTTP attachment URL.
+ * Triggers a genuine .xlsx file download on Desktop, Mobile Chrome, Safari, and Android WebView/Median:
+ * - Builds compressed OOXML .xlsx bytes client-side with official Excel MIME type
+ *   (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet)
+ * - Dispatches MouseEvent('click') matching jsPDF.save() behavior (plus DataURI fallback if download attr unsupported)
+ * - Plays subtle notification sound, fires Web Notification if granted, and dispatches
+ *   EXCEL_DOWNLOAD_EVENT so the global in-app notification toast appears with filename & backup save actions.
  */
 export function downloadTemplateExcelWargaBansos(profilRT?: TemplateProfilRT) {
   const filename = getTemplateExcelFilename();
-  const fullUrl = getAbsoluteTemplateExcelUrl(profilRT);
-  const w = window as any;
-  const ua = (typeof navigator !== 'undefined' ? navigator.userAgent : '').toLowerCase();
+  const serverUrl = getAbsoluteTemplateExcelUrl(profilRT);
 
-  const medianBridgeDownload =
-    w?.median?.share?.downloadFile || w?.gonative?.share?.downloadFile;
+  const wb = buildTemplateExcelWorkbook(profilRT);
+  const wbOut = XLSX.write(wb, {
+    bookType: 'xlsx',
+    type: 'array',
+    compression: true,
+  });
 
-  if (typeof medianBridgeDownload === 'function') {
-    try {
-      medianBridgeDownload({
-        url: fullUrl,
-        open: true,
-      });
-      return;
-    } catch {
-      // Fall back to direct WebView navigation below
+  const blob = new Blob([wbOut], { type: EXCEL_MIME_TYPE });
+
+  if (typeof document !== 'undefined') {
+    const supportsDownloadAttr =
+      typeof HTMLAnchorElement !== 'undefined' &&
+      'download' in HTMLAnchorElement.prototype;
+
+    if (supportsDownloadAttr && typeof URL !== 'undefined' && URL.createObjectURL) {
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      link.type = EXCEL_MIME_TYPE;
+      link.rel = 'noopener';
+      link.style.display = 'none';
+      document.body.appendChild(link);
+
+      setTimeout(() => {
+        try {
+          link.dispatchEvent(
+            new MouseEvent('click', {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+            })
+          );
+        } catch {
+          link.click();
+        }
+        setTimeout(() => {
+          link.remove();
+        }, 500);
+      }, 0);
+
+      setTimeout(() => {
+        URL.revokeObjectURL(blobUrl);
+      }, 40000);
+    } else if (typeof FileReader !== 'undefined') {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const result = typeof reader.result === 'string' ? reader.result : '';
+        if (result) {
+          const link = document.createElement('a');
+          link.href = result;
+          link.download = filename;
+          link.style.display = 'none';
+          document.body.appendChild(link);
+          link.click();
+          setTimeout(() => link.remove(), 500);
+        }
+      };
+      reader.readAsDataURL(blob);
     }
   }
 
-  const isMedianOrAndroidWebView =
-    ua.includes('median') ||
-    ua.includes('gonative') ||
-    ua.includes('; wv)') ||
-    ua.includes('android') ||
-    Boolean(w?.median) ||
-    Boolean(w?.gonative);
-
-  if (isMedianOrAndroidWebView) {
-    // Do NOT use <a download> inside Android / Median WebView; direct navigation cleanly
-    // triggers WebView DownloadListener -> Android DownloadManager via Content-Disposition: attachment.
-    window.location.assign(fullUrl);
-    return;
+  // Play gentle notification sound & dispatch system/in-app notification
+  try {
+    playNotificationSound();
+  } catch {
+    // ignore audio block
   }
 
-  const link = document.createElement('a');
-  link.href = fullUrl;
-  link.setAttribute('download', filename);
-  link.style.display = 'none';
-  document.body.appendChild(link);
-  link.click();
-  setTimeout(() => {
-    link.remove();
-  }, 1500);
+  try {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      new Notification('Download Template Excel (.xlsx)', {
+        body: `File ${filename} berhasil diunduh ke perangkat Anda.`,
+      });
+    }
+  } catch {
+    // ignore notification errors in WebView
+  }
+
+  if (typeof window !== 'undefined') {
+    const detail: ExcelDownloadNotificationDetail = {
+      id: 'dl_' + Date.now(),
+      filename,
+      sizeBytes: blob.size,
+      blob,
+      serverUrl,
+      timestamp: new Date().toLocaleTimeString('id-ID', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+    };
+    window.dispatchEvent(new CustomEvent(EXCEL_DOWNLOAD_EVENT, { detail }));
+  }
+}
+
+/**
+ * Backup save/share handler for Median / Android WebView if native Downloads folder needs explicit user action.
+ */
+export async function shareOrSaveExcelFile(blob: Blob, filename: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+      const file = new File([blob], filename, { type: EXCEL_MIME_TYPE });
+      const canShare =
+        typeof navigator.canShare === 'function' ? navigator.canShare({ files: [file] }) : true;
+      if (canShare) {
+        await navigator.share({
+          title: 'Template Excel Warga & Bansos (.xlsx)',
+          text: `Simpan file template ${filename}`,
+          files: [file],
+        });
+        return true;
+      }
+    }
+  } catch {
+    // user cancelled or share unsupported, fall back to Data URI
+  }
+
+  return new Promise<boolean>((resolve) => {
+    if (typeof FileReader === 'undefined' || typeof document === 'undefined') {
+      resolve(false);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+      if (!dataUrl) {
+        resolve(false);
+        return;
+      }
+      const link = document.createElement('a');
+      link.href = dataUrl;
+      link.download = filename;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => link.remove(), 500);
+      resolve(true);
+    };
+    reader.onerror = () => resolve(false);
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Backup server URL download handler for Median JS Bridge or WebView DownloadListener.
+ */
+export function triggerServerExcelDownload(serverUrl: string) {
+  const w = window as any;
+  const medianBridgeDownload =
+    w?.median?.downloads?.downloadFile ||
+    w?.median?.share?.downloadFile ||
+    w?.gonative?.share?.downloadFile;
+
+  if (typeof medianBridgeDownload === 'function') {
+    try {
+      medianBridgeDownload({ url: serverUrl, open: true });
+      return;
+    } catch {
+      // fallback below
+    }
+  }
+  window.location.assign(serverUrl);
 }
 
 function normalizeKey(key: string): string {

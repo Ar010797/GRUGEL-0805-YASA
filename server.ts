@@ -281,11 +281,27 @@ app.post('/api/sync-monthly', (req, res) => {
 });
 
 // GET Template Excel (.xlsx) resmi dengan header MIME Excel asli (aman untuk Android WebView, Mobile & Desktop)
-app.get(['/api/template-excel', '/api/template-excel/:filename'], (req, res) => {
-  try {
-    const rt = typeof req.query.rt === 'string' ? req.query.rt : undefined;
-    const rw = typeof req.query.rw === 'string' ? req.query.rw : undefined;
-    const desa = typeof req.query.desa === 'string' ? req.query.desa : undefined;
+app.get(
+  [
+    '/api/template-excel',
+    '/api/template-excel/:filename',
+    '/api/template-excel-rt/:rt/:rw/:filename',
+  ],
+  (req, res) => {
+    try {
+      const rt =
+        typeof req.params.rt === 'string'
+          ? req.params.rt
+          : typeof req.query.rt === 'string'
+          ? req.query.rt
+          : undefined;
+      const rw =
+        typeof req.params.rw === 'string'
+          ? req.params.rw
+          : typeof req.query.rw === 'string'
+          ? req.query.rw
+          : undefined;
+      const desa = typeof req.query.desa === 'string' ? req.query.desa : undefined;
 
     const wb = buildTemplateExcelWorkbook({ rt, rw, desa });
     const rawBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });

@@ -76,12 +76,17 @@ export function getTemplateExcelFilename(): string {
 
 export function getTemplateExcelDownloadUrl(profilRT?: TemplateProfilRT): string {
   const filename = getTemplateExcelFilename();
-  const params = new URLSearchParams();
-  if (profilRT?.rt) params.set('rt', profilRT.rt);
-  if (profilRT?.rw) params.set('rw', profilRT.rw);
-  if (profilRT?.desa) params.set('desa', profilRT.desa);
-  const query = params.toString();
-  return `/api/template-excel/${encodeURIComponent(filename)}${query ? `?${query}` : ''}`;
+  const rt = (profilRT?.rt || '08').replace(/\D/g, '').padStart(2, '0').slice(-2) || '08';
+  const rw = (profilRT?.rw || '05').replace(/\D/g, '').padStart(2, '0').slice(-2) || '05';
+  const desa = profilRT?.desa ? `?desa=${encodeURIComponent(profilRT.desa)}` : '';
+  return `/api/template-excel-rt/${rt}/${rw}/${encodeURIComponent(filename)}${desa}`;
+}
+
+export function getCleanTemplateExcelDownloadUrl(profilRT?: TemplateProfilRT): string {
+  const filename = getTemplateExcelFilename();
+  const rt = (profilRT?.rt || '08').replace(/\D/g, '').padStart(2, '0').slice(-2) || '08';
+  const rw = (profilRT?.rw || '05').replace(/\D/g, '').padStart(2, '0').slice(-2) || '05';
+  return `/api/template-excel-rt/${rt}/${rw}/${encodeURIComponent(filename)}`;
 }
 
 export function buildTemplateExcelWorkbook(profilRT?: TemplateProfilRT): XLSX.WorkBook {
