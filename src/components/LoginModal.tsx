@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check, Eye, EyeOff } from 'lucide-react';
+import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check, Eye, EyeOff, RefreshCw } from 'lucide-react';
 import { AuthUser, Warga, AdminRTAccount } from '../types';
 import { HouseLogo } from './HouseLogo';
 
@@ -10,6 +10,7 @@ interface LoginModalProps {
   wargaList: Warga[];
   adminAccounts?: AdminRTAccount[];
   onOpenLupaPassword: () => void;
+  onRefreshSync?: () => Promise<void> | void;
 }
 
 export const LoginModal: React.FC<LoginModalProps> = ({
@@ -19,7 +20,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   wargaList,
   adminAccounts = [],
   onOpenLupaPassword,
+  onRefreshSync,
 }) => {
+  const [isRefreshing, setIsRefreshing] = useState(false);
   // Default to 'warga' or 'admin' so Server tab is NOT visible by default to citizens
   const [activeTab, setActiveTab] = useState<'server' | 'admin' | 'warga'>('admin');
   const [showServerTab, setShowServerTab] = useState(false);
@@ -123,23 +126,29 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setWargaError('');
 
     const name = wargaUsername.trim();
-    const noKKInput = wargaPasswordKK.trim().replace(/\s+/g, '');
+    const noKKRaw = wargaPasswordKK.trim().replace(/\s+/g, '');
+    const noKKDigits = noKKRaw.replace(/\D/g, '');
 
     if (!name) {
       setWargaError('Silakan masukkan Nama Asli Kepala Keluarga sesuai Kartu Keluarga.');
       return;
     }
 
-    if (!noKKInput) {
+    if (!noKKRaw) {
       setWargaError('Silakan masukkan Password (Nomor KK 16 digit).');
       return;
     }
 
-    // Match with resident list by name and No KK
+    // Match with resident list by name and normalized No KK (supports digits or dashed format)
     const matched = wargaList.find((w) => {
       const matchName =
         w.nama.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(w.nama.toLowerCase());
-      const matchKK = w.noKK ? w.noKK === noKKInput : false;
+      if (!w.noKK) return false;
+      const storedRaw = w.noKK.trim().replace(/\s+/g, '');
+      const storedDigits = storedRaw.replace(/\D/g, '');
+      const matchKK =
+        storedRaw === noKKRaw ||
+        (noKKDigits.length >= 6 && storedDigits.length >= 6 && storedDigits === noKKDigits);
       return matchName && matchKK;
     });
 
@@ -162,7 +171,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       if (nameOnly) {
         setWargaError(`Nomor KK untuk warga "${nameOnly.nama}" tidak sesuai. Pastikan 16 digit No KK sudah benar.`);
       } else {
-        setWargaError(`Data warga "${name}" dengan No KK tersebut tidak ditemukan. Silakan hubungi Admin RT.`);
+        setWargaError(`Data warga "${name}" dengan No KK tersebut tidak ditemukan. Silakan hubungi Admin RT atau tekan Sinkronkan Data.`);
       }
     }
   };
@@ -440,7 +449,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   </div>
                   <input
                     type={showWargaPassword ? 'text' : 'password'}
-                    maxLength={16}
+                    maxLength={24}
                     required
                     value={wargaPasswordKK}
                     onChange={(e) => setWargaPasswordKK(e.target.value)}
@@ -480,6 +489,29 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
           {/* Footer security note & Discreet Server Access for App Owner */}
           <div className="mt-5 pt-4 border-t border-slate-100 flex flex-col items-center gap-2 text-center">
+            {onRefreshSync && (
+              <button
+                type="button"
+                disabled={isRefreshing}
+                onClick={async () => {
+                  setIsRefreshing(true);
+                  try {
+                    await onRefreshSync();
+                  } finally {
+                    setIsRefreshing(false);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-1.5 text-[11px] font-bold text-[#0B5D3F] hover:bg-emerald-100 transition-colors cursor-pointer disabled:opacity-60"
+              >
+                <RefreshCw size={12} className={isRefreshing ? 'animate-spin' : ''} />
+                <span>
+                  {isRefreshing
+                    ? 'Menyinkronkan data server...'
+                    : `Sinkronkan Data Server (${wargaList.length} KK, ${adminAccounts.length} Admin)`}
+                </span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={onOpenLupaPassword}

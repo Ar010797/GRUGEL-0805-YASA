@@ -9,6 +9,26 @@ import {
   PembaruanBulananRT,
 } from '../types';
 
+export interface DeletedIdsMap {
+  warga: string[];
+  transactions: string[];
+  bantuan: string[];
+  pengumuman: string[];
+  dokumen: string[];
+  adminAccounts: string[];
+  laporanBulananRT: string[];
+}
+
+export const EMPTY_DELETED_IDS: DeletedIdsMap = {
+  warga: [],
+  transactions: [],
+  bantuan: [],
+  pengumuman: [],
+  dokumen: [],
+  adminAccounts: [],
+  laporanBulananRT: [],
+};
+
 export interface AppDatabaseSchema {
   version: number;
   lastUpdated: string;
@@ -21,78 +41,196 @@ export interface AppDatabaseSchema {
   dokumenList: DokumenPdfWarga[];
   adminAccounts: AdminRTAccount[];
   laporanBulananRT: PembaruanBulananRT[];
+  deletedIds?: Partial<DeletedIdsMap>;
 }
 
 const LOCAL_STORAGE_KEY = 'kas_rt08_rw05_database_v2';
 
-/**
- * Loads data from localStorage first (offline-first), then syncs with server API if available.
- */
-/**
- * Loads data from Server backend API (master source of truth for accounts & citizens),
- * falls back to localStorage or merges cleanly so new phones never wipe server data.
- */
-export async function loadAppData(defaultData: AppDatabaseSchema): Promise<AppDatabaseSchema> {
-  let localData: AppDatabaseSchema | null = null;
+function toEpoch(iso?: string): number {
+  if (!iso) return 0;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : 0;
+}
 
-  // 1. Read local cache first
-  try {
-    const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (cached) {
-      localData = JSON.parse(cached);
+/**
+ * Merges two entity arrays without dropping records, preserving newer edits by updatedAt,
+ * and respecting explicit deletion tombstones so deleted records never resurrect from stale caches.
+ */
+export function mergeEntityList<T extends { id: string; updatedAt?: string }>(
+  primaryList: T[],
+  secondaryList: T[],
+  deletedIds: string[] = [],
+  altMatch?: (a: T, b: T) => boolean
+): T[] {
+  const deletedSet = new Set(deletedIds);
+  const result: T[] = [];
+
+  for (const item of primaryList) {
+    if (!deletedSet.has(item.id)) {
+      result.push(item);
     }
-  } catch (err) {
-    console.warn('Gagal membaca cache lokal:', err);
   }
 
-  // 2. Fetch from Server backend API
+  for (const sec of secondaryList) {
+    if (deletedSet.has(sec.id)) continue;
+    const existingIdx = result.findIndex(
+      (p) => p.id === sec.id || (altMatch ? altMatch(p, sec) : false)
+    );
+    if (existingIdx === -1) {
+      result.push(sec);
+    } else {
+      const existing = result[existingIdx];
+      if (toEpoch(sec.updatedAt) > toEpoch(existing.updatedAt)) {
+        result[existingIdx] = sec;
+      }
+    }
+  }
+
+  return result;
+}
+
+function unionIds(a: string[] = [], b: string[] = []): string[] {
+  return Array.from(new Set([...a, ...b]));
+}
+
+/**
+ * Smart bidirectional merge where `authoritative` (server or Firestore) takes precedence
+ * on ties, while preserving newer local edits and honoring deletion tombstones.
+ */
+export function mergeDatabaseStates(
+  authoritative: AppDatabaseSchema,
+  secondary: AppDatabaseSchema | null,
+  extraDeleted?: Partial<DeletedIdsMap>
+): AppDatabaseSchema {
+  if (!secondary) return authoritative;
+
+  const mergedDeleted: DeletedIdsMap = {
+    warga: unionIds(
+      unionIds(authoritative.deletedIds?.warga, secondary.deletedIds?.warga),
+      extraDeleted?.warga
+    ),
+    transactions: unionIds(
+      unionIds(authoritative.deletedIds?.transactions, secondary.deletedIds?.transactions),
+      extraDeleted?.transactions
+    ),
+    bantuan: unionIds(
+      unionIds(authoritative.deletedIds?.bantuan, secondary.deletedIds?.bantuan),
+      extraDeleted?.bantuan
+    ),
+    pengumuman: unionIds(
+      unionIds(authoritative.deletedIds?.pengumuman, secondary.deletedIds?.pengumuman),
+      extraDeleted?.pengumuman
+    ),
+    dokumen: unionIds(
+      unionIds(authoritative.deletedIds?.dokumen, secondary.deletedIds?.dokumen),
+      extraDeleted?.dokumen
+    ),
+    adminAccounts: unionIds(
+      unionIds(authoritative.deletedIds?.adminAccounts, secondary.deletedIds?.adminAccounts),
+      extraDeleted?.adminAccounts
+    ),
+    laporanBulananRT: unionIds(
+      unionIds(authoritative.deletedIds?.laporanBulananRT, secondary.deletedIds?.laporanBulananRT),
+      extraDeleted?.laporanBulananRT
+    ),
+  };
+
+  const authSettingsEpoch = toEpoch(authoritative.pengaturanKas?.updatedAt);
+  const secSettingsEpoch = toEpoch(secondary.pengaturanKas?.updatedAt);
+  const chosenPengaturan =
+    secSettingsEpoch > authSettingsEpoch ? secondary.pengaturanKas : authoritative.pengaturanKas;
+  const chosenTahun =
+    secSettingsEpoch > authSettingsEpoch ? secondary.tahunAktif : authoritative.tahunAktif;
+
+  return {
+    version: 2,
+    lastUpdated:
+      toEpoch(secondary.lastUpdated) > toEpoch(authoritative.lastUpdated)
+        ? secondary.lastUpdated
+        : authoritative.lastUpdated || new Date().toISOString(),
+    tahunAktif: chosenTahun || authoritative.tahunAktif || 2026,
+    pengaturanKas: chosenPengaturan || authoritative.pengaturanKas,
+    wargaList: mergeEntityList(
+      Array.isArray(authoritative.wargaList) ? authoritative.wargaList : [],
+      Array.isArray(secondary.wargaList) ? secondary.wargaList : [],
+      mergedDeleted.warga,
+      (a, b) => Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
+    ),
+    transactions: mergeEntityList(
+      Array.isArray(authoritative.transactions) ? authoritative.transactions : [],
+      Array.isArray(secondary.transactions) ? secondary.transactions : [],
+      mergedDeleted.transactions
+    ),
+    bantuanList: mergeEntityList(
+      Array.isArray(authoritative.bantuanList) ? authoritative.bantuanList : [],
+      Array.isArray(secondary.bantuanList) ? secondary.bantuanList : [],
+      mergedDeleted.bantuan
+    ),
+    pengumumanList: mergeEntityList(
+      Array.isArray(authoritative.pengumumanList) ? authoritative.pengumumanList : [],
+      Array.isArray(secondary.pengumumanList) ? secondary.pengumumanList : [],
+      mergedDeleted.pengumuman
+    ),
+    dokumenList: mergeEntityList(
+      Array.isArray(authoritative.dokumenList) ? authoritative.dokumenList : [],
+      Array.isArray(secondary.dokumenList) ? secondary.dokumenList : [],
+      mergedDeleted.dokumen
+    ),
+    adminAccounts: mergeEntityList(
+      Array.isArray(authoritative.adminAccounts) ? authoritative.adminAccounts : [],
+      Array.isArray(secondary.adminAccounts) ? secondary.adminAccounts : [],
+      mergedDeleted.adminAccounts,
+      (a, b) => a.username.toLowerCase() === b.username.toLowerCase()
+    ),
+    laporanBulananRT: mergeEntityList(
+      Array.isArray(authoritative.laporanBulananRT) ? authoritative.laporanBulananRT : [],
+      Array.isArray(secondary.laporanBulananRT) ? secondary.laporanBulananRT : [],
+      mergedDeleted.laporanBulananRT
+    ),
+    deletedIds: mergedDeleted,
+  };
+}
+
+export function writeLocalCache(data: AppDatabaseSchema) {
   try {
-    const res = await fetch('/api/data', { method: 'GET' });
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
+  } catch (err) {
+    console.warn('Gagal menulis cache lokal:', err);
+  }
+}
+
+export function readLocalCache(): AppDatabaseSchema | null {
+  try {
+    const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
+    return cached ? (JSON.parse(cached) as AppDatabaseSchema) : null;
+  } catch (err) {
+    console.warn('Gagal membaca cache lokal:', err);
+    return null;
+  }
+}
+
+/**
+ * Loads data from Server backend API (master source of truth across Median, Web & devices),
+ * merging cleanly without letting stale localStorage overwrite newer server records.
+ */
+export async function loadAppData(defaultData: AppDatabaseSchema): Promise<AppDatabaseSchema> {
+  const localData = readLocalCache();
+
+  try {
+    const res = await fetch(`/api/data?t=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store',
+    });
     if (res.ok) {
       const serverPayload = await res.json();
       if (serverPayload && serverPayload.data) {
         const remoteData = serverPayload.data as AppDatabaseSchema;
-
-        // If localData doesn't exist or has no warga, server data is 100% authoritative
-        if (!localData || !Array.isArray(localData.wargaList) || localData.wargaList.length === 0) {
-          localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(remoteData));
-          return remoteData;
-        }
-
-        // Smart merge: ensure accounts & citizens registered on server are never dropped
-        const localWarga = Array.isArray(localData.wargaList) ? localData.wargaList : [];
-        const remoteWarga = Array.isArray(remoteData.wargaList) ? remoteData.wargaList : [];
-        const mergedWarga = [...localWarga];
-
-        for (const rw of remoteWarga) {
-          if (!mergedWarga.some((lw) => lw.id === rw.id || lw.noKK === rw.noKK)) {
-            mergedWarga.push(rw);
-          }
-        }
-
-        // Merge admin accounts
-        const localAdmins = Array.isArray(localData.adminAccounts) ? localData.adminAccounts : [];
-        const remoteAdmins = Array.isArray(remoteData.adminAccounts) ? remoteData.adminAccounts : [];
-        const mergedAdmins = [...localAdmins];
-        for (const ra of remoteAdmins) {
-          if (!mergedAdmins.some((la) => la.username.toLowerCase() === ra.username.toLowerCase())) {
-            mergedAdmins.push(ra);
-          }
-        }
-
-        const resolvedData: AppDatabaseSchema = {
-          ...remoteData,
-          ...localData,
-          wargaList: mergedWarga.length >= remoteWarga.length ? mergedWarga : remoteWarga,
-          adminAccounts: mergedAdmins.length >= remoteAdmins.length ? mergedAdmins : remoteAdmins,
-          lastUpdated: remoteData.lastUpdated || localData.lastUpdated || new Date().toISOString(),
-        };
-
-        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(resolvedData));
+        const resolvedData = mergeDatabaseStates(remoteData, localData);
+        writeLocalCache(resolvedData);
         return resolvedData;
       }
     }
-  } catch (err) {
+  } catch {
     // Server fetch error fallback to local
   }
 
@@ -100,32 +238,58 @@ export async function loadAppData(defaultData: AppDatabaseSchema): Promise<AppDa
 }
 
 /**
+ * Fetches latest state directly from Server without letting local cache resurrect deleted items.
+ */
+export async function fetchServerSnapshot(): Promise<AppDatabaseSchema | null> {
+  try {
+    const res = await fetch(`/api/data?t=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (json && json.data) {
+      return json.data as AppDatabaseSchema;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Saves data immediately to localStorage and sends to server backend.
- * Passes isHardReset: false by default to prevent accidental deletion from other devices.
+ * Returns the merged authoritative state from server so client stays 100% in sync.
  */
 export async function saveAppData(
   data: AppDatabaseSchema,
-  options?: { isHardReset?: boolean; deletedWargaIds?: string[]; deletedPengumumanIds?: string[] }
-): Promise<boolean> {
+  options?: {
+    isHardReset?: boolean;
+    deletedIds?: Partial<DeletedIdsMap>;
+    deletedWargaIds?: string[];
+    deletedPengumumanIds?: string[];
+  }
+): Promise<{ ok: boolean; serverData?: AppDatabaseSchema }> {
   const updatedData: AppDatabaseSchema = {
     ...data,
     lastUpdated: new Date().toISOString(),
   };
 
-  // 1. Immediate local write (synchronous guarantee)
-  try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updatedData));
-  } catch (err) {
-    console.error('Error writing to localStorage:', err);
-  }
+  writeLocalCache(updatedData);
 
-  // 2. Async server write with multi-device protection
   try {
+    const deletedIds: Partial<DeletedIdsMap> = {
+      ...(options?.deletedIds || {}),
+      warga: unionIds(options?.deletedIds?.warga, options?.deletedWargaIds),
+      pengumuman: unionIds(options?.deletedIds?.pengumuman, options?.deletedPengumumanIds),
+    };
+
     const payload = {
       ...updatedData,
       isHardReset: options?.isHardReset ?? false,
-      deletedWargaIds: options?.deletedWargaIds ?? [],
-      deletedPengumumanIds: options?.deletedPengumumanIds ?? [],
+      deletedIds,
+      deletedWargaIds: deletedIds.warga || [],
+      deletedPengumumanIds: deletedIds.pengumuman || [],
     };
 
     const res = await fetch('/api/data', {
@@ -133,11 +297,74 @@ export async function saveAppData(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    return res.ok;
-  } catch (err) {
-    // Server write silently queued in local storage
-    return false;
+    if (!res.ok) return { ok: false };
+    const json = await res.json();
+    if (json?.data) {
+      writeLocalCache(json.data as AppDatabaseSchema);
+      return { ok: true, serverData: json.data as AppDatabaseSchema };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false };
   }
+}
+
+/**
+ * Subscribes to live Server-Sent Events (/api/stream) so changes made from Median,
+ * another browser, Admin RT, or Server appear in real time across all sessions.
+ */
+export function subscribeServerStream(
+  onRemoteData: (data: AppDatabaseSchema, isReset?: boolean) => void,
+  onConnectionChange?: (connected: boolean) => void
+): () => void {
+  if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
+    return () => {};
+  }
+
+  let es: EventSource | null = null;
+  let closed = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const connect = () => {
+    if (closed) return;
+    try {
+      es = new EventSource('/api/stream');
+      es.onopen = () => {
+        onConnectionChange?.(true);
+      };
+      es.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(event.data);
+          if (parsed && parsed.data) {
+            onRemoteData(parsed.data as AppDatabaseSchema, parsed.type === 'reset');
+          }
+        } catch {
+          // ignore malformed keepalive
+        }
+      };
+      es.onerror = () => {
+        onConnectionChange?.(false);
+        es?.close();
+        es = null;
+        if (!closed && !reconnectTimer) {
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, 4000);
+        }
+      };
+    } catch {
+      onConnectionChange?.(false);
+    }
+  };
+
+  connect();
+
+  return () => {
+    closed = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    es?.close();
+  };
 }
 
 /**
@@ -148,7 +375,12 @@ export async function saveSingleWargaToServer(warga: Warga): Promise<boolean> {
     const res = await fetch('/api/warga', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ warga }),
+      body: JSON.stringify({
+        warga: {
+          ...warga,
+          updatedAt: warga.updatedAt || new Date().toISOString(),
+        },
+      }),
     });
     return res.ok;
   } catch {
@@ -175,7 +407,6 @@ export async function deleteWargaFromServer(id: string): Promise<boolean> {
  * Explicitly passes isHardReset: true.
  */
 export async function clearAppData(): Promise<boolean> {
-  // 1. Clear local storage
   try {
     localStorage.removeItem(LOCAL_STORAGE_KEY);
     localStorage.removeItem('rt_dismissed_notifications_v2');
@@ -183,7 +414,6 @@ export async function clearAppData(): Promise<boolean> {
     console.error('Error clearing localStorage:', err);
   }
 
-  // 2. Clear server-side persistent database
   try {
     const emptyPayload: AppDatabaseSchema = {
       version: 2,
@@ -214,6 +444,7 @@ export async function clearAppData(): Promise<boolean> {
           judulKopSurat: 'PENGURUS RUKUN TETANGGA 08 RUKUN WARGA 05',
           sebutanWilayah: 'RT 08 RW 05 Desa Kotayasa',
         },
+        updatedAt: new Date().toISOString(),
       },
       wargaList: [],
       transactions: [],
@@ -222,9 +453,10 @@ export async function clearAppData(): Promise<boolean> {
       dokumenList: [],
       adminAccounts: [],
       laporanBulananRT: [],
+      deletedIds: { ...EMPTY_DELETED_IDS },
     };
 
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(emptyPayload));
+    writeLocalCache(emptyPayload);
 
     const res = await fetch('/api/data', {
       method: 'POST',
@@ -232,7 +464,7 @@ export async function clearAppData(): Promise<boolean> {
       body: JSON.stringify({ ...emptyPayload, isHardReset: true }),
     });
     return res.ok;
-  } catch (err) {
+  } catch {
     return true;
   }
 }
@@ -265,7 +497,7 @@ export function parseBackupFile(file: File): Promise<AppDatabaseSchema> {
         } else {
           reject(new Error('Format file cadangan tidak valid (wargaList atau pengaturanKas hilang).'));
         }
-      } catch (err) {
+      } catch {
         reject(new Error('Gagal mengurai file JSON: Format rusak.'));
       }
     };

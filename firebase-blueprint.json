@@ -1,0 +1,262 @@
+{
+  "entities": {
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized Google-authenticated administrator for the RT/RW cloud database",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 254 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["server", "admin"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role", "createdAt", "updatedAt"]
+    },
+    "AppSettings": {
+      "title": "AppSettings",
+      "description": "RT/RW cash configuration, dues rates, and regional profile",
+      "type": "object",
+      "properties": {
+        "tahunAktif": { "type": "number" },
+        "nominalJimpitanTahunan": { "type": "number" },
+        "nominalJimpitanBulanan": { "type": "number" },
+        "nominalKematianTahunan": { "type": "number" },
+        "nominalKematianBulanan": { "type": "number" },
+        "saldoAwalKasUmum": { "type": "number" },
+        "saldoAwalKasKematian": { "type": "number" },
+        "keteranganSaldoAwal": { "type": "string", "maxLength": 300 },
+        "tanggalSaldoAwal": { "type": "string", "maxLength": 32 },
+        "kontakKetuaRT": { "type": "object" },
+        "kontakBendahara": { "type": "object" },
+        "saldoBerlanjutPerTahun": { "type": "object" },
+        "profilRT": { "type": "object" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["tahunAktif", "ownerUid", "updatedAt"]
+    },
+    "Warga": {
+      "title": "Warga",
+      "description": "Registered resident family card (Kartu Keluarga) and member roster",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "no": { "type": "number" },
+        "nama": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "noKK": { "type": "string", "maxLength": 32 },
+        "nik": { "type": "string", "maxLength": 32 },
+        "noRumah": { "type": "string", "maxLength": 32 },
+        "rt": { "type": "string", "maxLength": 10 },
+        "rw": { "type": "string", "maxLength": 10 },
+        "alamat": { "type": "string", "maxLength": 300 },
+        "kodePos": { "type": "string", "maxLength": 12 },
+        "tanggalDikeluarkan": { "type": "string", "maxLength": 32 },
+        "jenisKelamin": { "type": "string", "enum": ["Laki-laki", "Perempuan"] },
+        "jumlahJiwa": { "type": "number" },
+        "statusIuran": { "type": "string", "enum": ["Sudah", "Belum"] },
+        "anggotaKeluarga": { "type": "array" },
+        "telepon": { "type": "string", "maxLength": 32 },
+        "pin": { "type": "string", "maxLength": 12 },
+        "pinAttempts": { "type": "number" },
+        "pinLockedUntil": { "type": "number" },
+        "riwayatIuran": { "type": "object" },
+        "riwayatKematian": { "type": "object" },
+        "statusIuranPerTahun": { "type": "object" },
+        "riwayatIuranPerTahun": { "type": "object" },
+        "riwayatKematianPerTahun": { "type": "object" },
+        "iuranUmumTerbayar": { "type": "number" },
+        "iuranKematianTerbayar": { "type": "number" },
+        "pilihanSkema": { "type": "string", "enum": ["bulanan", "tahunan"] },
+        "riwayatPerubahanKK": { "type": "array" },
+        "linkedUid": { "type": "string", "maxLength": 128 },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "nama", "jenisKelamin", "statusIuran", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Cash inflow, outflow, and death fund (Kas Kematian) transaction entry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tanggal": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "kategori": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "keterangan": { "type": "string", "maxLength": 500 },
+        "nominal": { "type": "number" },
+        "tipe": { "type": "string", "enum": ["masuk", "keluar", "kematian"] },
+        "namaWarga": { "type": "string", "maxLength": 160 },
+        "nomorRumah": { "type": "string", "maxLength": 32 },
+        "noKK": { "type": "string", "maxLength": 32 },
+        "isSaldoAwal": { "type": "boolean" },
+        "tahun": { "type": "number" },
+        "rtScope": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "tanggal", "kategori", "nominal", "tipe", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "BantuanPemerintah": {
+      "title": "BantuanPemerintah",
+      "description": "Confidential government social assistance beneficiary record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "jenisBantuan": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "namaPenerima": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "noKK": { "type": "string", "maxLength": 32 },
+        "nik": { "type": "string", "maxLength": 32 },
+        "nominalAtauBarang": { "type": "string", "maxLength": 200 },
+        "tanggal": { "type": "string", "maxLength": 32 },
+        "status": { "type": "string", "enum": ["Sudah Disalurkan", "Proses Verifikasi", "Baru Diusulkan", "Ditolak"] },
+        "sumberDana": { "type": "string", "maxLength": 160 },
+        "keterangan": { "type": "string", "maxLength": 400 },
+        "rtScope": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "jenisBantuan", "namaPenerima", "status", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "PengumumanRT": {
+      "title": "PengumumanRT",
+      "description": "Official neighborhood announcement and circular letter",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "judul": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "isi": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "kategori": { "type": "string", "enum": ["Kegiatan", "Iuran", "Keamanan", "Sosial", "Umum"] },
+        "tanggal": { "type": "string", "maxLength": 32 },
+        "tanggalBerakhir": { "type": "string", "maxLength": 32 },
+        "penulis": { "type": "string", "maxLength": 120 },
+        "namaPengurus": { "type": "string", "maxLength": 120 },
+        "jabatanPengurus": { "type": "string", "maxLength": 120 },
+        "penting": { "type": "boolean" },
+        "tentang": { "type": "string", "maxLength": 200 },
+        "hariTanggalAcara": { "type": "string", "maxLength": 120 },
+        "waktuAcara": { "type": "string", "maxLength": 80 },
+        "tempatAcara": { "type": "string", "maxLength": 200 },
+        "keteranganTambahan": { "type": "string", "maxLength": 500 },
+        "rtScope": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "judul", "isi", "kategori", "tanggal", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "DokumenPdfWarga": {
+      "title": "DokumenPdfWarga",
+      "description": "Admin-only PDF archive for resident KK and KTP documents",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "judul": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "namaFile": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "ukuranKb": { "type": "number" },
+        "tanggalUpload": { "type": "string", "maxLength": 32 },
+        "kategori": { "type": "string", "maxLength": 80 },
+        "keterangan": { "type": "string", "maxLength": 300 },
+        "dataBase64": { "type": "string", "maxLength": 850000 },
+        "rtScope": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "judul", "namaFile", "kategori", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "AdminRTAccount": {
+      "title": "AdminRTAccount",
+      "description": "RT admin account credentials managed by Village Server Control",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "passwordHash": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "nama": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "rt": { "type": "string", "maxLength": 10 },
+        "rw": { "type": "string", "maxLength": 10 },
+        "kontak": { "type": "string", "maxLength": 40 },
+        "jabatan": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["aktif", "nonaktif"] },
+        "terakhirLogin": { "type": "string", "maxLength": 64 },
+        "terakhirSinkronisasi": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "username", "passwordHash", "nama", "status", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "PembaruanBulananRT": {
+      "title": "PembaruanBulananRT",
+      "description": "Monthly RT report submitted to Village Server",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "rt": { "type": "string", "maxLength": 10 },
+        "rw": { "type": "string", "maxLength": 10 },
+        "namaAdminPengirim": { "type": "string", "maxLength": 160 },
+        "tanggalKirim": { "type": "string", "maxLength": 32 },
+        "bulanTahun": { "type": "string", "maxLength": 64 },
+        "tahun": { "type": "number" },
+        "totalKK": { "type": "number" },
+        "totalJiwa": { "type": "number" },
+        "totalLunasIuran": { "type": "number" },
+        "totalBelumLunas": { "type": "number" },
+        "totalKasMasukBulanIni": { "type": "number" },
+        "totalKasKeluarBulanIni": { "type": "number" },
+        "saldoKasUmumBerjalan": { "type": "number" },
+        "saldoKasKematianBerjalan": { "type": "number" },
+        "totalPenerimaBansos": { "type": "number" },
+        "catatanKhusus": { "type": "string", "maxLength": 500 },
+        "statusVerifikasi": { "type": "string", "enum": ["Diterima", "Menunggu Verifikasi", "Perlu Klarifikasi"] },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "rt", "rw", "bulanTahun", "statusVerifikasi", "ownerUid", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Registered administrator access records"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/AppSettings" },
+      "description": "RT cash rates and regional profile"
+    },
+    "/warga/{wargaId}": {
+      "schema": { "$ref": "#/entities/Warga" },
+      "description": "Resident Kartu Keluarga records (PII protected)"
+    },
+    "/transactions/{txId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "RT cash inflow, outflow, and death fund ledger"
+    },
+    "/bantuan/{bantuanId}": {
+      "schema": { "$ref": "#/entities/BantuanPemerintah" },
+      "description": "Confidential social aid records (Admin only)"
+    },
+    "/pengumuman/{pengumumanId}": {
+      "schema": { "$ref": "#/entities/PengumumanRT" },
+      "description": "Official RT announcements"
+    },
+    "/dokumen/{dokumenId}": {
+      "schema": { "$ref": "#/entities/DokumenPdfWarga" },
+      "description": "Admin-only PDF resident document archive"
+    },
+    "/adminAccounts/{accountId}": {
+      "schema": { "$ref": "#/entities/AdminRTAccount" },
+      "description": "RT admin account registry managed by Server"
+    },
+    "/laporanBulanan/{laporanId}": {
+      "schema": { "$ref": "#/entities/PembaruanBulananRT" },
+      "description": "Monthly RT summary reports submitted to Server"
+    }
+  }
+}

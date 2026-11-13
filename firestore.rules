@@ -1,0 +1,511 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core security helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerified() && request.auth.token.email == 'ar01071997@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() ||
+        (isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isValidStr(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isOptStr(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isOptNum(data, key) {
+      return !(key in data) || (data[key] is number);
+    }
+
+    function isOptBool(data, key) {
+      return !(key in data) || (data[key] is bool);
+    }
+
+    function isOptMap(data, key) {
+      return !(key in data) || (data[key] is map);
+    }
+
+    // Entity validation helpers (no existing() or diff() inside)
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        isValidStr(data.email, 3, 254) &&
+        isOptStr(data, 'displayName', 120) &&
+        (data.role == 'server' || data.role == 'admin') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAppSettings(data) {
+      return data.keys().hasAll(['tahunAktif', 'ownerUid', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'tahunAktif', 'nominalJimpitanTahunan', 'nominalJimpitanBulanan',
+          'nominalKematianTahunan', 'nominalKematianBulanan',
+          'saldoAwalKasUmum', 'saldoAwalKasKematian',
+          'keteranganSaldoAwal', 'tanggalSaldoAwal',
+          'kontakKetuaRT', 'kontakBendahara', 'saldoBerlanjutPerTahun', 'profilRT',
+          'ownerUid', 'updatedAt'
+        ]) &&
+        data.tahunAktif is number &&
+        isOptNum(data, 'nominalJimpitanTahunan') &&
+        isOptNum(data, 'nominalJimpitanBulanan') &&
+        isOptNum(data, 'nominalKematianTahunan') &&
+        isOptNum(data, 'nominalKematianBulanan') &&
+        isOptNum(data, 'saldoAwalKasUmum') &&
+        isOptNum(data, 'saldoAwalKasKematian') &&
+        isOptStr(data, 'keteranganSaldoAwal', 300) &&
+        isOptStr(data, 'tanggalSaldoAwal', 32) &&
+        isOptMap(data, 'kontakKetuaRT') &&
+        isOptMap(data, 'kontakBendahara') &&
+        isOptMap(data, 'saldoBerlanjutPerTahun') &&
+        isOptMap(data, 'profilRT') &&
+        isValidId(data.ownerUid) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWarga(data) {
+      return data.keys().hasAll(['id', 'nama', 'jenisKelamin', 'statusIuran', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'no', 'nama', 'noKK', 'nik', 'noRumah', 'rt', 'rw', 'alamat',
+          'kodePos', 'tanggalDikeluarkan', 'jenisKelamin', 'jumlahJiwa', 'statusIuran',
+          'anggotaKeluarga', 'telepon', 'pin', 'pinAttempts', 'pinLockedUntil',
+          'riwayatIuran', 'riwayatKematian', 'statusIuranPerTahun', 'riwayatIuranPerTahun',
+          'riwayatKematianPerTahun', 'iuranUmumTerbayar', 'iuranKematianTerbayar',
+          'pilihanSkema', 'riwayatPerubahanKK', 'linkedUid', 'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isOptNum(data, 'no') &&
+        isValidStr(data.nama, 1, 160) &&
+        isOptStr(data, 'noKK', 32) &&
+        isOptStr(data, 'nik', 32) &&
+        isOptStr(data, 'noRumah', 32) &&
+        isOptStr(data, 'rt', 10) &&
+        isOptStr(data, 'rw', 10) &&
+        isOptStr(data, 'alamat', 300) &&
+        isOptStr(data, 'kodePos', 12) &&
+        isOptStr(data, 'tanggalDikeluarkan', 32) &&
+        (data.jenisKelamin == 'Laki-laki' || data.jenisKelamin == 'Perempuan') &&
+        isOptNum(data, 'jumlahJiwa') &&
+        (data.statusIuran == 'Sudah' || data.statusIuran == 'Belum') &&
+        (!( 'anggotaKeluarga' in data ) || (data.anggotaKeluarga is list && data.anggotaKeluarga.size() <= 30 && (data.anggotaKeluarga.size() == 0 || data.anggotaKeluarga[0] is map))) &&
+        isOptStr(data, 'telepon', 32) &&
+        isOptStr(data, 'pin', 12) &&
+        isOptNum(data, 'pinAttempts') &&
+        isOptNum(data, 'pinLockedUntil') &&
+        isOptMap(data, 'riwayatIuran') &&
+        isOptMap(data, 'riwayatKematian') &&
+        isOptMap(data, 'statusIuranPerTahun') &&
+        isOptMap(data, 'riwayatIuranPerTahun') &&
+        isOptMap(data, 'riwayatKematianPerTahun') &&
+        isOptNum(data, 'iuranUmumTerbayar') &&
+        isOptNum(data, 'iuranKematianTerbayar') &&
+        (!( 'pilihanSkema' in data ) || (data.pilihanSkema == 'bulanan' || data.pilihanSkema == 'tahunan')) &&
+        (!( 'riwayatPerubahanKK' in data ) || (data.riwayatPerubahanKK is list && data.riwayatPerubahanKK.size() <= 50 && (data.riwayatPerubahanKK.size() == 0 || data.riwayatPerubahanKK[0] is map))) &&
+        isOptStr(data, 'linkedUid', 128) &&
+        isValidId(data.ownerUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['id', 'tanggal', 'kategori', 'nominal', 'tipe', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'tanggal', 'kategori', 'keterangan', 'nominal', 'tipe',
+          'namaWarga', 'nomorRumah', 'noKK', 'isSaldoAwal', 'tahun', 'rtScope',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidStr(data.tanggal, 1, 32) &&
+        isValidStr(data.kategori, 1, 120) &&
+        isOptStr(data, 'keterangan', 500) &&
+        data.nominal is number &&
+        (data.tipe == 'masuk' || data.tipe == 'keluar' || data.tipe == 'kematian') &&
+        isOptStr(data, 'namaWarga', 160) &&
+        isOptStr(data, 'nomorRumah', 32) &&
+        isOptStr(data, 'noKK', 32) &&
+        isOptBool(data, 'isSaldoAwal') &&
+        isOptNum(data, 'tahun') &&
+        isOptStr(data, 'rtScope', 64) &&
+        isValidId(data.ownerUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidBantuan(data) {
+      return data.keys().hasAll(['id', 'jenisBantuan', 'namaPenerima', 'status', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'jenisBantuan', 'namaPenerima', 'noKK', 'nik', 'nominalAtauBarang',
+          'tanggal', 'status', 'sumberDana', 'keterangan', 'rtScope',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidStr(data.jenisBantuan, 1, 160) &&
+        isValidStr(data.namaPenerima, 1, 160) &&
+        isOptStr(data, 'noKK', 32) &&
+        isOptStr(data, 'nik', 32) &&
+        isOptStr(data, 'nominalAtauBarang', 200) &&
+        isOptStr(data, 'tanggal', 32) &&
+        (data.status == 'Sudah Disalurkan' || data.status == 'Proses Verifikasi' || data.status == 'Baru Diusulkan' || data.status == 'Ditolak') &&
+        isOptStr(data, 'sumberDana', 160) &&
+        isOptStr(data, 'keterangan', 400) &&
+        isOptStr(data, 'rtScope', 64) &&
+        isValidId(data.ownerUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPengumuman(data) {
+      return data.keys().hasAll(['id', 'judul', 'isi', 'kategori', 'tanggal', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'judul', 'isi', 'kategori', 'tanggal', 'tanggalBerakhir', 'penulis',
+          'namaPengurus', 'jabatanPengurus', 'penting', 'tentang',
+          'hariTanggalAcara', 'waktuAcara', 'tempatAcara', 'keteranganTambahan', 'rtScope',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidStr(data.judul, 1, 200) &&
+        isValidStr(data.isi, 1, 4000) &&
+        (data.kategori == 'Kegiatan' || data.kategori == 'Iuran' || data.kategori == 'Keamanan' || data.kategori == 'Sosial' || data.kategori == 'Umum') &&
+        isValidStr(data.tanggal, 1, 32) &&
+        isOptStr(data, 'tanggalBerakhir', 32) &&
+        isOptStr(data, 'penulis', 120) &&
+        isOptStr(data, 'namaPengurus', 120) &&
+        isOptStr(data, 'jabatanPengurus', 120) &&
+        isOptBool(data, 'penting') &&
+        isOptStr(data, 'tentang', 200) &&
+        isOptStr(data, 'hariTanggalAcara', 120) &&
+        isOptStr(data, 'waktuAcara', 80) &&
+        isOptStr(data, 'tempatAcara', 200) &&
+        isOptStr(data, 'keteranganTambahan', 500) &&
+        isOptStr(data, 'rtScope', 64) &&
+        isValidId(data.ownerUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDokumen(data) {
+      return data.keys().hasAll(['id', 'judul', 'namaFile', 'kategori', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'judul', 'namaFile', 'ukuranKb', 'tanggalUpload', 'kategori',
+          'keterangan', 'dataBase64', 'rtScope', 'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidStr(data.judul, 1, 200) &&
+        isValidStr(data.namaFile, 1, 200) &&
+        isOptNum(data, 'ukuranKb') &&
+        isOptStr(data, 'tanggalUpload', 32) &&
+        isValidStr(data.kategori, 1, 80) &&
+        isOptStr(data, 'keterangan', 300) &&
+        isOptStr(data, 'dataBase64', 850000) &&
+        isOptStr(data, 'rtScope', 64) &&
+        isValidId(data.ownerUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRTAccount(data) {
+      return data.keys().hasAll(['id', 'username', 'passwordHash', 'nama', 'status', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'username', 'passwordHash', 'nama', 'rt', 'rw', 'kontak', 'jabatan',
+          'status', 'terakhirLogin', 'terakhirSinkronisasi', 'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidStr(data.username, 1, 80) &&
+        isValidStr(data.passwordHash, 1, 128) &&
+        isValidStr(data.nama, 1, 160) &&
+        isOptStr(data, 'rt', 10) &&
+        isOptStr(data, 'rw', 10) &&
+        isOptStr(data, 'kontak', 40) &&
+        isOptStr(data, 'jabatan', 120) &&
+        (data.status == 'aktif' || data.status == 'nonaktif') &&
+        isOptStr(data, 'terakhirLogin', 64) &&
+        isOptStr(data, 'terakhirSinkronisasi', 64) &&
+        isValidId(data.ownerUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLaporanBulanan(data) {
+      return data.keys().hasAll(['id', 'rt', 'rw', 'bulanTahun', 'statusVerifikasi', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'rt', 'rw', 'namaAdminPengirim', 'tanggalKirim', 'bulanTahun', 'tahun',
+          'totalKK', 'totalJiwa', 'totalLunasIuran', 'totalBelumLunas',
+          'totalKasMasukBulanIni', 'totalKasKeluarBulanIni',
+          'saldoKasUmumBerjalan', 'saldoKasKematianBerjalan',
+          'totalPenerimaBansos', 'catatanKhusus', 'statusVerifikasi',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidStr(data.rt, 1, 10) &&
+        isValidStr(data.rw, 1, 10) &&
+        isOptStr(data, 'namaAdminPengirim', 160) &&
+        isOptStr(data, 'tanggalKirim', 32) &&
+        isValidStr(data.bulanTahun, 1, 64) &&
+        isOptNum(data, 'tahun') &&
+        isOptNum(data, 'totalKK') &&
+        isOptNum(data, 'totalJiwa') &&
+        isOptNum(data, 'totalLunasIuran') &&
+        isOptNum(data, 'totalBelumLunas') &&
+        isOptNum(data, 'totalKasMasukBulanIni') &&
+        isOptNum(data, 'totalKasKeluarBulanIni') &&
+        isOptNum(data, 'saldoKasUmumBerjalan') &&
+        isOptNum(data, 'saldoKasKematianBerjalan') &&
+        isOptNum(data, 'totalPenerimaBansos') &&
+        isOptStr(data, 'catatanKhusus', 500) &&
+        (data.statusVerifikasi == 'Diterima' || data.statusVerifikasi == 'Menunggu Verifikasi' || data.statusVerifikasi == 'Perlu Klarifikasi') &&
+        isValidId(data.ownerUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Collection: /admins/{uid}
+    match /admins/{uid} {
+      allow get: if isValidId(uid) && isVerified() && (request.auth.uid == uid || isBootstrappedAdmin());
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(uid) && isBootstrappedAdmin() &&
+        isValidAdminUser(incoming()) &&
+        incoming().uid == uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(uid) && isBootstrappedAdmin() &&
+        isValidAdminUser(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'role', 'updatedAt']);
+      allow delete: if isValidId(uid) && isBootstrappedAdmin();
+    }
+
+    // Collection: /settings/{settingId}
+    match /settings/{settingId} {
+      allow get: if isValidId(settingId) && isVerified();
+      allow list: if isVerified() && resource.data.ownerUid is string;
+      allow create: if isValidId(settingId) && isAdmin() &&
+        isValidAppSettings(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(settingId) && isAdmin() &&
+        isValidAppSettings(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'tahunAktif', 'nominalJimpitanTahunan', 'nominalJimpitanBulanan',
+          'nominalKematianTahunan', 'nominalKematianBulanan',
+          'saldoAwalKasUmum', 'saldoAwalKasKematian',
+          'keteranganSaldoAwal', 'tanggalSaldoAwal',
+          'kontakKetuaRT', 'kontakBendahara', 'saldoBerlanjutPerTahun', 'profilRT', 'updatedAt'
+        ]);
+      allow delete: if isValidId(settingId) && isAdmin();
+    }
+
+    // Collection: /warga/{wargaId} (PII restricted to Admins or linked resident owner)
+    match /warga/{wargaId} {
+      allow get: if isValidId(wargaId) && (
+        isAdmin() ||
+        (isVerified() && existing().linkedUid == request.auth.uid)
+      );
+      allow list: if isBootstrappedAdmin() ||
+        (isVerified() && resource.data.linkedUid == request.auth.uid);
+      allow create: if isValidId(wargaId) && isAdmin() &&
+        isValidWarga(incoming()) &&
+        incoming().id == wargaId &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(wargaId) && isValidWarga(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
+            'no', 'nama', 'noKK', 'nik', 'noRumah', 'rt', 'rw', 'alamat',
+            'kodePos', 'tanggalDikeluarkan', 'jenisKelamin', 'jumlahJiwa', 'statusIuran',
+            'anggotaKeluarga', 'telepon', 'pin', 'pinAttempts', 'pinLockedUntil',
+            'riwayatIuran', 'riwayatKematian', 'statusIuranPerTahun', 'riwayatIuranPerTahun',
+            'riwayatKematianPerTahun', 'iuranUmumTerbayar', 'iuranKematianTerbayar',
+            'pilihanSkema', 'riwayatPerubahanKK', 'linkedUid', 'updatedAt'
+          ])) ||
+          (isVerified() && existing().linkedUid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['pin', 'telepon', 'updatedAt']))
+        );
+      allow delete: if isValidId(wargaId) && isAdmin();
+    }
+
+    // Collection: /transactions/{txId}
+    match /transactions/{txId} {
+      allow get: if isValidId(txId) && isVerified();
+      allow list: if isVerified() && resource.data.ownerUid is string;
+      allow create: if isValidId(txId) && isAdmin() &&
+        isValidTransaction(incoming()) &&
+        incoming().id == txId &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(txId) && isAdmin() &&
+        isValidTransaction(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'tanggal', 'kategori', 'keterangan', 'nominal', 'tipe',
+          'namaWarga', 'nomorRumah', 'noKK', 'isSaldoAwal', 'tahun', 'rtScope', 'updatedAt'
+        ]);
+      allow delete: if isValidId(txId) && isAdmin();
+    }
+
+    // Collection: /bantuan/{bantuanId} (Confidential UU PDP - Admin only)
+    match /bantuan/{bantuanId} {
+      allow get: if isValidId(bantuanId) && isAdmin();
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(bantuanId) && isAdmin() &&
+        isValidBantuan(incoming()) &&
+        incoming().id == bantuanId &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(bantuanId) && isAdmin() &&
+        isValidBantuan(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'jenisBantuan', 'namaPenerima', 'noKK', 'nik', 'nominalAtauBarang',
+          'tanggal', 'status', 'sumberDana', 'keterangan', 'rtScope', 'updatedAt'
+        ]);
+      allow delete: if isValidId(bantuanId) && isAdmin();
+    }
+
+    // Collection: /pengumuman/{pengumumanId}
+    match /pengumuman/{pengumumanId} {
+      allow get: if isValidId(pengumumanId) && isVerified();
+      allow list: if isVerified() && resource.data.ownerUid is string;
+      allow create: if isValidId(pengumumanId) && isAdmin() &&
+        isValidPengumuman(incoming()) &&
+        incoming().id == pengumumanId &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(pengumumanId) && isAdmin() &&
+        isValidPengumuman(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'judul', 'isi', 'kategori', 'tanggal', 'tanggalBerakhir', 'penulis',
+          'namaPengurus', 'jabatanPengurus', 'penting', 'tentang',
+          'hariTanggalAcara', 'waktuAcara', 'tempatAcara', 'keteranganTambahan', 'rtScope', 'updatedAt'
+        ]);
+      allow delete: if isValidId(pengumumanId) && isAdmin();
+    }
+
+    // Collection: /dokumen/{dokumenId} (Admin only)
+    match /dokumen/{dokumenId} {
+      allow get: if isValidId(dokumenId) && isAdmin();
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(dokumenId) && isAdmin() &&
+        isValidDokumen(incoming()) &&
+        incoming().id == dokumenId &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(dokumenId) && isAdmin() &&
+        isValidDokumen(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'judul', 'namaFile', 'ukuranKb', 'tanggalUpload', 'kategori',
+          'keterangan', 'dataBase64', 'rtScope', 'updatedAt'
+        ]);
+      allow delete: if isValidId(dokumenId) && isAdmin();
+    }
+
+    // Collection: /adminAccounts/{accountId} (Admin only)
+    match /adminAccounts/{accountId} {
+      allow get: if isValidId(accountId) && isAdmin();
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(accountId) && isAdmin() &&
+        isValidAdminRTAccount(incoming()) &&
+        incoming().id == accountId &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(accountId) && isAdmin() &&
+        isValidAdminRTAccount(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'username', 'passwordHash', 'nama', 'rt', 'rw', 'kontak', 'jabatan',
+          'status', 'terakhirLogin', 'terakhirSinkronisasi', 'updatedAt'
+        ]);
+      allow delete: if isValidId(accountId) && isAdmin();
+    }
+
+    // Collection: /laporanBulanan/{laporanId} (Admin only)
+    match /laporanBulanan/{laporanId} {
+      allow get: if isValidId(laporanId) && isAdmin();
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(laporanId) && isAdmin() &&
+        isValidLaporanBulanan(incoming()) &&
+        incoming().id == laporanId &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(laporanId) && isAdmin() &&
+        isValidLaporanBulanan(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'rt', 'rw', 'namaAdminPengirim', 'tanggalKirim', 'bulanTahun', 'tahun',
+          'totalKK', 'totalJiwa', 'totalLunasIuran', 'totalBelumLunas',
+          'totalKasMasukBulanIni', 'totalKasKeluarBulanIni',
+          'saldoKasUmumBerjalan', 'saldoKasKematianBerjalan',
+          'totalPenerimaBansos', 'catatanKhusus', 'statusVerifikasi', 'updatedAt'
+        ]);
+      allow delete: if isValidId(laporanId) && isAdmin();
+    }
+  }
+}

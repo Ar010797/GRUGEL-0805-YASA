@@ -13,6 +13,7 @@ export interface Transaction {
   isSaldoAwal?: boolean;
   tahun?: number; // Tahun pembukuan (default: 2026)
   rtScope?: string; // Scope RT (misal 'RT 08')
+  updatedAt?: string;
 }
 
 export interface AnggotaKeluarga {
@@ -66,6 +67,7 @@ export interface Warga {
   pinAttempts?: number;
   pinLockedUntil?: number; // timestamp jika salah 3x
   riwayatPerubahanKK?: RiwayatPerubahanKK[];
+  updatedAt?: string;
 }
 
 export interface RiwayatPerubahanKK {
@@ -105,6 +107,7 @@ export interface AdminRTAccount {
   status: 'aktif' | 'nonaktif';
   terakhirLogin?: string;
   terakhirSinkronisasi?: string;
+  updatedAt?: string;
 }
 
 // Data pembaruan bulanan yang dikirimkan Admin RT ke Server Pusat Desa
@@ -127,6 +130,7 @@ export interface PembaruanBulananRT {
   totalPenerimaBansos: number;
   catatanKhusus?: string;
   statusVerifikasi: 'Diterima' | 'Menunggu Verifikasi' | 'Perlu Klarifikasi';
+  updatedAt?: string;
 }
 
 export interface PengumumanRT {
@@ -146,6 +150,7 @@ export interface PengumumanRT {
   tempatAcara?: string;
   keteranganTambahan?: string;
   rtScope?: string; // 'Semua RT' atau RT tertentu
+  updatedAt?: string;
 }
 
 // Profil Identitas RT & Format Kop Surat Resmi
@@ -184,6 +189,7 @@ export interface PengaturanKas {
   saldoBerlanjutPerTahun?: Record<number, { kasUmum: number; kasKematian: number }>;
   // Profil RT & Pengaturan Kop Surat Resmi
   profilRT?: ProfilRT;
+  updatedAt?: string;
 }
 
 // Bantuan Pemerintah fleksibel: pilihan preset + input manual bebas
@@ -199,6 +205,7 @@ export interface BantuanPemerintah {
   sumberDana?: string;
   keterangan?: string;
   rtScope?: string;
+  updatedAt?: string;
 }
 
 export const PRESET_JENIS_BANTUAN = [
@@ -224,4 +231,5 @@ export interface DokumenPdfWarga {
   keterangan?: string;
   dataBase64?: string;
   rtScope?: string;
+  updatedAt?: string;
 }

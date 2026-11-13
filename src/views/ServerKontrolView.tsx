@@ -24,6 +24,9 @@ import {
   ArrowRight,
   Eye,
   EyeOff,
+  Cloud,
+  Wifi,
+  LogOut,
 } from 'lucide-react';
 import {
   AdminRTAccount,
@@ -32,6 +35,8 @@ import {
   Transaction,
   BantuanPemerintah,
   PengaturanKas,
+  PengumumanRT,
+  DokumenPdfWarga,
 } from '../types';
 import { downloadBackupJSON, parseBackupFile, AppDatabaseSchema } from '../utils/cloudSync';
 import { ConfirmationModal } from '../components/ConfirmationModal';
@@ -43,6 +48,16 @@ interface ServerKontrolViewProps {
   transactions: Transaction[];
   bantuanList: BantuanPemerintah[];
   pengaturanKas: PengaturanKas;
+  pengumumanList?: PengumumanRT[];
+  dokumenList?: DokumenPdfWarga[];
+  cloudUser?: { email?: string | null; displayName?: string | null } | null;
+  isCloudAdmin?: boolean;
+  sseConnected?: boolean;
+  cloudSyncBusy?: boolean;
+  cloudError?: string | null;
+  onConnectCloud?: () => Promise<void> | void;
+  onDisconnectCloud?: () => Promise<void> | void;
+  onForceSyncNow?: () => Promise<void> | void;
   onAddAdminAccount: (acc: Omit<AdminRTAccount, 'id'>) => void;
   onUpdateAdminAccount: (id: string, acc: Partial<AdminRTAccount>) => void;
   onDeleteAdminAccount: (id: string) => void;
@@ -58,6 +73,16 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
   transactions,
   bantuanList,
   pengaturanKas,
+  pengumumanList = [],
+  dokumenList = [],
+  cloudUser,
+  isCloudAdmin = false,
+  sseConnected = false,
+  cloudSyncBusy = false,
+  cloudError = null,
+  onConnectCloud,
+  onDisconnectCloud,
+  onForceSyncNow,
   onAddAdminAccount,
   onUpdateAdminAccount,
   onDeleteAdminAccount,
@@ -166,8 +191,8 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
       wargaList,
       transactions,
       bantuanList,
-      pengumumanList: [],
-      dokumenList: [],
+      pengumumanList,
+      dokumenList,
       adminAccounts,
       laporanBulananRT,
     };
@@ -550,6 +575,110 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
       {/* TAB 3: KEAMANAN & CADANGAN CLOUD */}
       {activeTab === 'database' && (
         <div className="space-y-6 max-w-3xl">
+          {/* Cloud Firestore & Live Real-time Sync Panel */}
+          <div className="rounded-3xl bg-white p-6 border border-slate-200 shadow-xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-100 text-indigo-700">
+                  <Cloud size={22} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Sinkronisasi Cloud & Real-Time Antar Aplikasi
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Menghubungkan data antara aplikasi Median Android, PWA/Web terinstal, akun Warga, Admin RT, dan Server Pusat secara otomatis
+                  </p>
+                </div>
+              </div>
+
+              <span
+                className={`inline-flex items-center gap-1.5 self-start sm:self-center rounded-full px-3 py-1 text-[11px] font-bold border ${
+                  sseConnected
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                    : 'bg-amber-50 text-amber-800 border-amber-200'
+                }`}
+              >
+                <Wifi size={12} />
+                <span>{sseConnected ? 'Server Live Terhubung' : 'Menghubungkan Server...'}</span>
+              </span>
+            </div>
+
+            <div className="rounded-2xl bg-slate-50 p-4 border border-slate-200/80 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
+                    Status Cloud Firestore Lintas-Server
+                  </span>
+                  {cloudUser ? (
+                    <div className="mt-1 flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-extrabold text-emerald-800">
+                        Terhubung: {cloudUser.email || cloudUser.displayName || 'Akun Google'}
+                      </span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                          isCloudAdmin
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}
+                      >
+                        {isCloudAdmin ? 'Admin Cloud Terverifikasi' : 'Akses Baca Terbatas'}
+                      </span>
+                    </div>
+                  ) : (
+                    <p className="mt-1 text-xs text-slate-600">
+                      Belum terhubung ke Google Cloud Firestore. Hubungkan akun admin agar data di aplikasi Median & web berbeda otomatis menyatu ke satu database cloud.
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {onForceSyncNow && (
+                    <button
+                      type="button"
+                      disabled={cloudSyncBusy}
+                      onClick={onForceSyncNow}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 px-3.5 py-2 text-xs font-bold text-slate-700 transition-all cursor-pointer disabled:opacity-60"
+                    >
+                      <RefreshCw size={14} className={cloudSyncBusy ? 'animate-spin' : ''} />
+                      <span>Sinkronkan Sekarang</span>
+                    </button>
+                  )}
+
+                  {!cloudUser && onConnectCloud && (
+                    <button
+                      type="button"
+                      disabled={cloudSyncBusy}
+                      onClick={onConnectCloud}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-bold text-white shadow-xs transition-all cursor-pointer disabled:opacity-60"
+                    >
+                      <Cloud size={14} />
+                      <span>Hubungkan Cloud Firestore</span>
+                    </button>
+                  )}
+
+                  {cloudUser && onDisconnectCloud && (
+                    <button
+                      type="button"
+                      onClick={onDisconnectCloud}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 px-3.5 py-2 text-xs font-bold text-rose-700 transition-all cursor-pointer"
+                    >
+                      <LogOut size={14} />
+                      <span>Putuskan Cloud</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {cloudError && (
+                <div className="rounded-xl bg-rose-50 border border-rose-200 p-3 text-[11px] font-semibold text-rose-700 flex items-start gap-2">
+                  <AlertCircle size={15} className="shrink-0 mt-0.5" />
+                  <span>{cloudError}</span>
+                </div>
+              )}
+            </div>
+          </div>
+
           <div className="rounded-3xl bg-white p-6 border border-slate-200 shadow-xs space-y-4">
             <div className="flex items-center gap-3">
               <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-100 text-[#0B5D3F]">
@@ -558,13 +687,13 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
               <div>
                 <h3 className="text-sm font-bold text-slate-900">Penyimpanan Aman Multi-Perangkat</h3>
                 <p className="text-xs text-slate-500">
-                  Data kas dan warga tersimpan otomatis di server disk dan memori lokal perangkat
+                  Data kas dan warga tersimpan otomatis di server real-time, Cloud Firestore, dan memori perangkat
                 </p>
               </div>
             </div>
 
             <p className="text-xs text-slate-600 leading-relaxed">
-              Sistem telah dilengkapi dengan mekanisme <strong>Auto-Sync Ganda</strong>: Setiap perubahan data warga, iuran, kas, maupun bansos otomatis disimpan ke penyimpanan server lokal serta dicadangkan di cache perangkat browser. Jika aplikasi dibuka lewat HP atau laptop lain, data tetap sinkron dan tidak hilang.
+              Sistem dilengkapi <strong>Sinkronisasi Otomatis Multi-Jalur</strong> (Server Live SSE, Cloud Firestore, dan Cache Lokal): setiap input atau perubahan data warga, iuran, kas, pengumuman, maupun bansos dari aplikasi Median langsung disebarkan ke seluruh akun Warga, Admin RT, Server Pusat, dan aplikasi web yang terinstal tanpa menimpa perubahan terbaru.
             </p>
 
             <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">

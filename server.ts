@@ -82,8 +82,111 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Real-time Server-Sent Events (SSE) Clients so Median, Web, Warga, Admin & Server stay live-synced
+const sseClients = new Set<express.Response>();
+
+function broadcastSyncEvent(type: 'sync' | 'reset', data: any) {
+  if (sseClients.size === 0) return;
+  const payload = `data: ${JSON.stringify({ type, timestamp: new Date().toISOString(), data })}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
+function toEpochMs(iso?: string): number {
+  if (!iso) return 0;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function mergeServerEntities<T extends { id: string; updatedAt?: string }>(
+  existingList: T[],
+  incomingList: T[],
+  deletedIds: string[],
+  altMatch?: (a: T, b: T) => boolean
+): T[] {
+  const deletedSet = new Set(deletedIds);
+  const result: T[] = [];
+
+  for (const item of existingList) {
+    if (!deletedSet.has(item.id)) {
+      result.push(item);
+    }
+  }
+
+  for (const inc of incomingList) {
+    if (!inc || !inc.id || deletedSet.has(inc.id)) continue;
+    const idx = result.findIndex(
+      (ex) => ex.id === inc.id || (altMatch ? altMatch(ex, inc) : false)
+    );
+    if (idx === -1) {
+      result.push(inc);
+    } else {
+      const existingItem = result[idx];
+      const incTs = toEpochMs(inc.updatedAt);
+      const exTs = toEpochMs(existingItem.updatedAt);
+      if (incTs >= exTs) {
+        result[idx] = inc;
+      }
+    }
+  }
+
+  return result;
+}
+
+function unionIdLists(...lists: Array<string[] | undefined>): string[] {
+  const s = new Set<string>();
+  for (const list of lists) {
+    if (Array.isArray(list)) {
+      for (const id of list) {
+        if (id) s.add(String(id));
+      }
+    }
+  }
+  return Array.from(s).slice(-2000);
+}
+
+// GET /api/stream - Live Server-Sent Events stream across all installed apps, Median WebViews & browsers
+app.get('/api/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  sseClients.add(res);
+
+  const snapshot = readServerData();
+  if (snapshot) {
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'sync', timestamp: new Date().toISOString(), data: snapshot })}\n\n`);
+    } catch {
+      // ignore
+    }
+  }
+
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      clearInterval(keepAlive);
+      sseClients.delete(res);
+    }
+  }, 25000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    sseClients.delete(res);
+  });
+});
+
 // GET Database - Seluruh data yang tersimpan aman di server
 app.get('/api/data', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   const data = readServerData();
   res.json({
     success: true,
@@ -92,7 +195,7 @@ app.get('/api/data', (req, res) => {
   });
 });
 
-// POST Database - Sinkronisasi aman dengan proteksi multi-perangkat (tidak menghapus akun yang sudah ada)
+// POST Database - Sinkronisasi aman dengan proteksi multi-perangkat & tombstone merge
 app.post('/api/data', (req, res) => {
   const payload = req.body;
   if (!payload) {
@@ -101,94 +204,118 @@ app.post('/api/data', (req, res) => {
 
   // Jika admin secara sadar melakukan Hard Reset via menu server
   if (payload.isHardReset === true) {
-    const ok = writeServerData(payload);
+    const cleanPayload = {
+      ...payload,
+      isHardReset: undefined,
+      deletedIds: {
+        warga: [],
+        transactions: [],
+        bantuan: [],
+        pengumuman: [],
+        dokumen: [],
+        adminAccounts: [],
+        laporanBulananRT: [],
+      },
+      lastUpdated: new Date().toISOString(),
+    };
+    const ok = writeServerData(cleanPayload);
+    if (ok) broadcastSyncEvent('reset', cleanPayload);
     return res.json({
       success: ok,
+      data: cleanPayload,
       message: 'Database server berhasil direset secara bersih',
       timestamp: new Date().toISOString(),
     });
   }
 
-  // Proteksi data server: Lakukan smart-merge agar akun & data yang sudah masuk server tidak tertimpa/hilang saat dibuka dari HP lain
   const existing = readServerData() || {};
+  const existingDeleted = existing.deletedIds || {};
+  const incomingDeleted = payload.deletedIds || {};
 
-  // 1. Merge Admin Accounts (Akun Admin RT tidak boleh hilang)
-  const existingAdmins = Array.isArray(existing.adminAccounts) ? existing.adminAccounts : [];
-  const incomingAdmins = Array.isArray(payload.adminAccounts) ? payload.adminAccounts : [];
-  const mergedAdmins = [...incomingAdmins];
-  for (const ea of existingAdmins) {
-    if (!mergedAdmins.some((a) => a.username.toLowerCase() === ea.username.toLowerCase())) {
-      mergedAdmins.push(ea);
-    }
-  }
+  const deletedIds = {
+    warga: unionIdLists(existingDeleted.warga, incomingDeleted.warga, payload.deletedWargaIds),
+    transactions: unionIdLists(existingDeleted.transactions, incomingDeleted.transactions),
+    bantuan: unionIdLists(existingDeleted.bantuan, incomingDeleted.bantuan),
+    pengumuman: unionIdLists(existingDeleted.pengumuman, incomingDeleted.pengumuman, payload.deletedPengumumanIds),
+    dokumen: unionIdLists(existingDeleted.dokumen, incomingDeleted.dokumen),
+    adminAccounts: unionIdLists(existingDeleted.adminAccounts, incomingDeleted.adminAccounts),
+    laporanBulananRT: unionIdLists(existingDeleted.laporanBulananRT, incomingDeleted.laporanBulananRT),
+  };
 
-  // 2. Merge Warga List (Akun & data warga di server tetap aman walau HP berbeda masuk aplikasi)
-  const existingWarga = Array.isArray(existing.wargaList) ? existing.wargaList : [];
-  const incomingWarga = Array.isArray(payload.wargaList) ? payload.wargaList : [];
-  const deletedWargaIds: string[] = Array.isArray(payload.deletedWargaIds) ? payload.deletedWargaIds : [];
+  const mergedAdmins = mergeServerEntities(
+    Array.isArray(existing.adminAccounts) ? existing.adminAccounts : [],
+    Array.isArray(payload.adminAccounts) ? payload.adminAccounts : [],
+    deletedIds.adminAccounts,
+    (a: any, b: any) => String(a.username || '').toLowerCase() === String(b.username || '').toLowerCase()
+  );
 
-  let mergedWarga = [...incomingWarga];
-  for (const ew of existingWarga) {
-    // Jika tidak ada di daftar hapus dan belum ada di incoming, PERTAHANKAN data warga di server
-    if (!deletedWargaIds.includes(ew.id) && !mergedWarga.some((w) => w.id === ew.id || w.noKK === ew.noKK)) {
-      mergedWarga.push(ew);
-    }
-  }
+  const mergedWarga = mergeServerEntities(
+    Array.isArray(existing.wargaList) ? existing.wargaList : [],
+    Array.isArray(payload.wargaList) ? payload.wargaList : [],
+    deletedIds.warga,
+    (a: any, b: any) => Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
+  );
 
-  // 3. Merge Transactions (Kas warga tetap utuh 100%)
-  const existingTx = Array.isArray(existing.transactions) ? existing.transactions : [];
-  const incomingTx = Array.isArray(payload.transactions) ? payload.transactions : [];
-  const mergedTx = [...incomingTx];
-  for (const et of existingTx) {
-    if (!mergedTx.some((t) => t.id === et.id)) {
-      mergedTx.push(et);
-    }
-  }
+  const mergedTx = mergeServerEntities(
+    Array.isArray(existing.transactions) ? existing.transactions : [],
+    Array.isArray(payload.transactions) ? payload.transactions : [],
+    deletedIds.transactions
+  );
 
-  // 4. Merge Pengumuman
-  const existingPengumuman = Array.isArray(existing.pengumumanList) ? existing.pengumumanList : [];
-  const incomingPengumuman = Array.isArray(payload.pengumumanList) ? payload.pengumumanList : [];
-  const deletedPengumumanIds: string[] = Array.isArray(payload.deletedPengumumanIds) ? payload.deletedPengumumanIds : [];
-  const mergedPengumuman = [...incomingPengumuman];
-  for (const ep of existingPengumuman) {
-    if (!deletedPengumumanIds.includes(ep.id) && !mergedPengumuman.some((p) => p.id === ep.id)) {
-      mergedPengumuman.push(ep);
-    }
-  }
+  const mergedPengumuman = mergeServerEntities(
+    Array.isArray(existing.pengumumanList) ? existing.pengumumanList : [],
+    Array.isArray(payload.pengumumanList) ? payload.pengumumanList : [],
+    deletedIds.pengumuman
+  );
 
-  // 5. Merge Bantuan & Dokumen
-  const existingBantuan = Array.isArray(existing.bantuanList) ? existing.bantuanList : [];
-  const incomingBantuan = Array.isArray(payload.bantuanList) ? payload.bantuanList : [];
-  const mergedBantuan = [...incomingBantuan];
-  for (const eb of existingBantuan) {
-    if (!mergedBantuan.some((b) => b.id === eb.id)) {
-      mergedBantuan.push(eb);
-    }
-  }
+  const mergedBantuan = mergeServerEntities(
+    Array.isArray(existing.bantuanList) ? existing.bantuanList : [],
+    Array.isArray(payload.bantuanList) ? payload.bantuanList : [],
+    deletedIds.bantuan
+  );
 
-  const existingDokumen = Array.isArray(existing.dokumenList) ? existing.dokumenList : [];
-  const incomingDokumen = Array.isArray(payload.dokumenList) ? payload.dokumenList : [];
-  const mergedDokumen = [...incomingDokumen];
-  for (const ed of existingDokumen) {
-    if (!mergedDokumen.some((d) => d.id === ed.id)) {
-      mergedDokumen.push(ed);
-    }
-  }
+  const mergedDokumen = mergeServerEntities(
+    Array.isArray(existing.dokumenList) ? existing.dokumenList : [],
+    Array.isArray(payload.dokumenList) ? payload.dokumenList : [],
+    deletedIds.dokumen
+  );
+
+  const mergedLaporan = mergeServerEntities(
+    Array.isArray(existing.laporanBulananRT) ? existing.laporanBulananRT : [],
+    Array.isArray(payload.laporanBulananRT) ? payload.laporanBulananRT : [],
+    deletedIds.laporanBulananRT
+  );
+
+  // Protect newer pengaturanKas from being overwritten by older client cache
+  const existingSettingsTs = toEpochMs(existing.pengaturanKas?.updatedAt);
+  const incomingSettingsTs = toEpochMs(payload.pengaturanKas?.updatedAt);
+  const mergedPengaturanKas =
+    !existing.pengaturanKas || incomingSettingsTs >= existingSettingsTs
+      ? payload.pengaturanKas || existing.pengaturanKas
+      : existing.pengaturanKas;
+  const mergedTahunAktif =
+    !existing.pengaturanKas || incomingSettingsTs >= existingSettingsTs
+      ? payload.tahunAktif || existing.tahunAktif || 2026
+      : existing.tahunAktif || payload.tahunAktif || 2026;
 
   const mergedData = {
-    ...existing,
-    ...payload,
     version: 2,
     lastUpdated: new Date().toISOString(),
+    tahunAktif: mergedTahunAktif,
+    pengaturanKas: mergedPengaturanKas,
     wargaList: mergedWarga,
     adminAccounts: mergedAdmins,
     transactions: mergedTx,
     pengumumanList: mergedPengumuman,
     bantuanList: mergedBantuan,
     dokumenList: mergedDokumen,
+    laporanBulananRT: mergedLaporan,
+    deletedIds,
   };
 
   const ok = writeServerData(mergedData);
+  if (ok) broadcastSyncEvent('sync', mergedData);
+
   res.json({
     success: ok,
     message: ok ? 'Data berhasil disinkronisasi & diamankan permanen di server' : 'Gagal menyimpan ke server',
@@ -199,6 +326,7 @@ app.post('/api/data', (req, res) => {
 
 // GET /api/warga - Akses daftar warga langsung dari server
 app.get('/api/warga', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   const current = readServerData() || {};
   res.json({
     success: true,
@@ -208,47 +336,57 @@ app.get('/api/warga', (req, res) => {
   });
 });
 
-// POST /api/warga - Simpan atau perbarui data warga secara langsung ke file server
+// POST /api/warga - Simpan atau perbarui data warga secara langsung ke file server & broadcast live
 app.post('/api/warga', (req, res) => {
   const { warga } = req.body || {};
   if (!warga || !warga.noKK) {
     return res.status(400).json({ success: false, message: 'Data warga tidak lengkap' });
   }
 
+  const nowIso = new Date().toISOString();
+  const stampedWarga = { ...warga, updatedAt: warga.updatedAt || nowIso };
+
   const current = readServerData() || {};
   const currentWarga: any[] = Array.isArray(current.wargaList) ? current.wargaList : [];
-  const idx = currentWarga.findIndex((w) => w.id === warga.id || w.noKK === warga.noKK);
+  const idx = currentWarga.findIndex((w) => w.id === stampedWarga.id || w.noKK === stampedWarga.noKK);
 
-  let updatedList = [...currentWarga];
+  const updatedList = [...currentWarga];
   if (idx >= 0) {
-    updatedList[idx] = { ...updatedList[idx], ...warga };
+    updatedList[idx] = { ...updatedList[idx], ...stampedWarga };
   } else {
-    updatedList.unshift(warga);
+    updatedList.unshift(stampedWarga);
   }
 
   current.wargaList = updatedList;
-  current.lastUpdated = new Date().toISOString();
+  current.lastUpdated = nowIso;
   writeServerData(current);
+  broadcastSyncEvent('sync', current);
 
   res.json({
     success: true,
-    message: `Data warga ${warga.nama} berhasil tersimpan aman di server`,
-    warga,
+    message: `Data warga ${stampedWarga.nama} berhasil tersimpan aman di server`,
+    warga: stampedWarga,
     totalWarga: updatedList.length,
-    timestamp: new Date().toISOString(),
+    timestamp: nowIso,
   });
 });
 
-// DELETE /api/warga/:id - Hapus data warga dari server secara eksplisit
+// DELETE /api/warga/:id - Hapus data warga dari server secara eksplisit & catat tombstone
 app.delete('/api/warga/:id', (req, res) => {
   const { id } = req.params;
   const current = readServerData() || {};
   const currentWarga: any[] = Array.isArray(current.wargaList) ? current.wargaList : [];
   const updatedList = currentWarga.filter((w) => w.id !== id && w.noKK !== id);
 
+  const existingDeleted = current.deletedIds || {};
+  current.deletedIds = {
+    ...existingDeleted,
+    warga: unionIdLists(existingDeleted.warga, [id]),
+  };
   current.wargaList = updatedList;
   current.lastUpdated = new Date().toISOString();
   writeServerData(current);
+  broadcastSyncEvent('sync', current);
 
   res.json({
     success: true,
@@ -263,20 +401,23 @@ app.post('/api/sync-monthly', (req, res) => {
   const report = req.body;
   const currentData = readServerData() || {};
   const currentReports = currentData.laporanBulananRT || [];
+  const nowIso = new Date().toISOString();
+  const stampedReport = { ...report, updatedAt: report.updatedAt || nowIso };
 
   const updatedReports = [
-    report,
-    ...currentReports.filter((r: any) => r.id !== report.id),
+    stampedReport,
+    ...currentReports.filter((r: any) => r.id !== stampedReport.id),
   ];
 
   currentData.laporanBulananRT = updatedReports;
-  currentData.lastUpdated = new Date().toISOString();
+  currentData.lastUpdated = nowIso;
   writeServerData(currentData);
+  broadcastSyncEvent('sync', currentData);
 
   res.json({
     success: true,
     message: `Laporan bulanan ${report.rt || 'RT'} berhasil diterima server desa`,
-    timestamp: new Date().toISOString(),
+    timestamp: nowIso,
   });
 });
 
