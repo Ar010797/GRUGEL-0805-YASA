@@ -417,7 +417,14 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                         </button>
                       </td>
                       <td className="py-3.5 px-4 text-[11px] text-slate-500">
-                        {acc.terakhirSinkronisasi || 'Belum ada kiriman'}
+                        <div className="font-semibold text-slate-700">
+                          {acc.terakhirSinkronisasi || 'Belum ada sinkronisasi'}
+                        </div>
+                        {acc.terakhirLogin && (
+                          <div className="text-[10px] text-slate-400">
+                            Login: {acc.terakhirLogin}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1">
@@ -466,6 +473,15 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                       </td>
                     </tr>
                   ))}
+                  {filteredAdmins.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="py-10 px-6 text-center text-xs text-slate-500">
+                        Belum ada akun Admin RT yang terdaftar di Server Pusat. Klik tombol{' '}
+                        <strong className="text-[#0B5D3F]">+ Tambah Admin RT</strong> di atas atau minta Admin RT menekan{' '}
+                        <strong className="text-[#0B5D3F]">Sinkronkan Akun ke Server</strong> pada perangkatnya.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>

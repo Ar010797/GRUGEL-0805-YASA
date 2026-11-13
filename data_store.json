@@ -1,8 +1,25 @@
 {
   "version": 2,
-  "lastUpdated": "2026-11-13T11:22:04.775Z",
+  "revision": 1794569648883,
+  "lastUpdated": "2026-11-13T11:34:08.883Z",
   "tahunAktif": 2026,
   "pengaturanKas": {
+    "nominalJimpitanTahunan": 300000,
+    "nominalJimpitanBulanan": 25000,
+    "nominalKematianTahunan": 120000,
+    "nominalKematianBulanan": 10000,
+    "saldoAwalKasUmum": 0,
+    "saldoAwalKasKematian": 0,
+    "keteranganSaldoAwal": "Sisa Kas RT Periode Lalu (Pindahan Buku Manual)",
+    "tanggalSaldoAwal": "2026-01-01",
+    "kontakKetuaRT": {
+      "telp": "085869372879",
+      "nama": "Bpk. Karsono"
+    },
+    "kontakBendahara": {
+      "telp": "0813-9876-5432",
+      "nama": "Bpk. Bambang S."
+    },
     "profilRT": {
       "desa": "Desa Kotayasa",
       "alamatSekretariat": "RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas 53183",
@@ -16,32 +33,25 @@
       "kecamatan": "Kecamatan Sumbang",
       "namaRT": "08"
     },
-    "tanggalSaldoAwal": "2026-01-01",
-    "saldoAwalKasUmum": 0,
-    "keteranganSaldoAwal": "Sisa Kas RT Periode Lalu (Pindahan Buku Manual)",
-    "nominalJimpitanBulanan": 25000,
-    "nominalKematianTahunan": 120000,
-    "saldoAwalKasKematian": 0,
-    "nominalKematianBulanan": 10000,
-    "nominalJimpitanTahunan": 300000,
-    "kontakKetuaRT": {
-      "telp": "085869372879",
-      "nama": "Bpk. Karsono"
-    },
-    "kontakBendahara": {
-      "telp": "0813-9876-5432",
-      "nama": "Bpk. Bambang S."
-    },
     "tahunAktif": 2026,
-    "updatedAt": "2026-11-13T11:12:17.115Z"
+    "updatedAt": "2026-11-13T11:34:06.963Z"
   },
   "wargaList": [
     {
-      "tanggalDikeluarkan": "04-09-2024",
       "id": "w_alipamuji",
-      "kodePos": "53183",
-      "jenisKelamin": "Laki-laki",
+      "no": 1,
+      "nama": "Ali Pamuji",
+      "noKK": "3302211101230002",
+      "nik": "3302212512920002",
+      "noRumah": "01",
+      "rt": "08",
       "rw": "05",
+      "alamat": "RT 08 RW 05 Desa Kotayasa",
+      "kodePos": "53183",
+      "tanggalDikeluarkan": "04-09-2024",
+      "jenisKelamin": "Laki-laki",
+      "jumlahJiwa": 4,
+      "statusIuran": "Sudah",
       "anggotaKeluarga": [
         {
           "statusPerkawinan": "Kawin Tercatat",
@@ -112,34 +122,25 @@
           "hubungan": "Anak"
         }
       ],
-      "noRumah": "01",
-      "nama": "Ali Pamuji",
-      "noKK": "3302211101230002",
-      "no": 1,
-      "alamat": "RT 08 RW 05 Desa Kotayasa",
-      "nik": "3302212512920002",
-      "jumlahJiwa": 4,
-      "statusIuran": "Sudah",
       "pin": "123456",
-      "rt": "08",
-      "updatedAt": "2026-11-13T11:12:17.115Z"
+      "updatedAt": "2026-11-13T11:34:06.972Z"
     }
   ],
   "adminAccounts": [],
   "transactions": [
     {
-      "tahun": 2026,
       "id": "tx_init_alipamuji",
-      "kategori": "Iuran Jimpitan Kas Warga",
-      "nominal": 300000,
-      "namaWarga": "Ali Pamuji",
-      "keterangan": "Iuran Kas RT 2026 (Warga: Ali Pamuji)",
-      "noKK": "3302211101230002",
-      "rtScope": "RT 08",
-      "tipe": "masuk",
       "tanggal": "2026-01-10",
+      "kategori": "Iuran Jimpitan Kas Warga",
+      "keterangan": "Iuran Kas RT 2026 (Warga: Ali Pamuji)",
+      "nominal": 300000,
+      "tipe": "masuk",
+      "namaWarga": "Ali Pamuji",
       "nomorRumah": "01",
-      "updatedAt": "2026-11-13T11:08:15.150Z"
+      "noKK": "3302211101230002",
+      "tahun": 2026,
+      "rtScope": "RT 08",
+      "updatedAt": "2026-11-13T11:34:06.979Z"
     }
   ],
   "pengumumanList": [],

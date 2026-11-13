@@ -19,6 +19,9 @@ import {
   Landmark,
   Eye,
   EyeOff,
+  Server,
+  CloudUpload,
+  RefreshCw,
 } from 'lucide-react';
 import { PengaturanKas, AuthUser } from '../types';
 import { ConfirmationModal } from '../components/ConfirmationModal';
@@ -27,6 +30,10 @@ interface PengaturanViewProps {
   pengaturanKas: PengaturanKas;
   currentUser: AuthUser | null;
   currentPin: string;
+  isAdminOnServer?: boolean;
+  adminSyncBusy?: boolean;
+  lastAdminSyncLabel?: string;
+  onSyncAdminAccount?: () => Promise<void> | void;
   onUpdatePin: (newPin: string) => void;
   onUpdatePengaturan: (newSetting: Partial<PengaturanKas>) => void;
   onOpenSaldoAwalModal: () => void;
@@ -40,6 +47,10 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
   pengaturanKas,
   currentUser,
   currentPin,
+  isAdminOnServer = true,
+  adminSyncBusy = false,
+  lastAdminSyncLabel,
+  onSyncAdminAccount,
   onUpdatePin,
   onUpdatePengaturan,
   onOpenSaldoAwalModal,
@@ -384,6 +395,74 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
       ) : (
         /* MODE ADMIN: PENGATURAN LENGKAP */
         <div className="space-y-6">
+          {/* STATUS PENDAFTARAN & SINKRONISASI AKUN ADMIN KE SERVER */}
+          {currentUser?.role === 'admin' && onSyncAdminAccount && (
+            <div
+              className={`rounded-3xl p-5 sm:p-6 shadow-xs border ${
+                isAdminOnServer
+                  ? 'bg-emerald-50/70 border-emerald-200'
+                  : 'bg-amber-50 border-amber-300'
+              } flex flex-col sm:flex-row sm:items-center justify-between gap-4`}
+            >
+              <div className="flex items-start gap-3">
+                <div
+                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl ${
+                    isAdminOnServer
+                      ? 'bg-[#0B5D3F] text-white'
+                      : 'bg-amber-500 text-white'
+                  }`}
+                >
+                  <Server size={20} />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-sm font-extrabold text-slate-900">
+                      Status Akun Admin di Server Pusat
+                    </h2>
+                    <span
+                      className={`rounded-full px-2.5 py-0.5 text-[10px] font-extrabold border ${
+                        isAdminOnServer
+                          ? 'bg-emerald-100 text-[#0B5D3F] border-emerald-300'
+                          : 'bg-amber-100 text-amber-900 border-amber-300'
+                      }`}
+                    >
+                      {isAdminOnServer ? 'Terdaftar & Tersinkron' : 'Belum Masuk Server'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                    {isAdminOnServer
+                      ? `Akun "${currentUser.username}" sudah terdaftar di Server. Semua data yang Anda masukkan otomatis terkirim ke akun Warga, Admin lain, dan Server.${lastAdminSyncLabel ? ` Sinkron terakhir: ${lastAdminSyncLabel}.` : ''}`
+                      : `Akun "${currentUser.username}" belum terdaftar di database Server Pusat. Tekan tombol di samping untuk mendaftarkan akun & menyinkronkan seluruh data perangkat ini ke Server agar terbaca oleh perangkat lain.`}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={adminSyncBusy}
+                onClick={onSyncAdminAccount}
+                className={`shrink-0 inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-xs font-bold text-white shadow-sm transition-all cursor-pointer disabled:opacity-60 ${
+                  isAdminOnServer
+                    ? 'bg-[#0B5D3F] hover:bg-[#084831]'
+                    : 'bg-amber-600 hover:bg-amber-700'
+                }`}
+              >
+                {adminSyncBusy ? (
+                  <RefreshCw size={15} className="animate-spin" />
+                ) : (
+                  <CloudUpload size={15} />
+                )}
+                <span>
+                  {adminSyncBusy
+                    ? 'Menyinkronkan...'
+                    : isAdminOnServer
+                    ? 'Sinkronkan Ulang Akun & Data'
+                    : 'Sinkronkan Akun & Data ke Server'}
+                </span>
+              </button>
+            </div>
+          )}
+
           {/* KARTU PROFIL RT & KOP SURAT RESMI */}
           <div className="rounded-3xl bg-white p-6 shadow-xs border border-slate-200 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">

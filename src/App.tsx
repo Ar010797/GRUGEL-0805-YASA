@@ -38,6 +38,7 @@ import {
   FileSpreadsheet,
   Share2,
   Cloud,
+  CloudUpload,
   Wifi,
   RefreshCw,
 } from 'lucide-react';
@@ -75,6 +76,9 @@ import {
   saveSingleWargaToServer,
   deleteWargaFromServer,
   fetchServerSnapshot,
+  fetchServerAdminAccounts,
+  syncAdminAccountToServer,
+  formatWaktuSyncID,
   checkServerRevision,
   flushSaveAppDataKeepalive,
   mergeDatabaseStates,
@@ -179,9 +183,12 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState<'synced' | 'saving' | 'offline'>('synced');
   const [sseConnected, setSseConnected] = useState<boolean>(false);
   const [dataLoadedReady, setDataLoadedReady] = useState<boolean>(false);
+  const [serverAdminAccounts, setServerAdminAccounts] = useState<AdminRTAccount[]>([]);
+  const [adminSyncBusy, setAdminSyncBusy] = useState<boolean>(false);
   const [cloudUser, setCloudUser] = useState<FirebaseUser | null>(null);
   const [isCloudAdmin, setIsCloudAdmin] = useState<boolean>(false);
   const [cloudAuthReadyUid, setCloudAuthReadyUid] = useState<string | null>(null);
+  const [firestoreReadyUid, setFirestoreReadyUid] = useState<string | null>(null);
   const [cloudSyncBusy, setCloudSyncBusy] = useState<boolean>(false);
   const [cloudError, setCloudError] = useState<string | null>(null);
 
@@ -326,6 +333,7 @@ export default function App() {
     dokumen: new Map<string, KnownDocMeta>(),
     adminAccounts: new Map<string, KnownDocMeta>(),
     laporanBulanan: new Map<string, KnownDocMeta>(),
+    pendingCreates: new Set<string>(),
   });
   const firestoreSeenIdsRef = useRef<{
     warga: Set<string> | null;
@@ -428,7 +436,11 @@ export default function App() {
 
     if (source === 'sse' || source === 'refresh') {
       lastServerHashRef.current = nextHash;
-    } else if (source === 'firestore') {
+    } else if (
+      source === 'firestore' &&
+      lastFirestoreHashRef.current !== '' &&
+      currentHash === lastFirestoreHashRef.current
+    ) {
       lastFirestoreHashRef.current = nextHash;
     }
 
@@ -457,7 +469,7 @@ export default function App() {
     setLaporanBulananRT(Array.isArray(nextState.laporanBulananRT) ? nextState.laporanBulananRT : []);
   };
 
-  // Initial Data Load + Live SSE Subscription + Lightweight 3.5s Polling + Keepalive Background Flush
+  // Initial Data Load + Live SSE Subscription + Lightweight 2.5s Polling + Keepalive Background Flush
   useEffect(() => {
     let active = true;
 
@@ -472,9 +484,14 @@ export default function App() {
           if (typeof serverData.revision === 'number') {
             lastServerRevisionRef.current = serverData.revision;
           }
+          setServerAdminAccounts(Array.isArray(serverData.adminAccounts) ? serverData.adminAccounts : []);
         } else {
           // Server has no saved state yet -> force Auto-Save to push resolved state to server
           lastServerHashRef.current = '';
+          const adminInfo = await fetchServerAdminAccounts();
+          if (active && adminInfo) {
+            setServerAdminAccounts(adminInfo.adminAccounts);
+          }
         }
 
         // Merge with latestStateRef so early Firestore snapshots are never clobbered
@@ -503,6 +520,7 @@ export default function App() {
       if (typeof remoteData.revision === 'number') {
         lastServerRevisionRef.current = Math.max(lastServerRevisionRef.current, remoteData.revision);
       }
+      setServerAdminAccounts(Array.isArray(remoteData.adminAccounts) ? remoteData.adminAccounts : []);
       const merged = mergeDatabaseStates(
         remoteData,
         latestStateRef.current,
@@ -517,6 +535,7 @@ export default function App() {
         if (typeof remoteData.revision === 'number') {
           lastServerRevisionRef.current = remoteData.revision;
         }
+        setServerAdminAccounts(Array.isArray(remoteData.adminAccounts) ? remoteData.adminAccounts : []);
         if (isReset) {
           deletedIdsRef.current = { ...EMPTY_DELETED_IDS };
           applyMergedStateToReact(remoteData, 'sse', true);
@@ -534,7 +553,7 @@ export default function App() {
       }
     );
 
-    // Lightweight 3.5s polling fallback for Median Android WebView & mobile browsers where SSE buffers/drops
+    // Lightweight 2.5s polling fallback for Median Android WebView & mobile browsers where SSE buffers/drops
     const pollInterval = setInterval(async () => {
       if (!active || !isLoadedRef.current) return;
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
@@ -543,7 +562,7 @@ export default function App() {
       if (status.hasData && (status.changed || lastServerRevisionRef.current === 0)) {
         await handleRefreshFromServer();
       }
-    }, 3500);
+    }, 2500);
 
     const flushPendingIfHidden = () => {
       if (!isLoadedRef.current) return;
@@ -584,8 +603,23 @@ export default function App() {
   // Firebase Google Auth & Cloud Firestore Live Listener (Cross-deployment: Median, PWA, ais-dev, ais-pre)
   useEffect(() => {
     completeGoogleRedirectIfPending().catch(() => {});
+    const resetKnownFirestoreMeta = () => {
+      knownFirestoreMetaRef.current.settings = undefined;
+      knownFirestoreMetaRef.current.warga.clear();
+      knownFirestoreMetaRef.current.transactions.clear();
+      knownFirestoreMetaRef.current.bantuan.clear();
+      knownFirestoreMetaRef.current.pengumuman.clear();
+      knownFirestoreMetaRef.current.dokumen.clear();
+      knownFirestoreMetaRef.current.adminAccounts.clear();
+      knownFirestoreMetaRef.current.laporanBulanan.clear();
+      knownFirestoreMetaRef.current.pendingCreates?.clear();
+      lastFirestoreHashRef.current = '';
+    };
+
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       setCloudError(null);
+      setFirestoreReadyUid(null);
+      resetKnownFirestoreMeta();
       if (!user) {
         setCloudUser(null);
         setIsCloudAdmin(false);
@@ -610,6 +644,9 @@ export default function App() {
   useEffect(() => {
     if (!cloudUser || cloudAuthReadyUid !== cloudUser.uid) return;
 
+    let active = true;
+    setFirestoreReadyUid(null);
+
     firestoreSeenIdsRef.current = {
       warga: null,
       transactions: null,
@@ -618,6 +655,19 @@ export default function App() {
       dokumen: null,
       adminAccounts: null,
       laporanBulananRT: null,
+    };
+
+    const clearConfirmedPendingCreates = (
+      colName: string,
+      metas: Map<string, KnownDocMeta>
+    ) => {
+      const pending = knownFirestoreMetaRef.current.pendingCreates;
+      if (!pending || pending.size === 0) return;
+      for (const [docId, meta] of metas.entries()) {
+        if (!meta.hasPendingWrites && meta.createdAt) {
+          pending.delete(`${colName}/${docId}`);
+        }
+      }
     };
 
     const mergeFirestoreSlice = <T extends { id: string; updatedAt?: string }>(
@@ -648,7 +698,14 @@ export default function App() {
 
     const unsubFirestore = subscribeFirestoreCollections(cloudUser, isCloudAdmin, {
       onSettings: (settings, tahun, meta) => {
-        if (meta) knownFirestoreMetaRef.current.settings = meta;
+        if (meta) {
+          knownFirestoreMetaRef.current.settings = meta;
+          if (!meta.hasPendingWrites) {
+            knownFirestoreMetaRef.current.pendingCreates?.delete('settings/kas');
+          }
+        } else {
+          knownFirestoreMetaRef.current.settings = undefined;
+        }
         if (!settings) return;
         const cur = latestStateRef.current;
         const nextPengaturanTs = Date.parse(settings.updatedAt || '') || 0;
@@ -666,6 +723,7 @@ export default function App() {
       },
       onWarga: (items, metas) => {
         knownFirestoreMetaRef.current.warga = metas;
+        clearConfirmedPendingCreates('warga', metas);
         const cur = latestStateRef.current;
         const mergedList = mergeFirestoreSlice(
           'warga',
@@ -678,6 +736,7 @@ export default function App() {
       },
       onTransactions: (items, metas) => {
         knownFirestoreMetaRef.current.transactions = metas;
+        clearConfirmedPendingCreates('transactions', metas);
         const cur = latestStateRef.current;
         const mergedList = mergeFirestoreSlice(
           'transactions',
@@ -689,6 +748,7 @@ export default function App() {
       },
       onPengumuman: (items, metas) => {
         knownFirestoreMetaRef.current.pengumuman = metas;
+        clearConfirmedPendingCreates('pengumuman', metas);
         const cur = latestStateRef.current;
         const mergedList = mergeFirestoreSlice(
           'pengumuman',
@@ -700,18 +760,21 @@ export default function App() {
       },
       onBantuan: (items, metas) => {
         knownFirestoreMetaRef.current.bantuan = metas;
+        clearConfirmedPendingCreates('bantuan', metas);
         const cur = latestStateRef.current;
         const mergedList = mergeFirestoreSlice('bantuan', 'bantuan', items, cur.bantuanList);
         applyMergedStateToReact({ ...cur, bantuanList: mergedList }, 'firestore');
       },
       onDokumen: (items, metas) => {
         knownFirestoreMetaRef.current.dokumen = metas;
+        clearConfirmedPendingCreates('dokumen', metas);
         const cur = latestStateRef.current;
         const mergedList = mergeFirestoreSlice('dokumen', 'dokumen', items, cur.dokumenList);
         applyMergedStateToReact({ ...cur, dokumenList: mergedList }, 'firestore');
       },
       onAdminAccounts: (items, metas) => {
         knownFirestoreMetaRef.current.adminAccounts = metas;
+        clearConfirmedPendingCreates('adminAccounts', metas);
         const cur = latestStateRef.current;
         const mergedList = mergeFirestoreSlice(
           'adminAccounts',
@@ -720,10 +783,18 @@ export default function App() {
           cur.adminAccounts,
           (a, b) => a.username.toLowerCase() === b.username.toLowerCase()
         );
+        if (items.length > 0) {
+          setServerAdminAccounts((prev) =>
+            mergeEntityList(prev, items, deletedIdsRef.current.adminAccounts, (a, b) =>
+              a.username.toLowerCase() === b.username.toLowerCase()
+            )
+          );
+        }
         applyMergedStateToReact({ ...cur, adminAccounts: mergedList }, 'firestore');
       },
       onLaporanBulanan: (items, metas) => {
         knownFirestoreMetaRef.current.laporanBulanan = metas;
+        clearConfirmedPendingCreates('laporanBulanan', metas);
         const cur = latestStateRef.current;
         const mergedList = mergeFirestoreSlice(
           'laporanBulananRT',
@@ -733,29 +804,19 @@ export default function App() {
         );
         applyMergedStateToReact({ ...cur, laporanBulananRT: mergedList }, 'firestore');
       },
+      onInitialReady: () => {
+        if (active) {
+          setFirestoreReadyUid(cloudUser.uid);
+        }
+      },
       onError: (err) => {
         setCloudError(err.message);
       },
     });
 
-    // After initial Firestore snapshots & initData settle, upload any local/Express data missing in Cloud Firestore
-    const initialPushTimer = setTimeout(async () => {
-      if (!isCloudAdmin) return;
-      try {
-        await syncStateToFirestore(
-          cloudUser,
-          latestStateRef.current,
-          knownFirestoreMetaRef.current,
-          deletedIdsRef.current
-        );
-        lastFirestoreHashRef.current = computeStateHash(latestStateRef.current);
-      } catch (err: any) {
-        setCloudError(err?.message || 'Gagal menyinkronkan data awal ke Cloud Firestore.');
-      }
-    }, 1200);
-
     return () => {
-      clearTimeout(initialPushTimer);
+      active = false;
+      setFirestoreReadyUid(null);
       unsubFirestore();
     };
   }, [cloudUser, isCloudAdmin, cloudAuthReadyUid]);
@@ -767,8 +828,13 @@ export default function App() {
     const stateToPersist = buildCurrentSchema();
     const currentHash = computeStateHash(stateToPersist);
     const needsServerSync = currentHash !== lastServerHashRef.current;
-    const needsCloudSync =
-      Boolean(cloudUser && isCloudAdmin) && currentHash !== lastFirestoreHashRef.current;
+    const cloudSyncReady = Boolean(
+      cloudUser &&
+        isCloudAdmin &&
+        cloudAuthReadyUid === cloudUser.uid &&
+        firestoreReadyUid === cloudUser.uid
+    );
+    const needsCloudSync = cloudSyncReady && currentHash !== lastFirestoreHashRef.current;
 
     if (!needsServerSync && !needsCloudSync) {
       setSyncStatus('synced');
@@ -794,6 +860,9 @@ export default function App() {
               res.serverData.revision
             );
           }
+          setServerAdminAccounts(
+            Array.isArray(res.serverData.adminAccounts) ? res.serverData.adminAccounts : []
+          );
           const mergedBack = mergeDatabaseStates(
             res.serverData,
             latestStateRef.current,
@@ -805,15 +874,18 @@ export default function App() {
         }
       }
 
-      if (needsCloudSync && cloudUser && isCloudAdmin) {
+      if (needsCloudSync && cloudSyncReady && cloudUser) {
         try {
-          await syncStateToFirestore(
+          const snapshotToSync = latestStateRef.current;
+          const syncRes = await syncStateToFirestore(
             cloudUser,
-            latestStateRef.current,
+            snapshotToSync,
             knownFirestoreMetaRef.current,
             deletedIdsRef.current
           );
-          lastFirestoreHashRef.current = computeStateHash(latestStateRef.current);
+          if (syncRes.deferred === 0) {
+            lastFirestoreHashRef.current = computeStateHash(snapshotToSync);
+          }
           setCloudError(null);
         } catch (err: any) {
           ok = false;
@@ -838,7 +910,85 @@ export default function App() {
     laporanBulananRT,
     cloudUser,
     isCloudAdmin,
+    cloudAuthReadyUid,
+    firestoreReadyUid,
   ]);
+
+  // Automatic Background Retry Loop: ensures offline / interrupted Admin edits ALWAYS push to Server & Cloud
+  useEffect(() => {
+    if (!dataLoadedReady) return;
+    const retryInterval = setInterval(async () => {
+      if (!isLoadedRef.current) return;
+      const snapshot = latestStateRef.current;
+      const currentHash = computeStateHash(snapshot);
+      const needsServerRetry = currentHash !== lastServerHashRef.current;
+      const cloudSyncReady = Boolean(
+        cloudUser &&
+          isCloudAdmin &&
+          cloudAuthReadyUid === cloudUser.uid &&
+          firestoreReadyUid === cloudUser.uid
+      );
+      const needsCloudRetry = cloudSyncReady && currentHash !== lastFirestoreHashRef.current;
+
+      if (!needsServerRetry && !needsCloudRetry && syncStatus !== 'offline') {
+        return;
+      }
+
+      let allOk = true;
+      if (needsServerRetry || syncStatus === 'offline') {
+        const res = await saveAppData(snapshot, { deletedIds: deletedIdsRef.current });
+        if (!res.ok) {
+          allOk = false;
+        } else {
+          lastServerHashRef.current = computeStateHash(latestStateRef.current);
+          if (res.serverData) {
+            if (typeof res.serverData.revision === 'number') {
+              lastServerRevisionRef.current = Math.max(
+                lastServerRevisionRef.current,
+                res.serverData.revision
+              );
+            }
+            setServerAdminAccounts(
+              Array.isArray(res.serverData.adminAccounts) ? res.serverData.adminAccounts : []
+            );
+            const mergedBack = mergeDatabaseStates(
+              res.serverData,
+              latestStateRef.current,
+              deletedIdsRef.current
+            );
+            if (computeStateHash(mergedBack) !== computeStateHash(latestStateRef.current)) {
+              applyMergedStateToReact(mergedBack, 'sse');
+            }
+          }
+        }
+      }
+
+      if (needsCloudRetry && cloudSyncReady && cloudUser) {
+        try {
+          const snapshotToSync = latestStateRef.current;
+          const syncRes = await syncStateToFirestore(
+            cloudUser,
+            snapshotToSync,
+            knownFirestoreMetaRef.current,
+            deletedIdsRef.current
+          );
+          if (syncRes.deferred === 0) {
+            lastFirestoreHashRef.current = computeStateHash(snapshotToSync);
+          }
+          setCloudError(null);
+        } catch (err: any) {
+          allOk = false;
+          setCloudError(err?.message || 'Gagal sinkron ke Cloud Firestore.');
+        }
+      }
+
+      if (allOk) {
+        setSyncStatus('synced');
+      }
+    }, 4000);
+
+    return () => clearInterval(retryInterval);
+  }, [dataLoadedReady, syncStatus, cloudUser, isCloudAdmin, cloudAuthReadyUid, firestoreReadyUid]);
 
   const handleConnectCloud = async () => {
     setCloudSyncBusy(true);
@@ -883,29 +1033,162 @@ export default function App() {
       const remoteData = await fetchServerSnapshot();
       let working = latestStateRef.current;
       if (remoteData) {
+        setServerAdminAccounts(Array.isArray(remoteData.adminAccounts) ? remoteData.adminAccounts : []);
         working = mergeDatabaseStates(remoteData, working, deletedIdsRef.current);
         applyMergedStateToReact(working, 'refresh');
       }
       const res = await saveAppData(working, { deletedIds: deletedIdsRef.current });
       if (res.serverData) {
+        setServerAdminAccounts(
+          Array.isArray(res.serverData.adminAccounts) ? res.serverData.adminAccounts : []
+        );
         const mergedAfter = mergeDatabaseStates(res.serverData, working, deletedIdsRef.current);
         applyMergedStateToReact(mergedAfter, 'refresh');
         working = mergedAfter;
       }
-      if (cloudUser && isCloudAdmin) {
-        await syncStateToFirestore(
+      if (
+        cloudUser &&
+        isCloudAdmin &&
+        cloudAuthReadyUid === cloudUser.uid &&
+        firestoreReadyUid === cloudUser.uid
+      ) {
+        const syncRes = await syncStateToFirestore(
           cloudUser,
           working,
           knownFirestoreMetaRef.current,
           deletedIdsRef.current
         );
-        lastFirestoreHashRef.current = computeStateHash(working);
+        if (syncRes.deferred === 0) {
+          lastFirestoreHashRef.current = computeStateHash(working);
+        }
       }
       setSyncStatus(res.ok ? 'synced' : 'offline');
     } catch (err: any) {
       setCloudError(err?.message || 'Gagal menyinkronkan data.');
     } finally {
       setCloudSyncBusy(false);
+    }
+  };
+
+  // Explicit Admin Account + All Local Data Registration & Sync to Server
+  const handleSyncAdminAccountToServer = async (
+    overrideAccount?: AdminRTAccount
+  ): Promise<{ ok: boolean; message?: string; account?: AdminRTAccount }> => {
+    setAdminSyncBusy(true);
+    setCloudError(null);
+    try {
+      const currentSnapshot = latestStateRef.current;
+      const rtStr = currentSnapshot.pengaturanKas?.profilRT?.namaRT || '08';
+      const rwStr = currentSnapshot.pengaturanKas?.profilRT?.namaRW || '05';
+      const ketuaNama = currentSnapshot.pengaturanKas?.kontakKetuaRT?.nama?.trim();
+      const ketuaTelp = currentSnapshot.pengaturanKas?.kontakKetuaRT?.telp?.trim();
+      const nowLabel = formatWaktuSyncID();
+      const nowIso = new Date().toISOString();
+
+      let targetAccount: AdminRTAccount | undefined = overrideAccount;
+
+      if (!targetAccount && currentUser?.role === 'admin') {
+        const matchedLocal =
+          currentSnapshot.adminAccounts.find(
+            (a) => a.username.toLowerCase() === currentUser.username.toLowerCase()
+          ) ||
+          serverAdminAccounts.find(
+            (a) => a.username.toLowerCase() === currentUser.username.toLowerCase()
+          );
+
+        targetAccount = matchedLocal || {
+          id: currentUser.username.toLowerCase() === 'admin' ? 'adm_rt08' : `adm_${Date.now()}`,
+          username: currentUser.username,
+          passwordHash:
+            currentUser.username.toLowerCase() === 'admin' ? 'rt08rw05' : `rt${rtStr}rw${rwStr}`,
+          nama: currentUser.nama || (ketuaNama ? `${ketuaNama} (Ketua RT ${rtStr})` : `Admin RT ${rtStr}`),
+          rt: rtStr,
+          rw: rwStr,
+          kontak: ketuaTelp || '0812-3456-7890',
+          jabatan: `Ketua RT ${rtStr} RW ${rwStr}`,
+          status: 'aktif',
+        };
+      }
+
+      if (!targetAccount) {
+        return { ok: false, message: 'Tidak ada akun Admin RT aktif untuk disinkronkan.' };
+      }
+
+      const stampedAccount: AdminRTAccount = {
+        ...targetAccount,
+        terakhirLogin: targetAccount.terakhirLogin || nowLabel,
+        terakhirSinkronisasi: `Tersinkron ${nowLabel}`,
+        updatedAt: nowIso,
+      };
+
+      // Clear any stale tombstone for this admin ID before syncing
+      deletedIdsRef.current = {
+        ...deletedIdsRef.current,
+        adminAccounts: deletedIdsRef.current.adminAccounts.filter(
+          (id) =>
+            id !== stampedAccount.id &&
+            !(stampedAccount.username.toLowerCase() === 'admin' && id === 'adm_rt08')
+        ),
+      };
+
+      const res = await syncAdminAccountToServer({
+        account: stampedAccount,
+        syncData: currentSnapshot,
+        deletedIds: deletedIdsRef.current,
+      });
+
+      if (!res.ok) {
+        setCloudError(res.message || 'Gagal menyinkronkan akun admin ke server.');
+        return { ok: false, message: res.message };
+      }
+
+      if (res.serverData) {
+        setServerAdminAccounts(
+          Array.isArray(res.serverData.adminAccounts) ? res.serverData.adminAccounts : []
+        );
+        applyMergedStateToReact(res.serverData, 'refresh');
+        lastServerHashRef.current = computeStateHash(res.serverData);
+        if (typeof res.serverData.revision === 'number') {
+          lastServerRevisionRef.current = Math.max(
+            lastServerRevisionRef.current,
+            res.serverData.revision
+          );
+        }
+
+        if (
+          cloudUser &&
+          isCloudAdmin &&
+          cloudAuthReadyUid === cloudUser.uid &&
+          firestoreReadyUid === cloudUser.uid
+        ) {
+          try {
+            const syncRes = await syncStateToFirestore(
+              cloudUser,
+              res.serverData,
+              knownFirestoreMetaRef.current,
+              deletedIdsRef.current
+            );
+            if (syncRes.deferred === 0) {
+              lastFirestoreHashRef.current = computeStateHash(res.serverData);
+            }
+          } catch (err: any) {
+            setCloudError(err?.message || 'Sinkron server berhasil, namun Cloud Firestore gagal.');
+          }
+        }
+      }
+
+      setSyncStatus('synced');
+      setRolloverNotice(
+        `Akun Admin "${stampedAccount.username}" & seluruh data (${(res.serverData?.wargaList || currentSnapshot.wargaList).length} KK) berhasil terdaftar & tersinkron ke Server!`
+      );
+      setTimeout(() => setRolloverNotice(null), 6000);
+      return { ok: true, message: res.message, account: res.account || stampedAccount };
+    } catch (err: any) {
+      const msg = err?.message || 'Gagal menyinkronkan akun admin ke server.';
+      setCloudError(msg);
+      return { ok: false, message: msg };
+    } finally {
+      setAdminSyncBusy(false);
     }
   };
 
@@ -1650,8 +1933,20 @@ export default function App() {
 
   // Admin RT: Send monthly update to Server
   const handleKirimLaporanBulanan = (laporan: PembaruanBulananRT) => {
-    const stamped = { ...laporan, updatedAt: new Date().toISOString() };
+    const nowIso = new Date().toISOString();
+    const nowLabel = formatWaktuSyncID();
+    const stamped = { ...laporan, updatedAt: nowIso };
     setLaporanBulananRT((prev) => [stamped, ...prev]);
+
+    if (currentUser?.role === 'admin') {
+      setAdminAccounts((prev) =>
+        prev.map((acc) =>
+          acc.username.toLowerCase() === currentUser.username.toLowerCase()
+            ? { ...acc, terakhirSinkronisasi: `Tersinkron ${nowLabel}`, updatedAt: nowIso }
+            : acc
+        )
+      );
+    }
   };
 
   // Restore entire database from backup JSON
@@ -1685,6 +1980,15 @@ export default function App() {
       setCurrentView('dasbor-warga');
     } else {
       setCurrentView('beranda');
+      const nowIso = new Date().toISOString();
+      const nowLabel = formatWaktuSyncID();
+      setAdminAccounts((prev) =>
+        prev.map((acc) =>
+          acc.username.toLowerCase() === user.username.toLowerCase()
+            ? { ...acc, terakhirLogin: nowLabel, updatedAt: nowIso }
+            : acc
+        )
+      );
     }
     // Pull latest server & cloud updates right after sign-in
     handleForceSyncNow();
@@ -1747,6 +2051,13 @@ export default function App() {
   const isAdminRT = currentUser?.role === 'admin';
   const isWarga = currentUser?.role === 'warga';
 
+  const matchedServerAdmin = isAdminRT
+    ? serverAdminAccounts.find(
+        (acc) => acc.username.trim().toLowerCase() === (currentUser?.username || '').trim().toLowerCase()
+      )
+    : undefined;
+  const isCurrentAdminOnServer = !isAdminRT || Boolean(matchedServerAdmin);
+
   interface NavItem {
     id: string;
     label: string;
@@ -1804,9 +2115,12 @@ export default function App() {
           onLoginSuccess={handleLoginSuccess}
           wargaList={wargaList}
           adminAccounts={adminAccounts}
+          serverAdminAccounts={serverAdminAccounts}
           pengaturanKas={pengaturanKas}
+          currentPin={currentPin}
           onOpenLupaPassword={() => setIsLupaPasswordOpen(true)}
           onRefreshSync={handleForceSyncNow}
+          onSyncAdminAccountToServer={handleSyncAdminAccountToServer}
           sseConnected={sseConnected}
           isCloudConnected={Boolean(cloudUser && isCloudAdmin)}
         />
@@ -2005,6 +2319,34 @@ export default function App() {
             </button>
           </div>
 
+          {isAdminRT && dataLoadedReady && !isCurrentAdminOnServer && (
+            <button
+              type="button"
+              onClick={() => handleSyncAdminAccountToServer()}
+              disabled={adminSyncBusy}
+              className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 px-3 py-1.5 text-[11px] font-bold text-slate-950 transition-all cursor-pointer disabled:opacity-60 shadow-xs"
+              title="Akun Admin belum terdaftar ke Server. Klik untuk menyinkronkan akun & data ke Server."
+            >
+              <CloudUpload size={13} />
+              <span>{adminSyncBusy ? 'Menyinkronkan Akun...' : 'Sinkron Akun ke Server'}</span>
+            </button>
+          )}
+
+          {isAdminRT && dataLoadedReady && isCurrentAdminOnServer && (
+            <div className="flex items-center justify-between rounded-xl bg-emerald-400/15 px-2.5 py-1.5 text-[10px] text-emerald-100 border border-emerald-300/20">
+              <span className="truncate font-semibold">Akun Server: Terdaftar</span>
+              <button
+                type="button"
+                onClick={() => handleSyncAdminAccountToServer()}
+                disabled={adminSyncBusy}
+                className="shrink-0 font-black text-emerald-300 hover:text-white ml-1 cursor-pointer disabled:opacity-50"
+                title="Sinkronkan ulang akun & data ke Server"
+              >
+                {adminSyncBusy ? '...' : 'SINKRON'}
+              </button>
+            </div>
+          )}
+
           {(isServer || isAdminRT) && !cloudUser && (
             <button
               type="button"
@@ -2154,6 +2496,47 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        {/* Admin Account Not Registered/Synced on Server Warning Banner */}
+        {isAdminRT && dataLoadedReady && !isCurrentAdminOnServer && (
+          <div className="bg-amber-500 text-slate-950 px-4 py-2.5 text-xs font-bold flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-sm border-b border-amber-600/20">
+            <div className="flex items-start sm:items-center gap-2 min-w-0">
+              <AlertCircle size={16} className="shrink-0 mt-0.5 sm:mt-0" />
+              <span>
+                Akun Admin <strong>{currentUser?.username}</strong> belum terdaftar di Server Pusat. Data di perangkat tetap aman — klik tombol untuk menyinkronkan akun &amp; data agar terbaca di semua aplikasi perangkat lain.
+              </span>
+            </div>
+            <button
+              type="button"
+              disabled={adminSyncBusy}
+              onClick={() => handleSyncAdminAccountToServer()}
+              className="shrink-0 inline-flex items-center justify-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] px-3.5 py-1.5 text-xs font-extrabold text-white shadow-xs transition-all cursor-pointer disabled:opacity-60"
+            >
+              <CloudUpload size={14} />
+              <span>{adminSyncBusy ? 'Menyinkronkan...' : 'Sinkronkan Akun ke Server'}</span>
+            </button>
+          </div>
+        )}
+
+        {/* Offline Auto-Retry Banner when local edits are waiting to reach server */}
+        {syncStatus === 'offline' && dataLoadedReady && (
+          <div className="bg-slate-800 text-amber-200 px-4 py-2 text-xs font-bold flex items-center justify-between gap-2 shadow-sm">
+            <div className="flex items-center gap-2 min-w-0">
+              <RefreshCw size={14} className="shrink-0 animate-spin" />
+              <span className="truncate">
+                Perubahan tersimpan aman di perangkat &amp; otomatis mengirim ulang ke Server saat koneksi stabil...
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleForceSyncNow}
+              disabled={cloudSyncBusy}
+              className="shrink-0 rounded-lg bg-amber-400 text-slate-950 px-2.5 py-1 text-[11px] font-extrabold hover:bg-amber-300 cursor-pointer disabled:opacity-60"
+            >
+              Kirim Sekarang
+            </button>
+          </div>
+        )}
 
         {/* Visible Cloud Error Banner so Firestore issues are never silent */}
         {cloudError && (
@@ -2507,6 +2890,10 @@ export default function App() {
                     pengaturanKas={pengaturanKas}
                     currentUser={currentUser}
                     currentPin={currentPin}
+                    isAdminOnServer={isCurrentAdminOnServer}
+                    adminSyncBusy={adminSyncBusy}
+                    lastAdminSyncLabel={matchedServerAdmin?.terakhirSinkronisasi}
+                    onSyncAdminAccount={() => handleSyncAdminAccountToServer().then(() => undefined)}
                     onUpdatePin={(pin) => setCurrentPin(pin)}
                     onUpdatePengaturan={handleUpdatePengaturan}
                     onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
@@ -2537,9 +2924,12 @@ export default function App() {
         onLogout={handleLogout}
         wargaList={wargaList}
         adminAccounts={adminAccounts}
+        serverAdminAccounts={serverAdminAccounts}
         pengaturanKas={pengaturanKas}
+        currentPin={currentPin}
         onOpenLupaPassword={() => setIsLupaPasswordOpen(true)}
         onRefreshSync={handleForceSyncNow}
+        onSyncAdminAccountToServer={handleSyncAdminAccountToServer}
         sseConnected={sseConnected}
         isCloudConnected={Boolean(cloudUser && isCloudAdmin)}
       />

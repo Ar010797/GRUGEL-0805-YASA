@@ -1,15 +1,20 @@
 import {
   collection,
+  deleteDoc,
+  deleteField,
   doc,
   getDoc,
+  getDocFromServer,
   onSnapshot,
   query,
   serverTimestamp,
   setDoc,
   Timestamp,
+  updateDoc,
   where,
   writeBatch,
   type Unsubscribe,
+  type WriteBatch,
 } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 import { auth, BOOTSTRAPPED_ADMIN_EMAIL, db } from '../firebase';
@@ -82,6 +87,10 @@ export function sanitizeFirestoreId(raw: string): string {
   return (cleaned || 'doc_' + Date.now()).slice(0, 128);
 }
 
+function isPlainObject(val: unknown): val is Record<string, any> {
+  return Boolean(val) && typeof val === 'object' && !Array.isArray(val) && !(val instanceof Timestamp);
+}
+
 function deepCleanFirestoreValue(val: any): any {
   if (val === undefined) return undefined;
   if (val === null) return null;
@@ -125,7 +134,6 @@ function tsToIso(val: any, isPendingWrite = false): string | undefined {
 export async function checkIsCloudAdmin(user: User): Promise<boolean> {
   if (!user.emailVerified) return false;
   if (user.email?.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase()) {
-    // Ensure admin record exists cleanly
     const adminPath = `admins/${user.uid}`;
     try {
       const ref = doc(db, 'admins', user.uid);
@@ -158,6 +166,9 @@ export interface KnownDocMeta {
   ownerUid: string;
   createdAt: any;
   hash: string;
+  hasPendingWrites?: boolean;
+  existingKeys?: string[];
+  docId?: string;
 }
 
 export interface CloudSnapshotHandlers {
@@ -169,6 +180,7 @@ export interface CloudSnapshotHandlers {
   onDokumen: (items: DokumenPdfWarga[], metas: Map<string, KnownDocMeta>) => void;
   onAdminAccounts: (items: AdminRTAccount[], metas: Map<string, KnownDocMeta>) => void;
   onLaporanBulanan: (items: PembaruanBulananRT[], metas: Map<string, KnownDocMeta>) => void;
+  onInitialReady?: () => void;
   onError: (err: Error) => void;
 }
 
@@ -186,6 +198,28 @@ export function subscribeFirestoreCollections(
   handlers: CloudSnapshotHandlers
 ): Unsubscribe {
   const unsubs: Unsubscribe[] = [];
+  const requiredCols = isAdmin
+    ? [
+        'settings',
+        'warga',
+        'transactions',
+        'pengumuman',
+        'bantuan',
+        'dokumen',
+        'adminAccounts',
+        'laporanBulanan',
+      ]
+    : ['settings', 'warga', 'transactions', 'pengumuman'];
+  const loadedCols = new Set<string>();
+  let initialReadyFired = false;
+
+  const markCollectionLoaded = (colKey: string) => {
+    loadedCols.add(colKey);
+    if (!initialReadyFired && requiredCols.every((c) => loadedCols.has(c))) {
+      initialReadyFired = true;
+      handlers.onInitialReady?.();
+    }
+  };
 
   // 1. Settings
   unsubs.push(
@@ -194,6 +228,7 @@ export function subscribeFirestoreCollections(
       (snap) => {
         if (!snap.exists()) {
           handlers.onSettings(null);
+          markCollectionLoaded('settings');
           return;
         }
         const d = snap.data() as any;
@@ -213,7 +248,11 @@ export function subscribeFirestoreCollections(
           ownerUid: ownerUid || user.uid,
           createdAt: updatedAt,
           hash: stableHash(noOwner),
+          hasPendingWrites: snap.metadata.hasPendingWrites,
+          existingKeys: Object.keys(d),
+          docId: snap.id,
         });
+        markCollectionLoaded('settings');
       },
       (err) => {
         try {
@@ -243,13 +282,17 @@ export function subscribeFirestoreCollections(
             updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
           };
           metas.set(docSnap.id, {
-            ownerUid,
+            ownerUid: ownerUid || user.uid,
             createdAt,
-            hash: stableHash(sanitizeWargaForFirestore(item, ownerUid)),
+            hash: stableHash(sanitizeWargaForFirestore(item, ownerUid || user.uid)),
+            hasPendingWrites: docSnap.metadata.hasPendingWrites,
+            existingKeys: Object.keys(d),
+            docId: docSnap.id,
           });
           return item;
         });
         handlers.onWarga(list, metas);
+        markCollectionLoaded('warga');
       },
       (err) => {
         try {
@@ -279,13 +322,17 @@ export function subscribeFirestoreCollections(
             updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
           };
           metas.set(docSnap.id, {
-            ownerUid,
+            ownerUid: ownerUid || user.uid,
             createdAt,
-            hash: stableHash(sanitizeTransactionForFirestore(item, ownerUid)),
+            hash: stableHash(sanitizeTransactionForFirestore(item, ownerUid || user.uid)),
+            hasPendingWrites: docSnap.metadata.hasPendingWrites,
+            existingKeys: Object.keys(d),
+            docId: docSnap.id,
           });
           return item;
         });
         handlers.onTransactions(list, metas);
+        markCollectionLoaded('transactions');
       },
       (err) => {
         try {
@@ -315,13 +362,17 @@ export function subscribeFirestoreCollections(
             updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
           };
           metas.set(docSnap.id, {
-            ownerUid,
+            ownerUid: ownerUid || user.uid,
             createdAt,
-            hash: stableHash(sanitizePengumumanForFirestore(item, ownerUid)),
+            hash: stableHash(sanitizePengumumanForFirestore(item, ownerUid || user.uid)),
+            hasPendingWrites: docSnap.metadata.hasPendingWrites,
+            existingKeys: Object.keys(d),
+            docId: docSnap.id,
           });
           return item;
         });
         handlers.onPengumuman(list, metas);
+        markCollectionLoaded('pengumuman');
       },
       (err) => {
         try {
@@ -349,13 +400,17 @@ export function subscribeFirestoreCollections(
               updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
             };
             metas.set(docSnap.id, {
-              ownerUid,
+              ownerUid: ownerUid || user.uid,
               createdAt,
-              hash: stableHash(sanitizeBantuanForFirestore(item, ownerUid)),
+              hash: stableHash(sanitizeBantuanForFirestore(item, ownerUid || user.uid)),
+              hasPendingWrites: docSnap.metadata.hasPendingWrites,
+              existingKeys: Object.keys(d),
+              docId: docSnap.id,
             });
             return item;
           });
           handlers.onBantuan(list, metas);
+          markCollectionLoaded('bantuan');
         },
         (err) => {
           try {
@@ -381,13 +436,17 @@ export function subscribeFirestoreCollections(
               updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
             };
             metas.set(docSnap.id, {
-              ownerUid,
+              ownerUid: ownerUid || user.uid,
               createdAt,
-              hash: stableHash(sanitizeDokumenForFirestore(item, ownerUid)),
+              hash: stableHash(sanitizeDokumenForFirestore(item, ownerUid || user.uid)),
+              hasPendingWrites: docSnap.metadata.hasPendingWrites,
+              existingKeys: Object.keys(d),
+              docId: docSnap.id,
             });
             return item;
           });
           handlers.onDokumen(list, metas);
+          markCollectionLoaded('dokumen');
         },
         (err) => {
           try {
@@ -413,13 +472,17 @@ export function subscribeFirestoreCollections(
               updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
             };
             metas.set(docSnap.id, {
-              ownerUid,
+              ownerUid: ownerUid || user.uid,
               createdAt,
-              hash: stableHash(sanitizeAdminRTForFirestore(item, ownerUid)),
+              hash: stableHash(sanitizeAdminRTForFirestore(item, ownerUid || user.uid)),
+              hasPendingWrites: docSnap.metadata.hasPendingWrites,
+              existingKeys: Object.keys(d),
+              docId: docSnap.id,
             });
             return item;
           });
           handlers.onAdminAccounts(list, metas);
+          markCollectionLoaded('adminAccounts');
         },
         (err) => {
           try {
@@ -445,13 +508,17 @@ export function subscribeFirestoreCollections(
               updatedAt: tsToIso(updatedAt, docSnap.metadata.hasPendingWrites),
             };
             metas.set(docSnap.id, {
-              ownerUid,
+              ownerUid: ownerUid || user.uid,
               createdAt,
-              hash: stableHash(sanitizeLaporanForFirestore(item, ownerUid)),
+              hash: stableHash(sanitizeLaporanForFirestore(item, ownerUid || user.uid)),
+              hasPendingWrites: docSnap.metadata.hasPendingWrites,
+              existingKeys: Object.keys(d),
+              docId: docSnap.id,
             });
             return item;
           });
           handlers.onLaporanBulanan(list, metas);
+          markCollectionLoaded('laporanBulanan');
         },
         (err) => {
           try {
@@ -471,9 +538,16 @@ export function subscribeFirestoreCollections(
 
 function sanitizeWargaForFirestore(w: Warga, ownerUid: string): Record<string, any> {
   const id = sanitizeFirestoreId(w.id);
+  const safeAnggota = Array.isArray(w.anggotaKeluarga)
+    ? w.anggotaKeluarga.filter((x) => isPlainObject(x)).slice(0, 30)
+    : undefined;
+  const safeRiwayatKK = Array.isArray(w.riwayatPerubahanKK)
+    ? w.riwayatPerubahanKK.filter((x) => isPlainObject(x)).slice(0, 50)
+    : undefined;
+
   return stripUndefined({
     id,
-    no: typeof w.no === 'number' ? w.no : 0,
+    no: typeof w.no === 'number' && Number.isFinite(w.no) ? w.no : 0,
     nama: String(w.nama || 'Warga').slice(0, 160),
     noKK: String(w.noKK || '').slice(0, 32),
     nik: w.nik ? String(w.nik).slice(0, 32) : undefined,
@@ -484,27 +558,28 @@ function sanitizeWargaForFirestore(w: Warga, ownerUid: string): Record<string, a
     kodePos: w.kodePos ? String(w.kodePos).slice(0, 12) : undefined,
     tanggalDikeluarkan: w.tanggalDikeluarkan ? String(w.tanggalDikeluarkan).slice(0, 32) : undefined,
     jenisKelamin: w.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki',
-    jumlahJiwa: typeof w.jumlahJiwa === 'number' ? w.jumlahJiwa : (w.anggotaKeluarga?.length || 1),
+    jumlahJiwa:
+      typeof w.jumlahJiwa === 'number' && Number.isFinite(w.jumlahJiwa)
+        ? w.jumlahJiwa
+        : safeAnggota?.length || 1,
     statusIuran: w.statusIuran === 'Sudah' ? 'Sudah' : 'Belum',
-    anggotaKeluarga: Array.isArray(w.anggotaKeluarga) ? w.anggotaKeluarga.slice(0, 30) : undefined,
+    anggotaKeluarga: safeAnggota,
     telepon: w.telepon ? String(w.telepon).slice(0, 32) : undefined,
     pin: w.pin ? String(w.pin).slice(0, 12) : undefined,
     pinAttempts: typeof w.pinAttempts === 'number' ? w.pinAttempts : undefined,
     pinLockedUntil: typeof w.pinLockedUntil === 'number' ? w.pinLockedUntil : undefined,
-    riwayatIuran: w.riwayatIuran && typeof w.riwayatIuran === 'object' ? w.riwayatIuran : undefined,
-    riwayatKematian: w.riwayatKematian && typeof w.riwayatKematian === 'object' ? w.riwayatKematian : undefined,
-    statusIuranPerTahun:
-      w.statusIuranPerTahun && typeof w.statusIuranPerTahun === 'object' ? w.statusIuranPerTahun : undefined,
-    riwayatIuranPerTahun:
-      w.riwayatIuranPerTahun && typeof w.riwayatIuranPerTahun === 'object' ? w.riwayatIuranPerTahun : undefined,
-    riwayatKematianPerTahun:
-      w.riwayatKematianPerTahun && typeof w.riwayatKematianPerTahun === 'object'
-        ? w.riwayatKematianPerTahun
-        : undefined,
+    riwayatIuran: isPlainObject(w.riwayatIuran) ? w.riwayatIuran : undefined,
+    riwayatKematian: isPlainObject(w.riwayatKematian) ? w.riwayatKematian : undefined,
+    statusIuranPerTahun: isPlainObject(w.statusIuranPerTahun) ? w.statusIuranPerTahun : undefined,
+    riwayatIuranPerTahun: isPlainObject(w.riwayatIuranPerTahun) ? w.riwayatIuranPerTahun : undefined,
+    riwayatKematianPerTahun: isPlainObject(w.riwayatKematianPerTahun)
+      ? w.riwayatKematianPerTahun
+      : undefined,
     iuranUmumTerbayar: typeof w.iuranUmumTerbayar === 'number' ? w.iuranUmumTerbayar : undefined,
-    iuranKematianTerbayar: typeof w.iuranKematianTerbayar === 'number' ? w.iuranKematianTerbayar : undefined,
+    iuranKematianTerbayar:
+      typeof w.iuranKematianTerbayar === 'number' ? w.iuranKematianTerbayar : undefined,
     pilihanSkema: w.pilihanSkema === 'bulanan' || w.pilihanSkema === 'tahunan' ? w.pilihanSkema : undefined,
-    riwayatPerubahanKK: Array.isArray(w.riwayatPerubahanKK) ? w.riwayatPerubahanKK.slice(0, 50) : undefined,
+    riwayatPerubahanKK: safeRiwayatKK,
     ownerUid,
   });
 }
@@ -652,10 +727,16 @@ function sanitizeSettingsForFirestore(
     saldoAwalKasKematian: Number(pengaturanKas.saldoAwalKasKematian) || 0,
     keteranganSaldoAwal: String(pengaturanKas.keteranganSaldoAwal || '').slice(0, 300),
     tanggalSaldoAwal: String(pengaturanKas.tanggalSaldoAwal || '').slice(0, 32),
-    kontakKetuaRT: pengaturanKas.kontakKetuaRT || { nama: '', telp: '' },
-    kontakBendahara: pengaturanKas.kontakBendahara || { nama: '', telp: '' },
-    saldoBerlanjutPerTahun: pengaturanKas.saldoBerlanjutPerTahun || undefined,
-    profilRT: pengaturanKas.profilRT || undefined,
+    kontakKetuaRT: isPlainObject(pengaturanKas.kontakKetuaRT)
+      ? pengaturanKas.kontakKetuaRT
+      : { nama: '', telp: '' },
+    kontakBendahara: isPlainObject(pengaturanKas.kontakBendahara)
+      ? pengaturanKas.kontakBendahara
+      : { nama: '', telp: '' },
+    saldoBerlanjutPerTahun: isPlainObject(pengaturanKas.saldoBerlanjutPerTahun)
+      ? pengaturanKas.saldoBerlanjutPerTahun
+      : undefined,
+    profilRT: isPlainObject(pengaturanKas.profilRT) ? pengaturanKas.profilRT : undefined,
     ownerUid,
   });
 }
@@ -669,18 +750,82 @@ export interface KnownMetaRegistry {
   dokumen: Map<string, KnownDocMeta>;
   adminAccounts: Map<string, KnownDocMeta>;
   laporanBulanan: Map<string, KnownDocMeta>;
+  pendingCreates?: Set<string>;
 }
 
+export interface SyncFirestoreResult {
+  committed: number;
+  deferred: number;
+}
+
+interface TrackedWriteOp {
+  path: string;
+  opType: OperationType;
+  colName: string;
+  docId: string;
+  createPayload?: Record<string, any>;
+  updatePayload?: Record<string, any>;
+  applyToBatch: (batch: WriteBatch) => void;
+  executeSingle: () => Promise<void>;
+}
+
+const IMMUTABLE_KEYS = new Set(['id', 'ownerUid', 'createdAt', 'updatedAt']);
+
+function buildUpdatePayload(
+  sanitized: Record<string, any>,
+  existingKeys?: string[]
+): Record<string, any> {
+  const payload: Record<string, any> = {};
+  for (const [k, v] of Object.entries(sanitized)) {
+    if (IMMUTABLE_KEYS.has(k)) continue;
+    payload[k] = v;
+  }
+  if (Array.isArray(existingKeys)) {
+    for (const oldKey of existingKeys) {
+      if (IMMUTABLE_KEYS.has(oldKey)) continue;
+      if (!(oldKey in sanitized)) {
+        payload[oldKey] = deleteField();
+      }
+    }
+  }
+  payload.updatedAt = serverTimestamp();
+  return payload;
+}
+
+// Serialize concurrent syncStateToFirestore calls so overlapping auto-save & manual syncs never race
+let syncQueueTail: Promise<any> = Promise.resolve();
+
 /**
- * Commits only changed/new/deleted documents to Firestore in safe chunks (<=400 ops/batch).
+ * Commits only changed/new/deleted documents to Firestore in safe chunks (<=350 ops/batch).
+ * Preserves immutable fields (`id`, `ownerUid`, `createdAt`) by using `update` for existing docs
+ * and isolates individual op failures for clear diagnostics.
  */
-export async function syncStateToFirestore(
+export function syncStateToFirestore(
   user: User,
   state: AppDatabaseSchema,
   known: KnownMetaRegistry,
   deletedIds?: Partial<DeletedIdsMap>
-): Promise<void> {
-  const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+): Promise<SyncFirestoreResult> {
+  const task = syncQueueTail.then(
+    () => runSyncStateToFirestore(user, state, known, deletedIds),
+    () => runSyncStateToFirestore(user, state, known, deletedIds)
+  );
+  syncQueueTail = task.catch(() => {});
+  return task;
+}
+
+async function runSyncStateToFirestore(
+  user: User,
+  state: AppDatabaseSchema,
+  known: KnownMetaRegistry,
+  deletedIds?: Partial<DeletedIdsMap>
+): Promise<SyncFirestoreResult> {
+  if (!known.pendingCreates) {
+    known.pendingCreates = new Set<string>();
+  }
+  const pendingCreates = known.pendingCreates;
+  const ops: TrackedWriteOp[] = [];
+  let deferred = 0;
 
   // 1. Settings
   const settingsOwner = known.settings?.ownerUid || user.uid;
@@ -691,13 +836,43 @@ export async function syncStateToFirestore(
   );
   const { ownerUid: _so, ...settingsNoOwner } = settingsPayload;
   const settingsHash = stableHash(settingsNoOwner);
+
   if (known.settings?.hash !== settingsHash) {
-    ops.push((batch) => {
-      batch.set(doc(db, 'settings', 'kas'), {
+    const settingsRef = doc(db, 'settings', 'kas');
+    if (known.settings) {
+      if (known.settings.hasPendingWrites) {
+        deferred += 1;
+      } else {
+        const updatePayload = buildUpdatePayload(settingsPayload, known.settings.existingKeys);
+        ops.push({
+          path: 'settings/kas',
+          opType: OperationType.UPDATE,
+          colName: 'settings',
+          docId: 'kas',
+          updatePayload,
+          applyToBatch: (batch) => batch.update(settingsRef, updatePayload),
+          executeSingle: () => updateDoc(settingsRef, updatePayload),
+        });
+      }
+    } else if (pendingCreates.has('settings/kas')) {
+      deferred += 1;
+    } else {
+      const createPayload = {
         ...settingsPayload,
         updatedAt: serverTimestamp(),
+      };
+      const updateFallbackPayload = buildUpdatePayload(settingsPayload);
+      ops.push({
+        path: 'settings/kas',
+        opType: OperationType.CREATE,
+        colName: 'settings',
+        docId: 'kas',
+        createPayload,
+        updatePayload: updateFallbackPayload,
+        applyToBatch: (batch) => batch.set(settingsRef, createPayload),
+        executeSingle: () => setDoc(settingsRef, createPayload),
       });
-    });
+    }
   }
 
   function queueCollection<T extends { id: string }>(
@@ -709,26 +884,48 @@ export async function syncStateToFirestore(
   ) {
     for (const item of items) {
       const docId = sanitizeFirestoreId(item.id);
+      const docKey = `${colName}/${docId}`;
       const existingMeta = metaMap.get(docId);
       const ownerUid = existingMeta?.ownerUid || user.uid;
       const sanitized = sanitizer(item, ownerUid);
       const nextHash = stableHash(sanitized);
+      const ref = doc(db, colName, docId);
 
       if (!existingMeta) {
-        ops.push((batch) => {
-          batch.set(doc(db, colName, docId), {
-            ...sanitized,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
+        if (pendingCreates.has(docKey)) {
+          deferred += 1;
+          continue;
+        }
+        const createPayload = {
+          ...sanitized,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+        const updateFallbackPayload = buildUpdatePayload(sanitized);
+        ops.push({
+          path: docKey,
+          opType: OperationType.CREATE,
+          colName,
+          docId,
+          createPayload,
+          updatePayload: updateFallbackPayload,
+          applyToBatch: (batch) => batch.set(ref, createPayload),
+          executeSingle: () => setDoc(ref, createPayload),
         });
       } else if (existingMeta.hash !== nextHash) {
-        ops.push((batch) => {
-          batch.set(doc(db, colName, docId), {
-            ...sanitized,
-            createdAt: existingMeta.createdAt || serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
+        if (existingMeta.hasPendingWrites || !existingMeta.createdAt) {
+          deferred += 1;
+          continue;
+        }
+        const updatePayload = buildUpdatePayload(sanitized, existingMeta.existingKeys);
+        ops.push({
+          path: docKey,
+          opType: OperationType.UPDATE,
+          colName,
+          docId,
+          updatePayload,
+          applyToBatch: (batch) => batch.update(ref, updatePayload),
+          executeSingle: () => updateDoc(ref, updatePayload),
         });
       }
     }
@@ -737,8 +934,14 @@ export async function syncStateToFirestore(
       for (const delId of deletedList) {
         const docId = sanitizeFirestoreId(delId);
         if (metaMap.has(docId)) {
-          ops.push((batch) => {
-            batch.delete(doc(db, colName, docId));
+          const ref = doc(db, colName, docId);
+          ops.push({
+            path: `${colName}/${docId}`,
+            opType: OperationType.DELETE,
+            colName,
+            docId,
+            applyToBatch: (batch) => batch.delete(ref),
+            executeSingle: () => deleteDoc(ref),
           });
         }
       }
@@ -753,7 +956,13 @@ export async function syncStateToFirestore(
     sanitizeTransactionForFirestore,
     deletedIds?.transactions
   );
-  queueCollection('bantuan', state.bantuanList, known.bantuan, sanitizeBantuanForFirestore, deletedIds?.bantuan);
+  queueCollection(
+    'bantuan',
+    state.bantuanList,
+    known.bantuan,
+    sanitizeBantuanForFirestore,
+    deletedIds?.bantuan
+  );
   queueCollection(
     'pengumuman',
     state.pengumumanList,
@@ -761,7 +970,13 @@ export async function syncStateToFirestore(
     sanitizePengumumanForFirestore,
     deletedIds?.pengumuman
   );
-  queueCollection('dokumen', state.dokumenList, known.dokumen, sanitizeDokumenForFirestore, deletedIds?.dokumen);
+  queueCollection(
+    'dokumen',
+    state.dokumenList,
+    known.dokumen,
+    sanitizeDokumenForFirestore,
+    deletedIds?.dokumen
+  );
   queueCollection(
     'adminAccounts',
     state.adminAccounts,
@@ -777,18 +992,59 @@ export async function syncStateToFirestore(
     deletedIds?.laporanBulananRT
   );
 
-  if (ops.length === 0) return;
+  if (ops.length === 0) {
+    return { committed: 0, deferred };
+  }
 
+  let committed = 0;
   const CHUNK = 350;
+
   for (let i = 0; i < ops.length; i += CHUNK) {
+    const chunk = ops.slice(i, i + CHUNK);
     const batch = writeBatch(db);
-    for (const op of ops.slice(i, i + CHUNK)) {
-      op(batch);
+    for (const op of chunk) {
+      op.applyToBatch(batch);
     }
+
     try {
       await batch.commit();
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'batch_sync');
+      for (const op of chunk) {
+        if (op.opType === OperationType.CREATE) {
+          pendingCreates.add(op.path);
+        }
+      }
+      committed += chunk.length;
+    } catch {
+      // Fallback: execute individually to heal create/update races and identify exact failing path
+      for (const op of chunk) {
+        try {
+          if (op.opType === OperationType.CREATE) {
+            // Check if document already exists on server (created concurrently or prior to listener settling)
+            let existsOnServer = false;
+            try {
+              const serverSnap = await getDocFromServer(doc(db, op.colName, op.docId));
+              existsOnServer = serverSnap.exists();
+            } catch {
+              existsOnServer = false;
+            }
+            if (existsOnServer && op.updatePayload) {
+              await updateDoc(doc(db, op.colName, op.docId), op.updatePayload);
+              committed += 1;
+              continue;
+            }
+          }
+          await op.executeSingle();
+          if (op.opType === OperationType.CREATE) {
+            pendingCreates.add(op.path);
+          }
+          committed += 1;
+        } catch (opErr) {
+          handleFirestoreError(opErr, op.opType, op.path);
+        }
+      }
     }
   }
+
+  return { committed, deferred };
 }
+

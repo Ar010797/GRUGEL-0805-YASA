@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check, Eye, EyeOff, RefreshCw, LogOut, Wifi } from 'lucide-react';
+import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check, Eye, EyeOff, RefreshCw, LogOut, Wifi, CloudUpload } from 'lucide-react';
 import { AuthUser, Warga, AdminRTAccount, PengaturanKas } from '../types';
 import { HouseLogo } from './HouseLogo';
+import { fetchServerAdminAccounts } from '../utils/cloudSync';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -9,9 +10,14 @@ interface LoginModalProps {
   onLoginSuccess: (user: AuthUser) => void;
   wargaList: Warga[];
   adminAccounts?: AdminRTAccount[];
+  serverAdminAccounts?: AdminRTAccount[];
   pengaturanKas?: PengaturanKas;
+  currentPin?: string;
   onOpenLupaPassword: () => void;
   onRefreshSync?: () => Promise<void> | void;
+  onSyncAdminAccountToServer?: (
+    account: AdminRTAccount
+  ) => Promise<{ ok: boolean; message?: string; account?: AdminRTAccount }>;
   canClose?: boolean;
   onLogout?: () => void;
   sseConnected?: boolean;
@@ -24,9 +30,12 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onLoginSuccess,
   wargaList,
   adminAccounts = [],
+  serverAdminAccounts,
   pengaturanKas,
+  currentPin = '123456',
   onOpenLupaPassword,
   onRefreshSync,
+  onSyncAdminAccountToServer,
   canClose = true,
   onLogout,
   sseConnected = false,
@@ -55,6 +64,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [adminUsername, setAdminUsername] = useState('');
   const [adminPassword, setAdminPassword] = useState('');
   const [adminError, setAdminError] = useState('');
+  const [adminChecking, setAdminChecking] = useState(false);
+  const [pendingSyncAdmin, setPendingSyncAdmin] = useState<AdminRTAccount | null>(null);
+  const [showRegisterAdminBox, setShowRegisterAdminBox] = useState(false);
+  const [regNama, setRegNama] = useState('');
+  const [regRT, setRegRT] = useState(rtStr);
+  const [regRW, setRegRW] = useState(rwStr);
+  const [regJabatan, setRegJabatan] = useState(`Ketua RT ${rtStr}`);
+  const [regKontak, setRegKontak] = useState(pengaturanKas?.kontakKetuaRT?.telp || '');
+  const [regPin, setRegPin] = useState('');
+  const [syncAccountBusy, setSyncAccountBusy] = useState(false);
 
   // Warga form: Username = Nama Asli, Password = Nomor KK (16 digit)
   const [wargaUsername, setWargaUsername] = useState('');
@@ -86,10 +105,61 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     }
   };
 
-  // Handle Admin RT Submit (Ketat: jika akun belum dibuat di server atau mengacak -> Akun Tidak Terdaftar)
-  const handleAdminSubmit = (e: React.FormEvent) => {
+  const getBuiltinDefaultAdmin = (): AdminRTAccount => ({
+    id: 'adm_rt08',
+    username: 'Admin',
+    passwordHash: 'rt08rw05',
+    nama: pengaturanKas?.kontakKetuaRT?.nama
+      ? `${pengaturanKas.kontakKetuaRT.nama} (Ketua RT ${rtStr})`
+      : `Ketua RT ${rtStr} RW ${rwStr}`,
+    rt: rtStr,
+    rw: rwStr,
+    kontak: pengaturanKas?.kontakKetuaRT?.telp || '0812-3456-7890',
+    jabatan: `Ketua RT ${rtStr} RW ${rwStr}`,
+    status: 'aktif',
+  });
+
+  const handleSyncAndLoginAdmin = async (accountToSync: AdminRTAccount) => {
+    setAdminError('');
+    setSyncAccountBusy(true);
+    try {
+      if (onSyncAdminAccountToServer) {
+        const res = await onSyncAdminAccountToServer(accountToSync);
+        if (!res.ok) {
+          setAdminError(res.message || 'Gagal menyinkronkan akun admin ke server.');
+          return;
+        }
+        const synced = res.account || accountToSync;
+        setPendingSyncAdmin(null);
+        setShowRegisterAdminBox(false);
+        onLoginSuccess({
+          role: 'admin',
+          username: synced.username,
+          nama: synced.nama,
+          rtScope: `RT ${synced.rt} RW ${synced.rw}`,
+          isPinAuthenticated: false,
+        });
+        onClose();
+      } else {
+        onLoginSuccess({
+          role: 'admin',
+          username: accountToSync.username,
+          nama: accountToSync.nama,
+          rtScope: `RT ${accountToSync.rt} RW ${accountToSync.rw}`,
+          isPinAuthenticated: false,
+        });
+        onClose();
+      }
+    } finally {
+      setSyncAccountBusy(false);
+    }
+  };
+
+  // Handle Admin RT Submit: verifies live against Server first, and offers "Sinkronkan Akun ke Server" if missing on Server
+  const handleAdminSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAdminError('');
+    setPendingSyncAdmin(null);
 
     const u = adminUsername.trim();
     const p = adminPassword.trim();
@@ -103,35 +173,76 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       return;
     }
 
-    // Check matched in registered adminAccounts from server
-    const matchedAccount = adminAccounts.find(
-      (acc) => acc.username.toLowerCase() === u.toLowerCase()
-    );
+    setAdminChecking(true);
+    try {
+      // 1. Always fetch fresh server admin accounts so accounts added/synced on other devices are recognized immediately
+      const liveServerInfo = await fetchServerAdminAccounts();
+      const authoritativeServerList =
+        liveServerInfo?.adminAccounts ?? serverAdminAccounts ?? [];
 
-    if (!matchedAccount) {
-      setAdminError('Akun tidak terdaftar! Anda belum memiliki akun admin RT. Silakan hubungi Server Pusat RW 05 untuk membuatkan akun.');
-      return;
+      const matchedOnServer = authoritativeServerList.find(
+        (acc) => acc.username.trim().toLowerCase() === u.toLowerCase()
+      );
+
+      if (matchedOnServer) {
+        if (matchedOnServer.passwordHash !== p) {
+          setAdminError(
+            'Password salah! Periksa kembali kata sandi admin RT Anda atau hubungi Server Pusat untuk pemulihan akses.'
+          );
+          return;
+        }
+        if (matchedOnServer.status === 'nonaktif') {
+          setAdminError(`Akun Admin ${matchedOnServer.nama} sedang dinonaktifkan oleh Server Pusat.`);
+          return;
+        }
+
+        // Valid & registered on server -> Refresh snapshot & log in
+        await onRefreshSync?.();
+        onLoginSuccess({
+          role: 'admin',
+          username: matchedOnServer.username,
+          nama: matchedOnServer.nama,
+          rtScope: `RT ${matchedOnServer.rt} RW ${matchedOnServer.rw}`,
+          isPinAuthenticated: false,
+        });
+        onClose();
+        return;
+      }
+
+      // 2. Not found on Server yet: check local device accounts or built-in default RT Admin
+      const defaultAdm = getBuiltinDefaultAdmin();
+      const localCandidates = [
+        ...adminAccounts,
+        ...(adminAccounts.some((a) => a.username.toLowerCase() === 'admin') ? [] : [defaultAdm]),
+      ];
+      const matchedLocal = localCandidates.find(
+        (acc) => acc.username.trim().toLowerCase() === u.toLowerCase()
+      );
+
+      if (matchedLocal && matchedLocal.passwordHash === p) {
+        setPendingSyncAdmin(matchedLocal);
+        setShowRegisterAdminBox(false);
+        setAdminError(
+          `Akun Admin "${matchedLocal.username}" valid di perangkat ini, namun belum terdaftar di Server Pusat. Klik "Sinkronkan Akun ke Server & Masuk" di bawah agar semua data terbaca oleh perangkat lain.`
+        );
+        return;
+      }
+
+      if (matchedLocal && matchedLocal.passwordHash !== p) {
+        setAdminError(
+          'Password salah! Periksa kembali kata sandi admin RT Anda atau hubungi Server Pusat untuk pemulihan akses.'
+        );
+        return;
+      }
+
+      // 3. Account neither on server nor in local cache
+      setAdminError(
+        `Akun Admin "${u}" belum terdaftar di Server Pusat. Anda dapat menyinkronkan data dari server atau mendaftarkan & menyinkronkan akun ini ke Server jika memiliki PIN Keamanan Pengurus.`
+      );
+      setShowRegisterAdminBox(false);
+    } finally {
+      setAdminChecking(false);
     }
-
-    // Check exact password
-    if (matchedAccount.passwordHash !== p) {
-      setAdminError('Password salah! Periksa kembali kata sandi admin RT Anda atau hubungi Server RW 05 untuk pemulihan akses.');
-      return;
-    }
-
-    if (matchedAccount.status === 'nonaktif') {
-      setAdminError(`Akun Admin ${matchedAccount.nama} sedang dinonaktifkan oleh Server RW 05.`);
-      return;
-    }
-
-    onLoginSuccess({
-      role: 'admin',
-      username: matchedAccount.username,
-      nama: matchedAccount.nama,
-      rtScope: `RT ${matchedAccount.rt} RW ${matchedAccount.rw}`,
-      isPinAuthenticated: false,
-    });
-    onClose();
   };
 
   // Handle Warga Submit
@@ -370,9 +481,170 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               </div>
 
               {adminError && (
-                <div className="flex items-center gap-2 rounded-xl bg-rose-50 p-3 text-xs font-semibold text-rose-700 border border-rose-200">
-                  <AlertCircle size={16} className="shrink-0" />
-                  <span>{adminError}</span>
+                <div
+                  className={`rounded-xl p-3 text-xs font-semibold border space-y-2.5 ${
+                    pendingSyncAdmin
+                      ? 'bg-amber-50 text-amber-900 border-amber-300'
+                      : 'bg-rose-50 text-rose-700 border-rose-200'
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    <AlertCircle size={16} className="shrink-0 mt-0.5" />
+                    <span>{adminError}</span>
+                  </div>
+
+                  {pendingSyncAdmin && (
+                    <button
+                      type="button"
+                      disabled={syncAccountBusy}
+                      onClick={() => handleSyncAndLoginAdmin(pendingSyncAdmin)}
+                      className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] py-2.5 px-3 text-xs font-bold text-white shadow-xs transition-all cursor-pointer disabled:opacity-60"
+                    >
+                      <CloudUpload size={14} />
+                      <span>
+                        {syncAccountBusy
+                          ? 'Menyinkronkan Akun & Data ke Server...'
+                          : 'Sinkronkan Akun ke Server & Masuk'}
+                      </span>
+                    </button>
+                  )}
+
+                  {!pendingSyncAdmin && adminUsername.trim() && adminPassword.trim() && (
+                    <div className="pt-1 border-t border-rose-200/70 flex flex-wrap items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowRegisterAdminBox((prev) => !prev);
+                          if (!regNama) setRegNama(pengaturanKas?.kontakKetuaRT?.nama || '');
+                        }}
+                        className="inline-flex items-center gap-1 text-[11px] font-extrabold text-[#0B5D3F] hover:underline cursor-pointer"
+                      >
+                        <CloudUpload size={12} />
+                        <span>
+                          {showRegisterAdminBox
+                            ? 'Tutup Form Sinkron Akun Baru'
+                            : 'Belum Masuk Server? Daftarkan & Sinkronkan Akun Ini'}
+                        </span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {showRegisterAdminBox && (
+                <div className="rounded-2xl bg-indigo-50/80 border border-indigo-200 p-3.5 space-y-2.5">
+                  <div className="text-[11px] text-indigo-900">
+                    <p className="font-extrabold flex items-center gap-1.5">
+                      <CloudUpload size={13} className="text-indigo-700" />
+                      <span>Daftarkan & Sinkronkan Akun Admin ke Server</span>
+                    </p>
+                    <p className="mt-0.5 text-indigo-800 leading-relaxed">
+                      Akun beserta seluruh data yang tersimpan di perangkat ini akan didaftarkan ke Server agar terbaca oleh semua perangkat lain.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">Nomor RT</label>
+                      <input
+                        type="text"
+                        value={regRT}
+                        onChange={(e) => setRegRT(e.target.value)}
+                        placeholder="08"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">Nomor RW</label>
+                      <input
+                        type="text"
+                        value={regRW}
+                        onChange={(e) => setRegRW(e.target.value)}
+                        placeholder="05"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-800"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-700 mb-0.5">Nama Lengkap Pengurus RT</label>
+                    <input
+                      type="text"
+                      value={regNama}
+                      onChange={(e) => setRegNama(e.target.value)}
+                      placeholder="Contoh: Bpk. Karsono"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">Jabatan</label>
+                      <input
+                        type="text"
+                        value={regJabatan}
+                        onChange={(e) => setRegJabatan(e.target.value)}
+                        placeholder="Ketua RT 08"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">No. WhatsApp</label>
+                      <input
+                        type="text"
+                        value={regKontak}
+                        onChange={(e) => setRegKontak(e.target.value)}
+                        placeholder="0812..."
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                      PIN Keamanan Pengurus (6 Digit)
+                    </label>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={regPin}
+                      onChange={(e) => setRegPin(e.target.value.replace(/\D/g, ''))}
+                      placeholder="Masukkan PIN keamanan (Awal: 123456)"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-mono text-slate-800"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={syncAccountBusy}
+                    onClick={async () => {
+                      if (!regNama.trim()) {
+                        setAdminError('Nama lengkap pengurus harus diisi.');
+                        return;
+                      }
+                      if (regPin.trim() !== currentPin) {
+                        setAdminError('PIN Keamanan Pengurus salah. Gunakan PIN aplikasi yang valid untuk mendaftarkan akun ke Server.');
+                        return;
+                      }
+                      const newAcc: AdminRTAccount = {
+                        id: `adm_${Date.now()}`,
+                        username: adminUsername.trim(),
+                        passwordHash: adminPassword.trim(),
+                        nama: regNama.trim(),
+                        rt: regRT.trim() || rtStr,
+                        rw: regRW.trim() || rwStr,
+                        kontak: regKontak.trim() || '0812-0000-0000',
+                        jabatan: regJabatan.trim() || `Ketua RT ${regRT.trim() || rtStr}`,
+                        status: 'aktif',
+                      };
+                      await handleSyncAndLoginAdmin(newAcc);
+                    }}
+                    className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 py-2 text-xs font-bold text-white shadow-xs transition-all cursor-pointer disabled:opacity-60"
+                  >
+                    <CloudUpload size={13} />
+                    <span>{syncAccountBusy ? 'Menyinkronkan ke Server...' : 'Daftarkan, Sinkronkan Data & Masuk'}</span>
+                  </button>
                 </div>
               )}
 
@@ -388,7 +660,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     type="text"
                     required
                     value={adminUsername}
-                    onChange={(e) => setAdminUsername(e.target.value)}
+                    onChange={(e) => {
+                      setAdminUsername(e.target.value);
+                      setPendingSyncAdmin(null);
+                    }}
                     className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-medium"
                     placeholder="Admin"
                   />
@@ -407,7 +682,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     type={showAdminPassword ? 'text' : 'password'}
                     required
                     value={adminPassword}
-                    onChange={(e) => setAdminPassword(e.target.value)}
+                    onChange={(e) => {
+                      setAdminPassword(e.target.value);
+                      setPendingSyncAdmin(null);
+                    }}
                     className="w-full rounded-xl border border-slate-200 pl-10 pr-10 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-mono"
                     placeholder={`rt${rtStr}rw${rwStr}`}
                   />
@@ -422,15 +700,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   </button>
                 </div>
                 <p className="mt-1 text-[11px] text-slate-400">
-                  Gunakan Username & Password resmi yang telah didaftarkan oleh Pengelola Server RW 05.
+                  Akun diverifikasi langsung ke Server Pusat agar data Anda otomatis masuk ke semua perangkat.
                 </p>
               </div>
 
               <button
                 type="submit"
-                className="w-full rounded-xl bg-[#0B5D3F] py-3 text-sm font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"
+                disabled={adminChecking || syncAccountBusy}
+                className="w-full rounded-xl bg-[#0B5D3F] py-3 text-sm font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer disabled:opacity-60"
               >
-                Masuk Sebagai Admin RT
+                {adminChecking ? 'Memeriksa Akun ke Server...' : 'Masuk Sebagai Admin RT'}
               </button>
             </form>
           ) : (

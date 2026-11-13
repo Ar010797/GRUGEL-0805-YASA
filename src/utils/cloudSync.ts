@@ -346,7 +346,100 @@ export async function saveAppData(
 }
 
 /**
+ * Formats a concise WIB/local Indonesian timestamp for login & sync status logs.
+ */
+export function formatWaktuSyncID(date: Date = new Date()): string {
+  try {
+    return new Intl.DateTimeFormat('id-ID', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+      timeZone: 'Asia/Jakarta',
+    }).format(date);
+  } catch {
+    return date.toLocaleString('id-ID');
+  }
+}
+
+/**
+ * Fetches authoritative admin accounts actually stored on the backend server.
+ */
+export async function fetchServerAdminAccounts(): Promise<{
+  adminAccounts: AdminRTAccount[];
+  deletedAdminIds: string[];
+  serverHasData: boolean;
+  revision: number;
+} | null> {
+  try {
+    const res = await fetch(`/api/admin-accounts?t=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (!json || !json.success) return null;
+    return {
+      adminAccounts: Array.isArray(json.adminAccounts) ? json.adminAccounts : [],
+      deletedAdminIds: Array.isArray(json.deletedAdminIds) ? json.deletedAdminIds : [],
+      serverHasData: Boolean(json.serverHasData),
+      revision: Number(json.revision) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Registers/synchronizes an Admin RT account together with all locally-held data to the Server.
+ * Removes old deletion tombstones for this account if needed, and non-destructively merges data.
+ */
+export async function syncAdminAccountToServer(params: {
+  account: AdminRTAccount;
+  syncData?: AppDatabaseSchema;
+  deletedIds?: Partial<DeletedIdsMap>;
+  allowOverwrite?: boolean;
+}): Promise<{
+  ok: boolean;
+  status?: number;
+  message?: string;
+  account?: AdminRTAccount;
+  serverData?: AppDatabaseSchema;
+}> {
+  try {
+    const res = await fetch('/api/admin/sync-account', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.success) {
+      return {
+        ok: false,
+        status: res.status,
+        message: json?.message || 'Gagal menyinkronkan akun admin ke server.',
+      };
+    }
+    if (json.data) {
+      writeLocalCache(json.data as AppDatabaseSchema);
+    }
+    return {
+      ok: true,
+      status: res.status,
+      message: json.message,
+      account: json.account as AdminRTAccount | undefined,
+      serverData: json.data as AppDatabaseSchema | undefined,
+    };
+  } catch {
+    return {
+      ok: false,
+      message: 'Tidak dapat terhubung ke server. Periksa koneksi internet Anda.',
+    };
+  }
+}
+
+/**
  * Fire-and-forget keepalive flush for pagehide/backgrounding in Median WebView & mobile browsers.
+ * Respects Chromium's ~64KB keepalive body limit by omitting heavy PDF blobs when needed
+ * (while keeping deletedIds untouched so server PDFs are never deleted).
  */
 export function flushSaveAppDataKeepalive(
   data: AppDatabaseSchema,
@@ -359,17 +452,51 @@ export function flushSaveAppDataKeepalive(
   writeLocalCache(updatedData);
 
   try {
-    const payloadStr = JSON.stringify({
+    if (typeof fetch === 'undefined') return;
+    const fullPayloadStr = JSON.stringify({
       ...updatedData,
       isHardReset: false,
       deletedIds: deletedIds || {},
     });
-    if (typeof fetch !== 'undefined') {
+    const byteLength =
+      typeof TextEncoder !== 'undefined'
+        ? new TextEncoder().encode(fullPayloadStr).length
+        : fullPayloadStr.length;
+
+    if (byteLength <= 60000) {
       fetch('/api/data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: payloadStr,
+        body: fullPayloadStr,
         keepalive: true,
+      }).catch(() => {});
+      return;
+    }
+
+    // Try compact payload (omit large PDF base64 files safely — merge keeps server copies)
+    const compactPayloadStr = JSON.stringify({
+      ...updatedData,
+      dokumenList: [],
+      isHardReset: false,
+      deletedIds: deletedIds || {},
+    });
+    const compactLength =
+      typeof TextEncoder !== 'undefined'
+        ? new TextEncoder().encode(compactPayloadStr).length
+        : compactPayloadStr.length;
+
+    if (compactLength <= 60000) {
+      fetch('/api/data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: compactPayloadStr,
+        keepalive: true,
+      }).catch(() => {});
+    } else {
+      fetch('/api/data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: fullPayloadStr,
       }).catch(() => {});
     }
   } catch {

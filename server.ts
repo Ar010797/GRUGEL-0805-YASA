@@ -229,6 +229,235 @@ app.get('/api/data', (req, res) => {
   });
 });
 
+// Shared non-destructive multi-device merge helper
+function mergeAndSaveServerState(
+  existing: any,
+  payload: any,
+  options?: { reviveAdminIds?: string[] }
+) {
+  const existingDeleted = existing?.deletedIds || {};
+  const incomingDeleted = payload?.deletedIds || {};
+  const reviveSet = new Set((options?.reviveAdminIds || []).filter(Boolean));
+
+  const mergedDeletedAdmins = unionIdLists(
+    existingDeleted.adminAccounts,
+    incomingDeleted.adminAccounts
+  ).filter((id) => !reviveSet.has(id));
+
+  const deletedIds = {
+    warga: unionIdLists(existingDeleted.warga, incomingDeleted.warga, payload?.deletedWargaIds),
+    transactions: unionIdLists(existingDeleted.transactions, incomingDeleted.transactions),
+    bantuan: unionIdLists(existingDeleted.bantuan, incomingDeleted.bantuan),
+    pengumuman: unionIdLists(existingDeleted.pengumuman, incomingDeleted.pengumuman, payload?.deletedPengumumanIds),
+    dokumen: unionIdLists(existingDeleted.dokumen, incomingDeleted.dokumen),
+    adminAccounts: mergedDeletedAdmins,
+    laporanBulananRT: unionIdLists(existingDeleted.laporanBulananRT, incomingDeleted.laporanBulananRT),
+  };
+
+  const mergedAdmins = mergeServerEntities(
+    Array.isArray(existing?.adminAccounts) ? existing.adminAccounts : [],
+    Array.isArray(payload?.adminAccounts) ? payload.adminAccounts : [],
+    deletedIds.adminAccounts,
+    (a: any, b: any) => String(a.username || '').toLowerCase() === String(b.username || '').toLowerCase()
+  );
+
+  const mergedWarga = mergeServerEntities(
+    Array.isArray(existing?.wargaList) ? existing.wargaList : [],
+    Array.isArray(payload?.wargaList) ? payload.wargaList : [],
+    deletedIds.warga,
+    (a: any, b: any) => Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
+  );
+
+  const mergedTx = mergeServerEntities(
+    Array.isArray(existing?.transactions) ? existing.transactions : [],
+    Array.isArray(payload?.transactions) ? payload.transactions : [],
+    deletedIds.transactions
+  );
+
+  const mergedPengumuman = mergeServerEntities(
+    Array.isArray(existing?.pengumumanList) ? existing.pengumumanList : [],
+    Array.isArray(payload?.pengumumanList) ? payload.pengumumanList : [],
+    deletedIds.pengumuman
+  );
+
+  const mergedBantuan = mergeServerEntities(
+    Array.isArray(existing?.bantuanList) ? existing.bantuanList : [],
+    Array.isArray(payload?.bantuanList) ? payload.bantuanList : [],
+    deletedIds.bantuan
+  );
+
+  const mergedDokumen = mergeServerEntities(
+    Array.isArray(existing?.dokumenList) ? existing.dokumenList : [],
+    Array.isArray(payload?.dokumenList) ? payload.dokumenList : [],
+    deletedIds.dokumen
+  );
+
+  const mergedLaporan = mergeServerEntities(
+    Array.isArray(existing?.laporanBulananRT) ? existing.laporanBulananRT : [],
+    Array.isArray(payload?.laporanBulananRT) ? payload.laporanBulananRT : [],
+    deletedIds.laporanBulananRT
+  );
+
+  // Protect newer pengaturanKas from being overwritten by older client cache
+  const existingSettingsTs = toEpochMs(existing?.pengaturanKas?.updatedAt);
+  const incomingSettingsTs = toEpochMs(payload?.pengaturanKas?.updatedAt);
+  const mergedPengaturanKas =
+    !existing?.pengaturanKas || (payload?.pengaturanKas && incomingSettingsTs >= existingSettingsTs)
+      ? payload?.pengaturanKas || existing?.pengaturanKas
+      : existing?.pengaturanKas;
+  const mergedTahunAktif =
+    !existing?.pengaturanKas || (payload?.pengaturanKas && incomingSettingsTs >= existingSettingsTs)
+      ? payload?.tahunAktif || existing?.tahunAktif || 2026
+      : existing?.tahunAktif || payload?.tahunAktif || 2026;
+
+  const rev = nextRevision();
+  const mergedData = {
+    version: 2,
+    revision: rev,
+    lastUpdated: new Date().toISOString(),
+    tahunAktif: mergedTahunAktif,
+    pengaturanKas: mergedPengaturanKas,
+    wargaList: mergedWarga,
+    adminAccounts: mergedAdmins,
+    transactions: mergedTx,
+    pengumumanList: mergedPengumuman,
+    bantuanList: mergedBantuan,
+    dokumenList: mergedDokumen,
+    laporanBulananRT: mergedLaporan,
+    deletedIds,
+  };
+
+  const ok = writeServerData(mergedData);
+  if (ok) broadcastSyncEvent('sync', mergedData);
+  return { ok, mergedData, revision: rev };
+}
+
+// GET /api/admin-accounts - Authoritative registry of admin accounts currently persisted on server
+app.get('/api/admin-accounts', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const existing = readServerData();
+  if (existing && typeof existing.revision === 'number' && existing.revision > currentRevision) {
+    currentRevision = existing.revision;
+  }
+  const list = Array.isArray(existing?.adminAccounts) ? existing.adminAccounts : [];
+  res.json({
+    success: true,
+    adminAccounts: list,
+    deletedAdminIds: existing?.deletedIds?.adminAccounts || [],
+    serverHasData: Boolean(existing),
+    revision: currentRevision,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// POST /api/admin/sync-account - Register/sync an Admin RT account & all device-held data safely to Server
+app.post('/api/admin/sync-account', (req, res) => {
+  const { account, syncData, deletedIds, allowOverwrite } = req.body || {};
+  const username = String(account?.username || '').trim();
+  const passwordHash = String(account?.passwordHash || '').trim();
+
+  if (!account || !username || !passwordHash) {
+    return res.status(400).json({
+      success: false,
+      message: 'Username dan password akun admin harus diisi untuk sinkronisasi ke server.',
+    });
+  }
+
+  const existing = readServerData() || {};
+  const existingAdmins: any[] = Array.isArray(existing.adminAccounts) ? existing.adminAccounts : [];
+  const existingMatch = existingAdmins.find(
+    (a) => String(a.username || '').trim().toLowerCase() === username.toLowerCase()
+  );
+
+  if (existingMatch && !allowOverwrite && existingMatch.passwordHash !== passwordHash) {
+    return res.status(403).json({
+      success: false,
+      message:
+        'Username admin tersebut sudah terdaftar di server dengan password berbeda. Gunakan password yang benar atau hubungi Server Pusat.',
+    });
+  }
+
+  const nowIso = new Date().toISOString();
+  const nowLabel = new Intl.DateTimeFormat('id-ID', {
+    dateStyle: 'short',
+    timeStyle: 'short',
+    timeZone: 'Asia/Jakarta',
+  }).format(new Date());
+
+  const targetId = String(existingMatch?.id || account.id || `adm_${Date.now()}`);
+  const stampedAccount = {
+    ...(existingMatch || {}),
+    ...account,
+    id: targetId,
+    username,
+    passwordHash,
+    nama: String(account.nama || existingMatch?.nama || `Admin RT ${account.rt || '08'}`),
+    rt: String(account.rt || existingMatch?.rt || '08'),
+    rw: String(account.rw || existingMatch?.rw || '05'),
+    kontak: String(account.kontak || existingMatch?.kontak || ''),
+    jabatan: String(account.jabatan || existingMatch?.jabatan || `Ketua RT ${account.rt || '08'}`),
+    status: (existingMatch?.status === 'nonaktif' ? 'nonaktif' : account.status === 'nonaktif' ? 'nonaktif' : 'aktif'),
+    terakhirLogin: account.terakhirLogin || nowLabel,
+    terakhirSinkronisasi: `Tersinkron ${nowLabel}`,
+    updatedAt: nowIso,
+  };
+
+  if (stampedAccount.status === 'nonaktif') {
+    return res.status(403).json({
+      success: false,
+      message: `Akun Admin ${stampedAccount.nama} berstatus nonaktif di Server Pusat.`,
+    });
+  }
+
+  const incomingSync = syncData && typeof syncData === 'object' ? syncData : {};
+  const incomingAdmins = Array.isArray(incomingSync.adminAccounts) ? incomingSync.adminAccounts : [];
+  const nextAdminsPayload = [
+    stampedAccount,
+    ...incomingAdmins.filter(
+      (a: any) =>
+        a &&
+        a.id !== targetId &&
+        String(a.username || '').trim().toLowerCase() !== username.toLowerCase()
+    ),
+  ];
+
+  const payloadForMerge = {
+    ...incomingSync,
+    adminAccounts: nextAdminsPayload,
+    deletedIds: deletedIds || incomingSync.deletedIds || {},
+  };
+
+  const reviveIds = [targetId, account.id, existingMatch?.id].filter(Boolean) as string[];
+  if (username.toLowerCase() === 'admin') {
+    reviveIds.push('adm_rt08');
+  }
+
+  const { ok, mergedData, revision } = mergeAndSaveServerState(existing, payloadForMerge, {
+    reviveAdminIds: reviveIds,
+  });
+
+  if (!ok) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal menyimpan sinkronisasi akun admin ke server.',
+    });
+  }
+
+  const confirmedAccount =
+    mergedData.adminAccounts.find(
+      (a: any) => String(a.username || '').trim().toLowerCase() === username.toLowerCase()
+    ) || stampedAccount;
+
+  return res.json({
+    success: true,
+    message: `Akun Admin "${confirmedAccount.username}" dan seluruh datanya berhasil terdaftar & tersinkron ke Server Pusat.`,
+    account: confirmedAccount,
+    data: mergedData,
+    revision,
+    timestamp: nowIso,
+  });
+});
+
 // POST Database - Sinkronisasi aman dengan proteksi multi-perangkat & tombstone merge
 app.post('/api/data', (req, res) => {
   const payload = req.body;
@@ -266,100 +495,13 @@ app.post('/api/data', (req, res) => {
   }
 
   const existing = readServerData() || {};
-  const existingDeleted = existing.deletedIds || {};
-  const incomingDeleted = payload.deletedIds || {};
-
-  const deletedIds = {
-    warga: unionIdLists(existingDeleted.warga, incomingDeleted.warga, payload.deletedWargaIds),
-    transactions: unionIdLists(existingDeleted.transactions, incomingDeleted.transactions),
-    bantuan: unionIdLists(existingDeleted.bantuan, incomingDeleted.bantuan),
-    pengumuman: unionIdLists(existingDeleted.pengumuman, incomingDeleted.pengumuman, payload.deletedPengumumanIds),
-    dokumen: unionIdLists(existingDeleted.dokumen, incomingDeleted.dokumen),
-    adminAccounts: unionIdLists(existingDeleted.adminAccounts, incomingDeleted.adminAccounts),
-    laporanBulananRT: unionIdLists(existingDeleted.laporanBulananRT, incomingDeleted.laporanBulananRT),
-  };
-
-  const mergedAdmins = mergeServerEntities(
-    Array.isArray(existing.adminAccounts) ? existing.adminAccounts : [],
-    Array.isArray(payload.adminAccounts) ? payload.adminAccounts : [],
-    deletedIds.adminAccounts,
-    (a: any, b: any) => String(a.username || '').toLowerCase() === String(b.username || '').toLowerCase()
-  );
-
-  const mergedWarga = mergeServerEntities(
-    Array.isArray(existing.wargaList) ? existing.wargaList : [],
-    Array.isArray(payload.wargaList) ? payload.wargaList : [],
-    deletedIds.warga,
-    (a: any, b: any) => Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
-  );
-
-  const mergedTx = mergeServerEntities(
-    Array.isArray(existing.transactions) ? existing.transactions : [],
-    Array.isArray(payload.transactions) ? payload.transactions : [],
-    deletedIds.transactions
-  );
-
-  const mergedPengumuman = mergeServerEntities(
-    Array.isArray(existing.pengumumanList) ? existing.pengumumanList : [],
-    Array.isArray(payload.pengumumanList) ? payload.pengumumanList : [],
-    deletedIds.pengumuman
-  );
-
-  const mergedBantuan = mergeServerEntities(
-    Array.isArray(existing.bantuanList) ? existing.bantuanList : [],
-    Array.isArray(payload.bantuanList) ? payload.bantuanList : [],
-    deletedIds.bantuan
-  );
-
-  const mergedDokumen = mergeServerEntities(
-    Array.isArray(existing.dokumenList) ? existing.dokumenList : [],
-    Array.isArray(payload.dokumenList) ? payload.dokumenList : [],
-    deletedIds.dokumen
-  );
-
-  const mergedLaporan = mergeServerEntities(
-    Array.isArray(existing.laporanBulananRT) ? existing.laporanBulananRT : [],
-    Array.isArray(payload.laporanBulananRT) ? payload.laporanBulananRT : [],
-    deletedIds.laporanBulananRT
-  );
-
-  // Protect newer pengaturanKas from being overwritten by older client cache
-  const existingSettingsTs = toEpochMs(existing.pengaturanKas?.updatedAt);
-  const incomingSettingsTs = toEpochMs(payload.pengaturanKas?.updatedAt);
-  const mergedPengaturanKas =
-    !existing.pengaturanKas || incomingSettingsTs >= existingSettingsTs
-      ? payload.pengaturanKas || existing.pengaturanKas
-      : existing.pengaturanKas;
-  const mergedTahunAktif =
-    !existing.pengaturanKas || incomingSettingsTs >= existingSettingsTs
-      ? payload.tahunAktif || existing.tahunAktif || 2026
-      : existing.tahunAktif || payload.tahunAktif || 2026;
-
-  const rev = nextRevision();
-  const mergedData = {
-    version: 2,
-    revision: rev,
-    lastUpdated: new Date().toISOString(),
-    tahunAktif: mergedTahunAktif,
-    pengaturanKas: mergedPengaturanKas,
-    wargaList: mergedWarga,
-    adminAccounts: mergedAdmins,
-    transactions: mergedTx,
-    pengumumanList: mergedPengumuman,
-    bantuanList: mergedBantuan,
-    dokumenList: mergedDokumen,
-    laporanBulananRT: mergedLaporan,
-    deletedIds,
-  };
-
-  const ok = writeServerData(mergedData);
-  if (ok) broadcastSyncEvent('sync', mergedData);
+  const { ok, mergedData, revision } = mergeAndSaveServerState(existing, payload);
 
   res.json({
     success: ok,
     message: ok ? 'Data berhasil disinkronisasi & diamankan permanen di server' : 'Gagal menyimpan ke server',
     data: mergedData,
-    revision: rev,
+    revision,
     timestamp: new Date().toISOString(),
   });
 });
