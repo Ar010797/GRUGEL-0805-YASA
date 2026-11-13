@@ -10,7 +10,7 @@ import {
   Home,
   Check,
   UserCheck,
-  Camera,
+  FileSpreadsheet,
   Download,
   Eye,
   FileText,
@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { Warga, BantuanPemerintah, ProfilRT } from '../types';
 import { exportDataWargaPerKK_PDF, exportSingleKK_PDF, exportKartuKeluargaPemerintah_PDF } from '../utils/pdfExport';
+import { downloadTemplateExcelWargaBansos } from '../utils/excelWargaImport';
 import { ConfirmationModal } from '../components/ConfirmationModal';
 
 interface DataWargaViewProps {
@@ -137,13 +138,29 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
             </button>
           )}
 
-          {/* Tambah Warga / Foto KK */}
+          {/* Template Excel Warga & Bansos */}
+          <button
+            onClick={() =>
+              downloadTemplateExcelWargaBansos({
+                rt: profilRT?.namaRT || '08',
+                rw: profilRT?.namaRW || '05',
+                desa: profilRT?.desa || 'Desa Kotayasa',
+              })
+            }
+            className="flex items-center gap-2 rounded-xl border border-emerald-300 bg-emerald-50 px-3.5 py-2.5 text-xs font-bold text-[#0B5D3F] shadow-xs hover:bg-emerald-100 transition-all cursor-pointer"
+            title="Download Template Excel untuk pengelompokan otomatis anggota keluarga & penerimaan bantuan"
+          >
+            <Download size={14} />
+            <span>Template Excel</span>
+          </button>
+
+          {/* Import Excel / Tambah Warga */}
           <button
             onClick={onOpenWargaModal}
             className="flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 shadow-xs hover:bg-slate-50 transition-all cursor-pointer"
           >
-            <Camera size={15} className="text-[#0B5D3F]" />
-            <span>+ Foto / Tambah KK</span>
+            <FileSpreadsheet size={15} className="text-[#0B5D3F]" />
+            <span>+ Import Excel / Tambah KK</span>
           </button>
         </div>
       </div>
@@ -237,14 +254,30 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
             <p className="mt-1 max-w-sm text-xs text-slate-500 leading-relaxed">
               {search
                 ? 'Coba periksa ejaan nama kepala keluarga atau nomor KK yang dicari.'
-                : 'Database kependudukan RT 08 RW 05 saat ini masih kosong (0 KK). Anda dapat menambahkan warga baru atau foto KK.'}
+                : 'Database kependudukan RT 08 RW 05 saat ini masih kosong (0 KK). Anda dapat langsung mengimport seluruh warga, anggota keluarga, dan bantuan lewat file Excel.'}
             </p>
-            <button
-              onClick={onOpenWargaModal}
-              className="mt-4 rounded-xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#084831] transition-all cursor-pointer"
-            >
-              + Tambah Warga Baru
-            </button>
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+              <button
+                onClick={() =>
+                  downloadTemplateExcelWargaBansos({
+                    rt: profilRT?.namaRT || '08',
+                    rw: profilRT?.namaRW || '05',
+                    desa: profilRT?.desa || 'Desa Kotayasa',
+                  })
+                }
+                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-xs font-bold text-[#0B5D3F] hover:bg-emerald-100 transition-all cursor-pointer"
+              >
+                <Download size={14} />
+                <span>Download Template Excel</span>
+              </button>
+              <button
+                onClick={onOpenWargaModal}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#084831] transition-all cursor-pointer"
+              >
+                <FileSpreadsheet size={14} />
+                <span>+ Import Excel / Tambah Warga</span>
+              </button>
+            </div>
           </div>
         ) : (
           <div>
@@ -610,7 +643,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                       onOpenUpgradeModal(w);
                     }}
                     className="flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 px-3.5 py-2 text-xs font-bold text-white shadow-xs cursor-pointer"
-                    title="Scan KK baru untuk perbarui susunan keluarga dan alihkan data kas secara aman"
+                    title="Perbarui susunan keluarga dan alihkan data kas secara aman"
                   >
                     <RefreshCw size={13} />
                     <span>Upgrade Data KK Ini</span>

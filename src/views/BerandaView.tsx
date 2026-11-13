@@ -183,7 +183,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
                 className="flex items-center gap-2 rounded-xl bg-emerald-900/60 px-4 py-2.5 text-xs font-bold text-emerald-200 border border-emerald-700/40 hover:bg-emerald-800/80 active:scale-95 transition-all cursor-pointer"
               >
                 <Users size={16} />
-                <span>+ Warga (Scan KK)</span>
+                <span>+ Import Excel / Warga</span>
               </button>
 
               <button

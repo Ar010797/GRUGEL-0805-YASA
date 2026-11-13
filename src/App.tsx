@@ -566,6 +566,105 @@ export default function App() {
     setWargaList((prev) => [...prev, newW]);
   };
 
+  // Bulk Import Excel: Grouped Warga + Anggota Keluarga + Penerimaan Bantuan in 1 click
+  const handleBulkImportWargaBantuan = (
+    importedWarga: Omit<Warga, 'id' | 'no'>[],
+    importedBantuan: Omit<BantuanPemerintah, 'id'>[],
+    options: { mergeExisting: boolean }
+  ) => {
+    const baseTime = Date.now();
+    let addedKKCount = 0;
+    let updatedKKCount = 0;
+
+    setWargaList((prev) => {
+      const updated = [...prev];
+      importedWarga.forEach((incoming, idx) => {
+        const existingIndex = incoming.noKK
+          ? updated.findIndex((w) => w.noKK === incoming.noKK)
+          : updated.findIndex((w) => w.nama.toLowerCase() === incoming.nama.toLowerCase());
+
+        if (existingIndex >= 0) {
+          if (options.mergeExisting) {
+            const existing = updated[existingIndex];
+            const nextStatus = incoming.statusIuran || existing.statusIuran || 'Belum';
+            updated[existingIndex] = {
+              ...existing,
+              nama: incoming.nama || existing.nama,
+              noKK: incoming.noKK || existing.noKK,
+              nik: incoming.nik || existing.nik,
+              noRumah: incoming.noRumah || existing.noRumah,
+              rt: incoming.rt || existing.rt,
+              rw: incoming.rw || existing.rw,
+              alamat: incoming.alamat || existing.alamat,
+              kodePos: incoming.kodePos || existing.kodePos,
+              jenisKelamin: incoming.jenisKelamin || existing.jenisKelamin,
+              anggotaKeluarga:
+                incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
+                  ? incoming.anggotaKeluarga
+                  : existing.anggotaKeluarga,
+              jumlahJiwa:
+                incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
+                  ? incoming.anggotaKeluarga.length
+                  : existing.jumlahJiwa,
+              telepon: incoming.telepon || existing.telepon,
+              statusIuran: nextStatus,
+              statusIuranPerTahun: {
+                ...(existing.statusIuranPerTahun || {}),
+                [tahunAktif]: nextStatus,
+              },
+            };
+            updatedKKCount++;
+          }
+        } else {
+          const newWarga: Warga = {
+            ...incoming,
+            id: `w_${baseTime}_${idx}`,
+            no: updated.length + 1,
+            statusIuran: incoming.statusIuran || 'Belum',
+            statusIuranPerTahun: { [tahunAktif]: incoming.statusIuran || 'Belum' },
+            pin: incoming.pin || '123456',
+          };
+          updated.push(newWarga);
+          addedKKCount++;
+        }
+      });
+      return updated;
+    });
+
+    let addedBantuanCount = 0;
+    if (importedBantuan.length > 0) {
+      setBantuanList((prev) => {
+        const nextList = [...prev];
+        importedBantuan.forEach((b, idx) => {
+          const isDuplicate = nextList.some(
+            (existing) =>
+              existing.noKK === b.noKK &&
+              existing.namaPenerima.toLowerCase() === b.namaPenerima.toLowerCase() &&
+              existing.jenisBantuan.toLowerCase() === b.jenisBantuan.toLowerCase() &&
+              existing.tanggal === b.tanggal
+          );
+          if (!isDuplicate) {
+            nextList.unshift({
+              ...b,
+              id: `b_${baseTime}_${idx}`,
+            });
+            addedBantuanCount++;
+          }
+        });
+        return nextList;
+      });
+    }
+
+    const totalJiwa = importedWarga.reduce(
+      (sum, w) => sum + (w.anggotaKeluarga?.length || w.jumlahJiwa || 1),
+      0
+    );
+    setRolloverNotice(
+      `Import Excel Berhasil! ${addedKKCount} KK baru ditambahkan${updatedKKCount > 0 ? `, ${updatedKKCount} KK diperbarui` : ''} (${totalJiwa} jiwa)${addedBantuanCount > 0 ? ` beserta ${addedBantuanCount} data penerimaan bantuan` : ''}.`
+    );
+    setTimeout(() => setRolloverNotice(null), 7000);
+  };
+
   // Toggle resident fee status
   const handleToggleWargaStatus = (id: string) => {
     setWargaList((prev) =>
@@ -650,7 +749,7 @@ export default function App() {
       id: 'rw_' + Date.now(),
       tanggal: new Date().toISOString().split('T')[0],
       alasan,
-      keterangan: keterangan || 'Pembaruan data KK melalui scan otomatis',
+      keterangan: keterangan || 'Pembaruan data KK melalui import Excel / edit langsung',
       noKKLama: oldWarga.noKK,
       noKKBaru: newKKData.noKK,
       kepalaKeluargaLama: oldWarga.nama,
@@ -897,7 +996,7 @@ export default function App() {
     { id: 'kas-keluar', label: 'Kas Keluar', icon: <ArrowDown size={18} strokeWidth={2.5} /> },
     { id: 'kas-kematian', label: 'Kas Kematian (Mori)', icon: <Heart size={18} fill="currentColor" /> },
     { id: 'status-iuran', label: 'Status Iuran', icon: <CalendarCheck size={18} /> },
-    { id: 'data-warga', label: 'Data Warga (KK OCR)', icon: <Users size={18} /> },
+    { id: 'data-warga', label: 'Data Warga & Excel', icon: <Users size={18} /> },
     { id: 'bantuan-pemerintah', label: 'Bantuan Pemerintah', icon: <HandHeart size={18} />, badge: 'Rahasia' },
     { id: 'dokumen-pdf', label: 'Arsip PDF Warga', icon: <FileArchive size={18} />, badge: 'Admin' },
     { id: 'pengumuman', label: 'Pengumuman & WA', icon: <Megaphone size={18} /> },
@@ -1243,6 +1342,7 @@ export default function App() {
                   onAddBantuan={handleAddBantuan}
                   onUpdateStatus={handleUpdateStatusBantuan}
                   onDeleteBantuan={handleDeleteBantuan}
+                  onOpenImportExcel={() => setIsWargaModalOpen(true)}
                   onBack={() => setCurrentView('server-kontrol')}
                 />
               ) : currentView === 'beranda' ? (
@@ -1441,6 +1541,7 @@ export default function App() {
                     onAddBantuan={handleAddBantuan}
                     onUpdateStatus={handleUpdateStatusBantuan}
                     onDeleteBantuan={handleDeleteBantuan}
+                    onOpenImportExcel={() => setIsWargaModalOpen(true)}
                     onBack={() => setCurrentView('beranda')}
                   />
                 )}
@@ -1529,12 +1630,14 @@ export default function App() {
         />
       )}
 
-      {/* Resident (Warga) Modal with OCR / Photo KK (Admin & Server) */}
+      {/* Resident (Warga) Modal with Bulk Excel Import & Manual KK (Admin & Server) */}
       {(isAdminRT || isServer) && (
         <WargaModal
           isOpen={isWargaModalOpen}
           onClose={() => setIsWargaModalOpen(false)}
           onSave={handleSaveWarga}
+          onBulkImport={handleBulkImportWargaBantuan}
+          profilRT={pengaturanKas.profilRT}
         />
       )}
 
@@ -1558,7 +1661,7 @@ export default function App() {
         />
       )}
 
-      {/* Upgrade Data KK Modal (Scan KK Baru, Pindah Kas Utuh, Deteksi Anggota Meninggal/Pisah KK) */}
+      {/* Upgrade Data KK Modal (Import Excel / Edit KK Baru, Pindah Kas Utuh, Deteksi Anggota Meninggal/Pisah KK) */}
       {(isAdminRT || isServer) && (
         <UpgradeKKModal
           isOpen={isUpgradeModalOpen}

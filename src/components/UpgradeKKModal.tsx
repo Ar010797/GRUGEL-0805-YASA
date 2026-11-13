@@ -1,38 +1,22 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   X,
-  Camera,
   Upload,
   RefreshCw,
-  RotateCw,
   CheckCircle2,
   AlertCircle,
-  Users,
-  CreditCard,
   User,
   ShieldCheck,
-  ArrowRight,
   Sparkles,
-  Heart,
-  FileText,
-  AlertTriangle,
   History,
-  Check,
   Plus,
   Trash2,
-  Calendar,
+  AlertTriangle,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { Warga, AnggotaKeluarga, Transaction } from '../types';
-import {
-  scanKartuKeluargaImage,
-  cleanIndonesianName,
-  normalizeAliFamilyName,
-  cleanNIK,
-  isFormOrHeaderGarbage,
-  preprocessAndCompressImage,
-  rotateImage90,
-  adjustImageBrightness,
-} from '../utils/ocrKKScanner';
+import { cleanIndonesianName, cleanNIK } from '../utils/wargaHelpers';
+import { parseExcelWargaAndBantuan } from '../utils/excelWargaImport';
 
 interface UpgradeKKModalProps {
   isOpen: boolean;
@@ -69,27 +53,22 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
   initialTargetWarga,
   onApplyUpgrade,
 }) => {
-  // Target resident selection
   const [selectedWargaId, setSelectedWargaId] = useState<string>(initialTargetWarga?.id || '');
 
-  // Step state: 1 = Scan & Upload, 2 = Review & Confirm Migration
-  const [step, setStep] = useState<1 | 2>(1);
+  // Excel import for upgrade
+  const [isParsingExcel, setIsParsingExcel] = useState(false);
+  const [excelFamilies, setExcelFamilies] = useState<Omit<Warga, 'id' | 'no'>[]>([]);
+  const [importSuccess, setImportSuccess] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
 
-  // OCR scanning state
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [isScanning, setIsScanning] = useState(false);
-  const [scanSuccess, setScanSuccess] = useState(false);
-  const [scanError, setScanError] = useState<string | null>(null);
-  const [isDarkEnhanced, setIsDarkEnhanced] = useState(false);
-
-  // Scanned / New KK Data
+  // Updated KK Data
   const [newNama, setNewNama] = useState('');
   const [newNoKK, setNewNoKK] = useState('');
   const [newRt, setNewRt] = useState('08');
   const [newRw, setNewRw] = useState('05');
   const [newAlamat, setNewAlamat] = useState('');
   const [newKodePos, setNewKodePos] = useState('53183');
-  const [newTanggalDikeluarkan, setNewTanggalDikeluarkan] = useState('04-09-2024');
+  const [newTanggalDikeluarkan, setNewTanggalDikeluarkan] = useState('');
   const [newJenisKelamin, setNewJenisKelamin] = useState<'Laki-laki' | 'Perempuan'>('Laki-laki');
   const [newAnggota, setNewAnggota] = useState<AnggotaKeluarga[]>([]);
 
@@ -99,10 +78,8 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
   const [catatSantunanKematian, setCatatSantunanKematian] = useState(false);
   const [namaMeninggal, setNamaMeninggal] = useState('');
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const excelInputRef = useRef<HTMLInputElement>(null);
 
-  // Sync initial target
   useEffect(() => {
     if (initialTargetWarga) {
       setSelectedWargaId(initialTargetWarga.id);
@@ -111,11 +88,25 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
     }
   }, [initialTargetWarga, wargaList]);
 
-  if (!isOpen) return null;
-
   const targetWarga = wargaList.find((w) => w.id === selectedWargaId) || null;
 
-  // Calculate past cash history for target family
+  // Populate editable fields whenever targetWarga changes (unless Excel already loaded)
+  useEffect(() => {
+    if (targetWarga && !importSuccess) {
+      setNewNama(targetWarga.nama || '');
+      setNewNoKK(targetWarga.noKK || '');
+      setNewRt(targetWarga.rt || '08');
+      setNewRw(targetWarga.rw || '05');
+      setNewAlamat(targetWarga.alamat || 'RT 08 RW 05 Desa Kotayasa');
+      setNewKodePos(targetWarga.kodePos || '53183');
+      setNewTanggalDikeluarkan(targetWarga.tanggalDikeluarkan || '');
+      setNewJenisKelamin(targetWarga.jenisKelamin || 'Laki-laki');
+      setNewAnggota(targetWarga.anggotaKeluarga ? [...targetWarga.anggotaKeluarga] : []);
+    }
+  }, [selectedWargaId, targetWarga]);
+
+  if (!isOpen) return null;
+
   const targetTransactions = targetWarga
     ? transactions.filter(
         (t) =>
@@ -128,100 +119,21 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
     .filter((t) => t.tipe === 'masuk')
     .reduce((sum, t) => sum + t.nominal, 0);
 
-  const applyExtractedData = (extracted: any) => {
-    const rawName = extracted.nama || (extracted.anggotaKeluarga && extracted.anggotaKeluarga[0]?.nama) || targetWarga?.nama || '';
-    const cleanNoKKDigits = cleanNIK(extracted.noKK) || targetWarga?.noKK || '';
-    const isAliKK =
-      rawName.toUpperCase().includes('ALI PAMUJI') ||
-      cleanNoKKDigits === '3302211101230002';
+  const applyFamilyFromExcel = (family: Omit<Warga, 'id' | 'no'>) => {
+    setNewNama(family.nama || '');
+    setNewNoKK(family.noKK || '');
+    setNewRt(family.rt || targetWarga?.rt || '08');
+    setNewRw(family.rw || targetWarga?.rw || '05');
+    setNewAlamat(family.alamat || targetWarga?.alamat || 'RT 08 RW 05 Desa Kotayasa');
+    setNewJenisKelamin(family.jenisKelamin || 'Laki-laki');
+    if (family.kodePos) setNewKodePos(family.kodePos);
+    setNewAnggota(family.anggotaKeluarga || []);
+    setImportSuccess(true);
 
-    const cleanName = cleanIndonesianName(rawName, isAliKK);
-    const cleanMembers = (extracted.anggotaKeluarga || []).map((m: any, idx: number) => {
-      let mName = cleanIndonesianName(m.nama, isAliKK);
-      let mNik = cleanNIK(m.nik);
-      let tglLahir = (m.tanggalLahir || '').trim();
-      let pend = (m.pendidikan || '').trim();
-      let peker = (m.pekerjaan || '').trim();
-      let tmptLahir = (m.tempatLahir || '').trim();
-      let rel = (m.hubungan || (idx === 0 ? 'Kepala Keluarga' : idx === 1 ? 'Istri' : 'Anak')).trim();
-      let gender: 'Laki-laki' | 'Perempuan' = m.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki';
-
-      if (isAliKK) {
-        // Khusus KK Ali Pamuji: pastikan data anggota presisi sesuai KK Ali
-        if (!mName || isFormOrHeaderGarbage(mName)) {
-          if (idx === 0) mName = 'ALI PAMUJI';
-          else if (idx === 1) mName = 'ANNISA NIRMALA FATHNI BAROROH';
-          else if (idx === 2) mName = 'AURYNDA ADZKIYAH AL HUSNA';
-          else if (idx === 3) mName = 'ALISHA SHAFA AYYUNA';
-          else mName = `Anggota #${idx + 1}`;
-        }
-        mName = normalizeAliFamilyName(mName);
-
-        if (mName === 'ALI PAMUJI') {
-          if (!mNik || mNik.startsWith('53')) mNik = '3302212512920002';
-          if (!tglLahir) tglLahir = '25-12-1992';
-          if (!pend) pend = 'Diploma IV/Strata I';
-        } else if (mName === 'ANNISA NIRMALA FATHNI BAROROH') {
-          if (!mNik || mNik.startsWith('53')) mNik = '3302216606020003';
-          if (!tglLahir) tglLahir = '26-06-2002';
-          if (!pend) pend = 'SLTP/Sederajat';
-        } else if (mName === 'AURYNDA ADZKIYAH AL HUSNA') {
-          if (!mNik || mNik.startsWith('53')) mNik = '3302216709220003';
-          if (!tglLahir) tglLahir = '27-09-2022';
-          if (!pend) pend = 'Tidak/Belum Sekolah';
-        } else if (mName === 'ALISHA SHAFA AYYUNA') {
-          if (!mNik || mNik.startsWith('53')) mNik = '3302215308240001';
-          if (!tglLahir) tglLahir = '13-08-2024';
-          if (!pend) pend = 'Tidak/Belum Sekolah';
-        }
-      } else {
-        // KK WARGA LAINNYA: Gunakan data riil sesuai foto KK yang diimpor tanpa menimpa data keluarga lain!
-        if (!mName || isFormOrHeaderGarbage(mName)) {
-          mName = idx === 0 ? (cleanName || 'Kepala Keluarga') : (rel || `Anggota #${idx + 1}`);
-        }
-        if (mNik.length === 16) {
-          const dd = parseInt(mNik.slice(6, 8), 10);
-          if (!isNaN(dd) && dd > 40) {
-            gender = 'Perempuan';
-          }
-        }
-      }
-
-      return {
-        ...m,
-        nama: mName,
-        nik: mNik,
-        hubungan: rel,
-        jenisKelamin: gender,
-        tempatLahir: tmptLahir || 'Banyumas',
-        tanggalLahir: tglLahir,
-        pendidikan: pend || (idx === 0 ? 'Diploma IV/Strata I' : idx === 1 ? 'SLTA/Sederajat' : 'Tidak/Belum Sekolah'),
-        pekerjaan: peker || (idx === 1 ? 'Mengurus Rumah Tangga' : idx === 0 ? 'Wiraswasta' : 'Belum/Tidak Bekerja'),
-        golonganDarah: m.golonganDarah || 'Tidak Tahu',
-        statusPerkawinan: m.statusPerkawinan || (idx <= 1 ? 'Kawin Tercatat' : 'Belum Kawin'),
-        tanggalPerkawinan: m.tanggalPerkawinan || (idx <= 1 ? '-' : '-'),
-        kewarganegaraan: m.kewarganegaraan || 'WNI',
-        namaAyah: cleanIndonesianName(m.namaAyah || '', isAliKK),
-        namaIbu: cleanIndonesianName(m.namaIbu || '', isAliKK),
-      };
-    });
-
-    setNewNama(cleanName);
-    setNewNoKK(cleanNoKKDigits);
-    setNewRt(extracted.rt || targetWarga?.rt || '08');
-    setNewRw(extracted.rw || targetWarga?.rw || '05');
-    setNewAlamat(extracted.alamat || targetWarga?.alamat || (isAliKK ? 'RT 08 RW 05 Desa Kotayasa' : 'Desa Kotayasa'));
-    setNewJenisKelamin(extracted.jenisKelamin || 'Laki-laki');
-    if (extracted.kodePos) setNewKodePos(extracted.kodePos);
-    if (extracted.tanggalDikeluarkan) setNewTanggalDikeluarkan(extracted.tanggalDikeluarkan);
-    setNewAnggota(cleanMembers);
-    setScanSuccess(true);
-
-    // Auto-detect removed member for meninggal / pisah KK if target exists
     if (targetWarga && targetWarga.anggotaKeluarga) {
-      const newMemberNames = cleanMembers.map((m: any) => (m.nama || '').toLowerCase());
+      const newMemberNames = (family.anggotaKeluarga || []).map((m) => (m.nama || '').toLowerCase());
       const missing = targetWarga.anggotaKeluarga.filter(
-        (m) => !newMemberNames.some((n: string) => n.includes(m.nama.toLowerCase()) || m.nama.toLowerCase().includes(n))
+        (m) => !newMemberNames.some((n) => n.includes(m.nama.toLowerCase()) || m.nama.toLowerCase().includes(n))
       );
       if (missing.length > 0) {
         setNamaMeninggal(missing[0].nama);
@@ -230,63 +142,33 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
     }
   };
 
-  const handleBrightenImage = async () => {
-    if (!imagePreview) return;
-    setIsScanning(true);
-    setScanError(null);
+  const handleExcelSelected = async (file: File) => {
+    setImportSuccess(false);
+    setImportError(null);
+    setIsParsingExcel(true);
+
     try {
-      const brightened = await adjustImageBrightness(imagePreview, 40, 1.35);
-      setImagePreview(brightened);
-      setIsDarkEnhanced(true);
-      const extracted = await scanKartuKeluargaImage(brightened, 'image/jpeg');
-      applyExtractedData(extracted);
-    } catch (err: any) {
-      setScanError(err.message || 'Gagal mencerahkan foto dokumen.');
-    } finally {
-      setIsScanning(false);
-    }
-  };
-
-  const handleRotateImage = async () => {
-    if (!imagePreview) return;
-    setIsScanning(true);
-    setScanError(null);
-    try {
-      const rotated = await rotateImage90(imagePreview, true);
-      setImagePreview(rotated);
-      const extracted = await scanKartuKeluargaImage(rotated, 'image/jpeg');
-      applyExtractedData(extracted);
-    } catch (err: any) {
-      setScanError(err.message || 'Gagal memutar gambar.');
-    } finally {
-      setIsScanning(false);
-    }
-  };
-
-  // Handle OCR upload
-  const handleImageSelected = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const base64 = e.target?.result as string;
-      setScanSuccess(false);
-      setScanError(null);
-      setIsScanning(true);
-      setIsDarkEnhanced(false);
-
-      try {
-        const optimized = await preprocessAndCompressImage(base64);
-        setImagePreview(optimized);
-
-        const extracted = await scanKartuKeluargaImage(optimized, 'image/jpeg');
-        applyExtractedData(extracted);
-      } catch (err: any) {
-        console.error('OCR Upgrade Error:', err);
-        setScanError(err.message || 'Gagal membaca foto Kartu Keluarga.');
-      } finally {
-        setIsScanning(false);
+      const parsed = await parseExcelWargaAndBantuan(file);
+      if (parsed.wargaList.length === 0) {
+        setImportError('File Excel tidak berisi data KK yang valid.');
+      } else {
+        setExcelFamilies(parsed.wargaList);
+        // Try matching targetWarga No KK or name first
+        const matched = targetWarga
+          ? parsed.wargaList.find(
+              (f) =>
+                (f.noKK && f.noKK === targetWarga.noKK) ||
+                f.nama.toLowerCase() === targetWarga.nama.toLowerCase()
+            )
+          : undefined;
+        applyFamilyFromExcel(matched || parsed.wargaList[0]);
       }
-    };
-    reader.readAsDataURL(file);
+    } catch (err: any) {
+      console.error('Excel Upgrade Error:', err);
+      setImportError(err.message || 'Gagal membaca file Excel.');
+    } finally {
+      setIsParsingExcel(false);
+    }
   };
 
   const handleUpdateNewAnggota = (index: number, field: keyof AnggotaKeluarga, value: string) => {
@@ -318,7 +200,6 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
     setNewAnggota((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // Find diffs
   const oldMemberNames = targetWarga?.anggotaKeluarga?.map((m) => m.nama) || [targetWarga?.nama || ''];
   const newMemberNames = newAnggota.map((m) => m.nama);
 
@@ -331,7 +212,6 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
   );
 
   const isKepalaBerubah = targetWarga && newNama && targetWarga.nama.toLowerCase() !== newNama.toLowerCase();
-  const isNoKKBerubah = targetWarga && newNoKK && targetWarga.noKK !== newNoKK;
 
   const handleConfirmSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -382,7 +262,7 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
         anggotaKeluarga: finalMembers,
       },
       alasan,
-      keterangan: keterangan || `Pembaruan data KK via scan foto terbaru (${alasan})`,
+      keterangan: keterangan || `Pembaruan data KK (${alasan})`,
       catatSantunanKematian,
       namaMeninggal: namaMeninggal.trim() || undefined,
     });
@@ -409,7 +289,7 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-600">
-                Scan KK baru saat ada anggota meninggal, pisah KK, atau perubahan keluarga tanpa menghilangkan catatan kas
+                Perbarui susunan KK saat ada anggota meninggal, pisah KK, atau perubahan keluarga tanpa menghilangkan catatan kas
               </p>
             </div>
           </div>
@@ -423,7 +303,6 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
 
         {/* Content */}
         <div className="overflow-y-auto p-6 space-y-6 no-scrollbar">
-          {/* STEP 1: Pilih KK & Scan KK Baru */}
           <div className="space-y-4">
             {/* Target Family Selector */}
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-3">
@@ -432,7 +311,10 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
               </label>
               <select
                 value={selectedWargaId}
-                onChange={(e) => setSelectedWargaId(e.target.value)}
+                onChange={(e) => {
+                  setImportSuccess(false);
+                  setSelectedWargaId(e.target.value);
+                }}
                 className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden cursor-pointer"
               >
                 <option value="">-- Pilih Kepala Keluarga Terdaftar --</option>
@@ -443,14 +325,11 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                 ))}
               </select>
 
-              {/* Protected Balance Callout */}
               {targetWarga && (
                 <div className="rounded-xl bg-emerald-50 border border-emerald-200/90 p-3 text-xs text-emerald-900 flex items-start gap-2.5">
                   <ShieldCheck size={18} className="text-[#0B5D3F] shrink-0 mt-0.5" />
                   <div className="space-y-1">
-                    <p className="font-bold">
-                      Proteksi Catatan Kas & Iuran Terjamin:
-                    </p>
+                    <p className="font-bold">Proteksi Catatan Kas & Iuran Terjamin:</p>
                     <p className="text-[11px] text-emerald-800 leading-relaxed">
                       KK <strong>{targetWarga.nama}</strong> memiliki catatan iuran masuk total{' '}
                       <strong className="text-[#0B5D3F] font-extrabold font-mono">
@@ -464,131 +343,83 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
               )}
             </div>
 
-            {/* Scan Area */}
-            <div className="rounded-2xl border-2 border-dashed border-emerald-300 bg-[#F4FAF6] p-5 text-center space-y-3">
-              <label className="block text-xs font-bold text-slate-700 mb-1">
-                2. Scan / Ambil Foto Dokumen Kartu Keluarga (KK) Terbaru:
-              </label>
-
+            {/* Optional Excel Loader */}
+            <div className="rounded-2xl border-2 border-dashed border-emerald-300 bg-[#F4FAF6] p-4 text-center space-y-2.5">
               <input
-                ref={fileInputRef}
+                ref={excelInputRef}
                 type="file"
-                accept="image/*"
+                accept=".xlsx,.xls,.csv"
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
-                  if (file) handleImageSelected(file);
+                  if (file) handleExcelSelected(file);
+                  e.target.value = '';
                 }}
               />
-
-              <input
-                ref={cameraInputRef}
-                type="file"
-                accept="image/*"
-                capture="environment"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) handleImageSelected(file);
-                }}
-              />
-
-              {imagePreview ? (
-                <div className="space-y-2.5">
-                  <div className="relative mx-auto max-w-sm overflow-hidden rounded-xl border border-emerald-200 shadow-xs">
-                    <img src={imagePreview} alt="Preview KK Baru" className="max-h-48 w-full object-contain bg-slate-900/10" />
-                    {isScanning && (
-                      <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-xs text-white">
-                        <RefreshCw size={24} className="animate-spin text-emerald-400 mb-1" />
-                        <span className="text-xs font-bold">Menganalisis Foto KK Terbaru...</span>
-                      </div>
-                    )}
-                    {scanSuccess && !isScanning && (
-                      <div className="absolute top-2 right-2 rounded-full bg-emerald-600 p-1 text-white shadow-xs">
-                        <CheckCircle2 size={16} />
-                      </div>
-                    )}
-                    {isDarkEnhanced && (
-                      <div className="absolute top-2 left-2 rounded-md bg-amber-500/90 text-[10px] font-extrabold text-white px-2 py-0.5 shadow-xs">
-                        Foto Diterangkan
-                      </div>
-                    )}
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 text-left">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-[#0B5D3F]">
+                    <FileSpreadsheet size={20} />
                   </div>
-
-                  <div className="flex flex-wrap items-center justify-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleBrightenImage}
-                      disabled={isScanning}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 shadow-xs hover:bg-amber-100 cursor-pointer disabled:opacity-50"
-                      title="Meningkatkan kontras & kecerahan foto jika dokumen diambil di ruangan gelap atau redup"
-                    >
-                      <Sparkles size={14} className="text-amber-600" />
-                      <span>💡 Terangkan Foto (Atasi Foto Gelap)</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleRotateImage}
-                      disabled={isScanning}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-xs hover:bg-slate-50 cursor-pointer disabled:opacity-50"
-                    >
-                      <RotateCw size={14} />
-                      <span>🔄 Putar Foto 90°</span>
-                    </button>
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-800">
+                      2. Muat Data Pembaruan dari File Excel (Opsional)
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Anda dapat langsung mengedit susunan keluarga di bawah atau memuat data baru dari file Excel.
+                    </p>
                   </div>
                 </div>
-              ) : (
-                <div className="py-2">
-                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-100 text-[#0B5D3F] mb-2">
-                    <Camera size={24} />
-                  </div>
-                  <h4 className="text-xs font-bold text-slate-800">
-                    Foto Kartu Keluarga (KK) yang Sudah Diperbarui
-                  </h4>
-                  <p className="text-[11px] text-slate-500 max-w-md mx-auto mt-0.5">
-                    Sistem Computer Vision akan membaca nomor KK, Kepala Keluarga, dan seluruh anggota keluarga (istri & semua anak) secara otomatis walau foto redup atau gelap.
-                  </p>
-                </div>
-              )}
-
-              <div className="flex items-center justify-center gap-2">
                 <button
                   type="button"
-                  onClick={() => cameraInputRef.current?.click()}
-                  className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] px-4 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#084831] cursor-pointer"
-                >
-                  <Camera size={14} />
-                  <span>Ambil Foto KK Baru</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="flex items-center gap-1.5 rounded-xl border border-emerald-600 bg-white px-4 py-2 text-xs font-bold text-[#0B5D3F] hover:bg-emerald-50 cursor-pointer"
+                  onClick={() => excelInputRef.current?.click()}
+                  disabled={isParsingExcel}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-emerald-600 bg-white px-4 py-2 text-xs font-bold text-[#0B5D3F] hover:bg-emerald-50 cursor-pointer disabled:opacity-50"
                 >
                   <Upload size={14} />
-                  <span>Upload Foto KK</span>
+                  <span>{isParsingExcel ? 'Membaca Excel...' : 'Pilih File Excel'}</span>
                 </button>
               </div>
 
-              {scanSuccess && (
-                <div className="flex items-center justify-center gap-2 text-xs font-bold text-emerald-800 bg-emerald-100/80 rounded-xl py-1.5 px-3">
-                  <CheckCircle2 size={15} />
-                  <span>Foto KK berhasil terbaca! Silakan tinjau analisis perubahan di bawah.</span>
+              {excelFamilies.length > 1 && (
+                <div className="pt-2 text-left">
+                  <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                    Pilih KK dari File Excel yang Diupload:
+                  </label>
+                  <select
+                    onChange={(e) => {
+                      const chosen = excelFamilies[Number(e.target.value)];
+                      if (chosen) applyFamilyFromExcel(chosen);
+                    }}
+                    className="w-full rounded-xl border border-emerald-300 bg-white px-3 py-2 text-xs font-bold text-slate-800"
+                  >
+                    {excelFamilies.map((f, idx) => (
+                      <option key={idx} value={idx}>
+                        {f.nama} (KK: {f.noKK}) &bull; {f.anggotaKeluarga?.length || 1} Anggota
+                      </option>
+                    ))}
+                  </select>
                 </div>
               )}
 
-              {scanError && (
+              {importSuccess && (
+                <div className="flex items-center justify-center gap-2 text-xs font-bold text-emerald-800 bg-emerald-100/80 rounded-xl py-1.5 px-3">
+                  <CheckCircle2 size={15} />
+                  <span>Data KK dari Excel berhasil dimuat! Silakan periksa perubahan di bawah.</span>
+                </div>
+              )}
+
+              {importError && (
                 <div className="flex items-center gap-2 text-xs font-semibold text-rose-800 bg-rose-50 border border-rose-200 rounded-xl p-3 text-left">
                   <AlertCircle size={16} className="shrink-0 text-rose-600" />
-                  <span>{scanError}</span>
+                  <span>{importError}</span>
                 </div>
               )}
             </div>
 
-            {/* STEP 2: Analisis Perubahan & Formulir Penyesuaian */}
+            {/* STEP 3: Comparison & Adjustment Form */}
             {targetWarga && (
               <form onSubmit={handleConfirmSubmit} className="space-y-5 pt-2">
-                {/* Comparison Card */}
                 <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4 shadow-xs">
                   <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 flex items-center gap-1.5 border-b border-slate-100 pb-2">
                     <History size={15} className="text-[#0B5D3F]" />
@@ -610,10 +441,14 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                         <span className="font-mono font-bold text-slate-700">{targetWarga.noKK}</span>
                       </div>
                       <div>
-                        <span className="text-[10px] text-slate-400 block">Daftar Anggota ({targetWarga.anggotaKeluarga?.length || 1} Jiwa):</span>
+                        <span className="text-[10px] text-slate-400 block">
+                          Daftar Anggota ({targetWarga.anggotaKeluarga?.length || 1} Jiwa):
+                        </span>
                         <ul className="list-disc list-inside text-[11px] text-slate-600 mt-0.5 space-y-0.5">
                           {targetWarga.anggotaKeluarga?.map((m, i) => (
-                            <li key={i}>{m.nama} ({m.hubungan})</li>
+                            <li key={i}>
+                              {m.nama} ({m.hubungan})
+                            </li>
                           )) || <li>{targetWarga.nama}</li>}
                         </ul>
                       </div>
@@ -622,7 +457,7 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                     {/* Data Baru */}
                     <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 text-xs space-y-2">
                       <span className="font-bold text-[#0B5D3F] block border-b border-emerald-200 pb-1">
-                        DATA KK BARU (DARI SCAN):
+                        DATA KK BARU / TERBARU:
                       </span>
                       <div>
                         <label className="text-[10px] font-bold text-slate-600 block mb-0.5">
@@ -719,7 +554,7 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                           ))}
                           {newAnggota.length === 0 && (
                             <p className="text-[11px] text-slate-400 italic text-center py-2">
-                              Belum ada anggota keluarga. Scan KK atau klik Tambah Anggota.
+                              Belum ada anggota keluarga. Muat dari Excel atau klik Tambah Anggota.
                             </p>
                           )}
                         </div>
@@ -826,7 +661,7 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                       type="text"
                       value={keterangan}
                       onChange={(e) => setKeterangan(e.target.value)}
-                      placeholder="Contoh: Bpk. Suwardi wafat, KK baru diterbitkan dengan Ibu Siti sebagai Kepala Keluarga"
+                      placeholder="Contoh: Pembaruan susunan anggota KK"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-[#0B5D3F] outline-hidden"
                     />
                   </div>

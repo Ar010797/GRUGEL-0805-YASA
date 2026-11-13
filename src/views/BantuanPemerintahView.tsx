@@ -17,6 +17,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { BantuanPemerintah, Warga } from '../types';
+import { downloadTemplateExcelWargaBansos } from '../utils/excelWargaImport';
 
 interface BantuanPemerintahViewProps {
   bantuanList: BantuanPemerintah[];
@@ -24,6 +25,7 @@ interface BantuanPemerintahViewProps {
   onAddBantuan: (data: Omit<BantuanPemerintah, 'id'>) => void;
   onUpdateStatus: (id: string, newStatus: BantuanPemerintah['status']) => void;
   onDeleteBantuan: (id: string) => void;
+  onOpenImportExcel?: () => void;
   onBack: () => void;
 }
 
@@ -33,6 +35,7 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
   onAddBantuan,
   onUpdateStatus,
   onDeleteBantuan,
+  onOpenImportExcel,
   onBack,
 }) => {
   const [search, setSearch] = useState('');
@@ -154,13 +157,34 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
           </div>
         </div>
 
-        <button
-          onClick={() => setIsModalOpen(true)}
-          className="flex items-center gap-2 rounded-2xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#084831] active:scale-95 transition-all cursor-pointer self-start sm:self-auto"
-        >
-          <Plus size={16} strokeWidth={2.5} />
-          <span>+ Input Data Bantuan</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          <button
+            onClick={() => downloadTemplateExcelWargaBansos()}
+            className="flex items-center gap-1.5 rounded-2xl border border-emerald-300 bg-emerald-50 px-3.5 py-2.5 text-xs font-bold text-[#0B5D3F] shadow-xs hover:bg-emerald-100 transition-all cursor-pointer"
+            title="Download Template Excel berisi kolom Data Warga & Penerimaan Bantuan"
+          >
+            <Download size={15} />
+            <span>Template Excel</span>
+          </button>
+
+          {onOpenImportExcel && (
+            <button
+              onClick={onOpenImportExcel}
+              className="flex items-center gap-1.5 rounded-2xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-700 shadow-xs hover:bg-slate-50 transition-all cursor-pointer"
+            >
+              <FileSpreadsheet size={15} className="text-[#0B5D3F]" />
+              <span>Import Excel</span>
+            </button>
+          )}
+
+          <button
+            onClick={() => setIsModalOpen(true)}
+            className="flex items-center gap-2 rounded-2xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"
+          >
+            <Plus size={16} strokeWidth={2.5} />
+            <span>+ Input Data Bantuan</span>
+          </button>
+        </div>
       </div>
 
       {/* Privacy Notice Banner */}

@@ -70,10 +70,10 @@ export const KebijakanPrivasiView: React.FC<KebijakanPrivasiViewProps> = ({ onBa
         <div className="rounded-2xl bg-white p-5 border border-slate-200 shadow-xs space-y-2">
           <div className="flex items-center gap-2.5 text-[#0B5D3F]">
             <Server size={20} />
-            <h3 className="text-sm font-bold text-slate-900">3. Pemrosesan OCR di Perangkat (On-Device)</h3>
+            <h3 className="text-sm font-bold text-slate-900">3. Pemrosesan Import Excel di Perangkat</h3>
           </div>
           <p className="text-xs text-slate-600 leading-relaxed">
-            Pemindaian foto Kartu Keluarga (KK) oleh pengurus RT diproses langsung di perangkat aplikasi tanpa mengirimkan berkas gambar mentah ke server pihak ketiga yang tidak terverifikasi.
+            Pembacaan file Excel data warga dan penerima bantuan oleh pengurus RT diproses langsung di perangkat aplikasi sebelum disinkronkan secara aman ke server desa, sehingga data kependudukan tetap terjaga dan akurat.
           </p>
         </div>
 
