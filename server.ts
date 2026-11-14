@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import { randomBytes, randomInt } from 'node:crypto';
 import { fileURLToPath } from 'url';
 import * as XLSX from 'xlsx';
 import { buildTemplateExcelWorkbook, getTemplateExcelFilename } from './src/utils/excelTemplateBuilder.ts';
@@ -606,6 +607,157 @@ app.post('/api/sync-monthly', (req, res) => {
     message: `Laporan bulanan ${report.rt || 'RT'} berhasil diterima server desa`,
     revision: currentData.revision,
     timestamp: nowIso,
+  });
+});
+
+// Ephemeral single-use pairing store so Median Android WebView APK can sign in via external Chrome Google OAuth
+interface FirebasePairSession {
+  code: string;
+  claimSecret: string;
+  createdAt: number;
+  expiresAt: number;
+  status: 'pending' | 'ready';
+  idToken?: string | null;
+  accessToken?: string | null;
+  email?: string | null;
+}
+
+const FIREBASE_PAIR_TTL_MS = 5 * 60 * 1000;
+const firebasePairSessions = new Map<string, FirebasePairSession>();
+
+function pruneExpiredPairSessions() {
+  const now = Date.now();
+  for (const [code, session] of firebasePairSessions.entries()) {
+    if (now > session.expiresAt) {
+      firebasePairSessions.delete(code);
+    }
+  }
+}
+
+app.post('/api/firebase-pair/start', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  pruneExpiredPairSessions();
+
+  let code = '';
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const candidate = String(randomInt(100000, 1000000));
+    if (!firebasePairSessions.has(candidate)) {
+      code = candidate;
+      break;
+    }
+  }
+  if (!code) {
+    code = String(Date.now()).slice(-6);
+  }
+
+  const claimSecret = randomBytes(24).toString('hex');
+  const now = Date.now();
+  const expiresAt = now + FIREBASE_PAIR_TTL_MS;
+
+  firebasePairSessions.set(code, {
+    code,
+    claimSecret,
+    createdAt: now,
+    expiresAt,
+    status: 'pending',
+  });
+
+  res.json({
+    success: true,
+    code,
+    claimSecret,
+    expiresAt,
+    ttlSeconds: Math.floor(FIREBASE_PAIR_TTL_MS / 1000),
+  });
+});
+
+app.post('/api/firebase-pair/complete', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  pruneExpiredPairSessions();
+
+  const rawCode = String(req.body?.code || '').replace(/\D/g, '');
+  const idToken = typeof req.body?.idToken === 'string' ? req.body.idToken.trim() : '';
+  const accessToken = typeof req.body?.accessToken === 'string' ? req.body.accessToken.trim() : '';
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
+
+  if (rawCode.length !== 6) {
+    return res.status(400).json({
+      success: false,
+      message: 'Kode pairing harus terdiri dari 6 digit angka.',
+    });
+  }
+
+  const session = firebasePairSessions.get(rawCode);
+  if (!session || Date.now() > session.expiresAt) {
+    firebasePairSessions.delete(rawCode);
+    return res.status(404).json({
+      success: false,
+      message: 'Kode pairing tidak ditemukan atau sudah kedaluwarsa. Buat kode baru di aplikasi Median.',
+    });
+  }
+
+  if (session.status !== 'pending') {
+    return res.status(409).json({
+      success: false,
+      message: 'Kode pairing ini sudah digunakan. Silakan buat kode baru jika perlu.',
+    });
+  }
+
+  if (!idToken && !accessToken) {
+    return res.status(400).json({
+      success: false,
+      message: 'Token Google OAuth tidak ditemukan dari proses login Chrome.',
+    });
+  }
+
+  session.status = 'ready';
+  session.idToken = idToken || null;
+  session.accessToken = accessToken || null;
+  session.email = email || null;
+
+  return res.json({
+    success: true,
+    message: 'Login Google berhasil diteruskan! Kembali ke Aplikasi Median Anda.',
+  });
+});
+
+app.get('/api/firebase-pair/poll', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  pruneExpiredPairSessions();
+
+  const rawCode = String(req.query.code || '').replace(/\D/g, '');
+  const secret = String(req.query.secret || '').trim();
+
+  const session = firebasePairSessions.get(rawCode);
+  if (!session || Date.now() > session.expiresAt) {
+    if (rawCode) firebasePairSessions.delete(rawCode);
+    return res.json({ success: true, status: 'expired' });
+  }
+
+  if (!secret || secret !== session.claimSecret) {
+    return res.status(403).json({
+      success: false,
+      status: 'unauthorized',
+      message: 'Kunci sesi pairing tidak valid.',
+    });
+  }
+
+  if (session.status === 'ready') {
+    const payload = {
+      success: true,
+      status: 'ready',
+      idToken: session.idToken || null,
+      accessToken: session.accessToken || null,
+      email: session.email || null,
+    };
+    firebasePairSessions.delete(rawCode);
+    return res.json(payload);
+  }
+
+  return res.json({
+    success: true,
+    status: 'pending',
+    expiresAt: session.expiresAt,
   });
 });
 

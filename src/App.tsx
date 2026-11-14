@@ -55,6 +55,7 @@ import { LupaPasswordModal } from './components/LupaPasswordModal';
 import { FloatingNotification } from './components/FloatingNotification';
 import { KirimLaporanModal } from './components/KirimLaporanModal';
 import { UpgradeKKModal } from './components/UpgradeKKModal';
+import { FirebasePairModal } from './components/FirebasePairModal';
 import {
   AuthUser,
   Transaction,
@@ -91,9 +92,10 @@ import {
 } from './utils/cloudSync';
 import {
   auth,
-  completeGoogleRedirectIfPending,
+  isEmbeddedWebView,
   signInWithGoogleCloud,
   signOutGoogleCloud,
+  WEBVIEW_AUTH_ERROR,
 } from './firebase';
 import {
   checkIsCloudAdmin,
@@ -191,6 +193,9 @@ export default function App() {
   const [firestoreReadyUid, setFirestoreReadyUid] = useState<string | null>(null);
   const [cloudSyncBusy, setCloudSyncBusy] = useState<boolean>(false);
   const [cloudError, setCloudError] = useState<string | null>(null);
+  const [isFirebasePairOpen, setIsFirebasePairOpen] = useState<boolean>(false);
+  const [firebasePairMode, setFirebasePairMode] = useState<'receive' | 'authorize'>('receive');
+  const [firebasePairInitialCode, setFirebasePairInitialCode] = useState<string>('');
 
   // Navigation active tab
   const [currentView, setCurrentView] = useState<string>(() => {
@@ -600,9 +605,27 @@ export default function App() {
     };
   }, []);
 
+  // Detect Chrome pairing link (?firebase_pair=XXXXXX) on mount
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const rawCode = (params.get('firebase_pair') || '').replace(/\D/g, '');
+      if (rawCode.length === 6) {
+        setFirebasePairInitialCode(rawCode);
+        setFirebasePairMode('authorize');
+        setIsFirebasePairOpen(true);
+        params.delete('firebase_pair');
+        const nextQuery = params.toString();
+        const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`;
+        window.history.replaceState({}, '', nextUrl);
+      }
+    } catch {
+      // ignore URL parsing issues
+    }
+  }, []);
+
   // Firebase Google Auth & Cloud Firestore Live Listener (Cross-deployment: Median, PWA, ais-dev, ais-pre)
   useEffect(() => {
-    completeGoogleRedirectIfPending().catch(() => {});
     const resetKnownFirestoreMeta = () => {
       knownFirestoreMetaRef.current.settings = undefined;
       knownFirestoreMetaRef.current.warga.clear();
@@ -990,7 +1013,18 @@ export default function App() {
     return () => clearInterval(retryInterval);
   }, [dataLoadedReady, syncStatus, cloudUser, isCloudAdmin, cloudAuthReadyUid, firestoreReadyUid]);
 
+  const handleOpenMedianPairing = (mode: 'receive' | 'authorize') => {
+    setCloudError(null);
+    setFirebasePairMode(mode);
+    setFirebasePairInitialCode('');
+    setIsFirebasePairOpen(true);
+  };
+
   const handleConnectCloud = async () => {
+    if (isEmbeddedWebView()) {
+      handleOpenMedianPairing('receive');
+      return;
+    }
     setCloudSyncBusy(true);
     setCloudError(null);
     try {
@@ -1003,10 +1037,12 @@ export default function App() {
       }
     } catch (err: any) {
       const msg = String(err?.message || '');
-      if (msg.includes('disallowed_useragent') || msg.includes('popup')) {
-        setCloudError(
-          'Login Google diblokir oleh browser/WebView APK. Gunakan Sinkronisasi Server Live di alamat server yang sama, atau hubungkan Cloud Firestore lewat browser Chrome.'
-        );
+      if (
+        msg === WEBVIEW_AUTH_ERROR ||
+        msg.includes('disallowed_useragent') ||
+        msg.includes('popup')
+      ) {
+        handleOpenMedianPairing('receive');
       } else {
         setCloudError(msg || 'Gagal login Google untuk Cloud Sync.');
       }
@@ -2123,11 +2159,25 @@ export default function App() {
           onSyncAdminAccountToServer={handleSyncAdminAccountToServer}
           sseConnected={sseConnected}
           isCloudConnected={Boolean(cloudUser && isCloudAdmin)}
+          onConnectCloud={handleConnectCloud}
         />
         <LupaPasswordModal
           isOpen={isLupaPasswordOpen}
           onClose={() => setIsLupaPasswordOpen(false)}
           pengaturanKas={pengaturanKas}
+        />
+        <FirebasePairModal
+          isOpen={isFirebasePairOpen}
+          initialMode={firebasePairMode}
+          initialCode={firebasePairInitialCode}
+          onClose={() => setIsFirebasePairOpen(false)}
+          onPairedSuccess={(user) => {
+            setCloudError(null);
+            setRolloverNotice(
+              `Cloud Firebase terhubung (${user.email || 'Akun Google'})! Data siap disinkronkan di perangkat ini.`
+            );
+            setTimeout(() => setRolloverNotice(null), 6000);
+          }}
         />
       </div>
     );
@@ -2360,10 +2410,23 @@ export default function App() {
             </button>
           )}
 
-          {cloudUser && (
-            <div className="flex items-center justify-between rounded-xl bg-emerald-400/15 px-2.5 py-1.5 text-[10px] text-emerald-100 border border-emerald-300/20">
-              <span className="truncate font-semibold">Cloud: {cloudUser.email}</span>
-              <span className="shrink-0 font-black text-emerald-300 ml-1">ON</span>
+          {(isServer || isAdminRT) && cloudUser && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between rounded-xl bg-emerald-400/15 px-2.5 py-1.5 text-[10px] text-emerald-100 border border-emerald-300/20">
+                <span className="truncate font-semibold">Cloud: {cloudUser.email}</span>
+                <span className="shrink-0 font-black text-emerald-300 ml-1">ON</span>
+              </div>
+              {!isEmbeddedWebView() && (
+                <button
+                  type="button"
+                  onClick={() => handleOpenMedianPairing('authorize')}
+                  className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-white/10 hover:bg-white/20 px-3 py-1.5 text-[10px] font-bold text-indigo-100 transition-all cursor-pointer"
+                  title="Tautkan & kirim login Cloud Firebase ke Aplikasi Android Median APK dengan kode 6 digit"
+                >
+                  <KeyRound size={12} />
+                  <span>Tautkan Perangkat Median</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -2546,6 +2609,15 @@ export default function App() {
               <span className="truncate">{cloudError}</span>
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              {!cloudUser && (
+                <button
+                  type="button"
+                  onClick={() => handleOpenMedianPairing('receive')}
+                  className="rounded-lg bg-white text-rose-700 hover:bg-rose-50 px-2.5 py-1 text-[11px] font-extrabold cursor-pointer"
+                >
+                  Pairing Median
+                </button>
+              )}
               <button
                 type="button"
                 onClick={handleForceSyncNow}
@@ -2610,6 +2682,7 @@ export default function App() {
                   onConnectCloud={handleConnectCloud}
                   onDisconnectCloud={handleDisconnectCloud}
                   onForceSyncNow={handleForceSyncNow}
+                  onOpenMedianPairing={handleOpenMedianPairing}
                   onAddAdminAccount={handleAddAdminAccount}
                   onUpdateAdminAccount={handleUpdateAdminAccount}
                   onDeleteAdminAccount={handleDeleteAdminAccount}
@@ -2932,6 +3005,7 @@ export default function App() {
         onSyncAdminAccountToServer={handleSyncAdminAccountToServer}
         sseConnected={sseConnected}
         isCloudConnected={Boolean(cloudUser && isCloudAdmin)}
+        onConnectCloud={handleConnectCloud}
       />
 
       {/* Lupa Password Modal */}
@@ -3067,6 +3141,19 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+      <FirebasePairModal
+        isOpen={isFirebasePairOpen}
+        initialMode={firebasePairMode}
+        initialCode={firebasePairInitialCode}
+        onClose={() => setIsFirebasePairOpen(false)}
+        onPairedSuccess={(user) => {
+          setCloudError(null);
+          setRolloverNotice(
+            `Cloud Firestore terhubung (${user.email || 'Akun Google'})! Seluruh data di Median & perangkat lain otomatis menyatu.`
+          );
+          setTimeout(() => setRolloverNotice(null), 6000);
+        }}
+      />
     </div>
   );
 }

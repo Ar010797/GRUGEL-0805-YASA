@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check, Eye, EyeOff, RefreshCw, LogOut, Wifi, CloudUpload } from 'lucide-react';
+import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check, Eye, EyeOff, RefreshCw, LogOut, Wifi, CloudUpload, Cloud } from 'lucide-react';
 import { AuthUser, Warga, AdminRTAccount, PengaturanKas } from '../types';
 import { HouseLogo } from './HouseLogo';
 import { fetchServerAdminAccounts } from '../utils/cloudSync';
@@ -22,6 +22,7 @@ interface LoginModalProps {
   onLogout?: () => void;
   sseConnected?: boolean;
   isCloudConnected?: boolean;
+  onConnectCloud?: () => void;
 }
 
 export const LoginModal: React.FC<LoginModalProps> = ({
@@ -40,6 +41,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onLogout,
   sseConnected = false,
   isCloudConnected = false,
+  onConnectCloud,
 }) => {
   const desaStr = pengaturanKas?.profilRT?.desa || 'Desa Kotayasa';
   const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
@@ -821,6 +823,18 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     ? 'Menyinkronkan data server...'
                     : `Sinkronkan Data Server (${wargaList.length} KK, ${adminAccounts.length} Admin)`}
                 </span>
+              </button>
+            )}
+
+            {onConnectCloud && !isCloudConnected && (
+              <button
+                type="button"
+                onClick={onConnectCloud}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 border border-indigo-200 px-3 py-1.5 text-[11px] font-bold text-indigo-700 hover:bg-indigo-100 transition-colors cursor-pointer"
+                title="Hubungkan Cloud Firebase (via Chrome pairing jika di Aplikasi Median)"
+              >
+                <Cloud size={12} />
+                <span>Hubungkan Cloud Firebase</span>
               </button>
             )}
 

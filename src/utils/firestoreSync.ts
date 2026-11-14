@@ -566,8 +566,12 @@ function sanitizeWargaForFirestore(w: Warga, ownerUid: string): Record<string, a
     anggotaKeluarga: safeAnggota,
     telepon: w.telepon ? String(w.telepon).slice(0, 32) : undefined,
     pin: w.pin ? String(w.pin).slice(0, 12) : undefined,
-    pinAttempts: typeof w.pinAttempts === 'number' ? w.pinAttempts : undefined,
-    pinLockedUntil: typeof w.pinLockedUntil === 'number' ? w.pinLockedUntil : undefined,
+    pinAttempts:
+      typeof w.pinAttempts === 'number' && Number.isFinite(w.pinAttempts) ? w.pinAttempts : undefined,
+    pinLockedUntil:
+      typeof w.pinLockedUntil === 'number' && Number.isFinite(w.pinLockedUntil)
+        ? w.pinLockedUntil
+        : undefined,
     riwayatIuran: isPlainObject(w.riwayatIuran) ? w.riwayatIuran : undefined,
     riwayatKematian: isPlainObject(w.riwayatKematian) ? w.riwayatKematian : undefined,
     statusIuranPerTahun: isPlainObject(w.statusIuranPerTahun) ? w.statusIuranPerTahun : undefined,
@@ -575,9 +579,14 @@ function sanitizeWargaForFirestore(w: Warga, ownerUid: string): Record<string, a
     riwayatKematianPerTahun: isPlainObject(w.riwayatKematianPerTahun)
       ? w.riwayatKematianPerTahun
       : undefined,
-    iuranUmumTerbayar: typeof w.iuranUmumTerbayar === 'number' ? w.iuranUmumTerbayar : undefined,
+    iuranUmumTerbayar:
+      typeof w.iuranUmumTerbayar === 'number' && Number.isFinite(w.iuranUmumTerbayar)
+        ? w.iuranUmumTerbayar
+        : undefined,
     iuranKematianTerbayar:
-      typeof w.iuranKematianTerbayar === 'number' ? w.iuranKematianTerbayar : undefined,
+      typeof w.iuranKematianTerbayar === 'number' && Number.isFinite(w.iuranKematianTerbayar)
+        ? w.iuranKematianTerbayar
+        : undefined,
     pilihanSkema: w.pilihanSkema === 'bulanan' || w.pilihanSkema === 'tahunan' ? w.pilihanSkema : undefined,
     riwayatPerubahanKK: safeRiwayatKK,
     ownerUid,
@@ -586,18 +595,19 @@ function sanitizeWargaForFirestore(w: Warga, ownerUid: string): Record<string, a
 
 function sanitizeTransactionForFirestore(t: Transaction, ownerUid: string): Record<string, any> {
   const id = sanitizeFirestoreId(t.id);
+  const rawNominal = Number(t.nominal);
   return stripUndefined({
     id,
     tanggal: String(t.tanggal || '').slice(0, 32) || new Date().toISOString().split('T')[0],
     kategori: String(t.kategori || 'Iuran Warga').slice(0, 120),
     keterangan: String(t.keterangan || '').slice(0, 500),
-    nominal: Number(t.nominal) || 0,
+    nominal: Number.isFinite(rawNominal) ? rawNominal : 0,
     tipe: t.tipe === 'keluar' || t.tipe === 'kematian' ? t.tipe : 'masuk',
     namaWarga: t.namaWarga ? String(t.namaWarga).slice(0, 160) : undefined,
     nomorRumah: t.nomorRumah ? String(t.nomorRumah).slice(0, 32) : undefined,
     noKK: t.noKK ? String(t.noKK).slice(0, 32) : undefined,
     isSaldoAwal: typeof t.isSaldoAwal === 'boolean' ? t.isSaldoAwal : undefined,
-    tahun: typeof t.tahun === 'number' ? t.tahun : undefined,
+    tahun: typeof t.tahun === 'number' && Number.isFinite(t.tahun) ? t.tahun : undefined,
     rtScope: t.rtScope ? String(t.rtScope).slice(0, 64) : undefined,
     ownerUid,
   });
@@ -763,26 +773,31 @@ interface TrackedWriteOp {
   opType: OperationType;
   colName: string;
   docId: string;
+  sanitized?: Record<string, any>;
+  immutableKeys?: Set<string>;
   createPayload?: Record<string, any>;
   updatePayload?: Record<string, any>;
   applyToBatch: (batch: WriteBatch) => void;
   executeSingle: () => Promise<void>;
 }
 
-const IMMUTABLE_KEYS = new Set(['id', 'ownerUid', 'createdAt', 'updatedAt']);
+const DEFAULT_IMMUTABLE_KEYS = new Set(['id', 'ownerUid', 'createdAt', 'updatedAt']);
+const SETTINGS_IMMUTABLE_KEYS = new Set(['ownerUid', 'updatedAt']);
+const WARGA_PRESERVE_KEYS = new Set(['id', 'ownerUid', 'createdAt', 'updatedAt', 'linkedUid']);
 
 function buildUpdatePayload(
   sanitized: Record<string, any>,
-  existingKeys?: string[]
+  existingKeys?: string[],
+  preserveKeys: Set<string> = DEFAULT_IMMUTABLE_KEYS
 ): Record<string, any> {
   const payload: Record<string, any> = {};
   for (const [k, v] of Object.entries(sanitized)) {
-    if (IMMUTABLE_KEYS.has(k)) continue;
+    if (preserveKeys.has(k)) continue;
     payload[k] = v;
   }
   if (Array.isArray(existingKeys)) {
     for (const oldKey of existingKeys) {
-      if (IMMUTABLE_KEYS.has(oldKey)) continue;
+      if (preserveKeys.has(oldKey)) continue;
       if (!(oldKey in sanitized)) {
         payload[oldKey] = deleteField();
       }
@@ -843,12 +858,18 @@ async function runSyncStateToFirestore(
       if (known.settings.hasPendingWrites) {
         deferred += 1;
       } else {
-        const updatePayload = buildUpdatePayload(settingsPayload, known.settings.existingKeys);
+        const updatePayload = buildUpdatePayload(
+          settingsPayload,
+          known.settings.existingKeys,
+          SETTINGS_IMMUTABLE_KEYS
+        );
         ops.push({
           path: 'settings/kas',
           opType: OperationType.UPDATE,
           colName: 'settings',
           docId: 'kas',
+          sanitized: settingsPayload,
+          immutableKeys: SETTINGS_IMMUTABLE_KEYS,
           updatePayload,
           applyToBatch: (batch) => batch.update(settingsRef, updatePayload),
           executeSingle: () => updateDoc(settingsRef, updatePayload),
@@ -861,12 +882,18 @@ async function runSyncStateToFirestore(
         ...settingsPayload,
         updatedAt: serverTimestamp(),
       };
-      const updateFallbackPayload = buildUpdatePayload(settingsPayload);
+      const updateFallbackPayload = buildUpdatePayload(
+        settingsPayload,
+        undefined,
+        SETTINGS_IMMUTABLE_KEYS
+      );
       ops.push({
         path: 'settings/kas',
         opType: OperationType.CREATE,
         colName: 'settings',
         docId: 'kas',
+        sanitized: settingsPayload,
+        immutableKeys: SETTINGS_IMMUTABLE_KEYS,
         createPayload,
         updatePayload: updateFallbackPayload,
         applyToBatch: (batch) => batch.set(settingsRef, createPayload),
@@ -882,6 +909,8 @@ async function runSyncStateToFirestore(
     sanitizer: (item: T, ownerUid: string) => Record<string, any>,
     deletedList?: string[]
   ) {
+    const preserveKeys = colName === 'warga' ? WARGA_PRESERVE_KEYS : DEFAULT_IMMUTABLE_KEYS;
+
     for (const item of items) {
       const docId = sanitizeFirestoreId(item.id);
       const docKey = `${colName}/${docId}`;
@@ -901,12 +930,14 @@ async function runSyncStateToFirestore(
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         };
-        const updateFallbackPayload = buildUpdatePayload(sanitized);
+        const updateFallbackPayload = buildUpdatePayload(sanitized, undefined, preserveKeys);
         ops.push({
           path: docKey,
           opType: OperationType.CREATE,
           colName,
           docId,
+          sanitized,
+          immutableKeys: preserveKeys,
           createPayload,
           updatePayload: updateFallbackPayload,
           applyToBatch: (batch) => batch.set(ref, createPayload),
@@ -917,12 +948,18 @@ async function runSyncStateToFirestore(
           deferred += 1;
           continue;
         }
-        const updatePayload = buildUpdatePayload(sanitized, existingMeta.existingKeys);
+        const updatePayload = buildUpdatePayload(
+          sanitized,
+          existingMeta.existingKeys,
+          preserveKeys
+        );
         ops.push({
           path: docKey,
           opType: OperationType.UPDATE,
           colName,
           docId,
+          sanitized,
+          immutableKeys: preserveKeys,
           updatePayload,
           applyToBatch: (batch) => batch.update(ref, updatePayload),
           executeSingle: () => updateDoc(ref, updatePayload),
@@ -1020,15 +1057,22 @@ async function runSyncStateToFirestore(
         try {
           if (op.opType === OperationType.CREATE) {
             // Check if document already exists on server (created concurrently or prior to listener settling)
-            let existsOnServer = false;
+            let serverExistingKeys: string[] | null = null;
             try {
               const serverSnap = await getDocFromServer(doc(db, op.colName, op.docId));
-              existsOnServer = serverSnap.exists();
+              if (serverSnap.exists()) {
+                serverExistingKeys = Object.keys(serverSnap.data() || {});
+              }
             } catch {
-              existsOnServer = false;
+              serverExistingKeys = null;
             }
-            if (existsOnServer && op.updatePayload) {
-              await updateDoc(doc(db, op.colName, op.docId), op.updatePayload);
+            if (serverExistingKeys && op.sanitized) {
+              const recoveredUpdate = buildUpdatePayload(
+                op.sanitized,
+                serverExistingKeys,
+                op.immutableKeys || DEFAULT_IMMUTABLE_KEYS
+              );
+              await updateDoc(doc(db, op.colName, op.docId), recoveredUpdate);
               committed += 1;
               continue;
             }

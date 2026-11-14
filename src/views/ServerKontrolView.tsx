@@ -27,6 +27,7 @@ import {
   Cloud,
   Wifi,
   LogOut,
+  Smartphone,
 } from 'lucide-react';
 import {
   AdminRTAccount,
@@ -58,6 +59,7 @@ interface ServerKontrolViewProps {
   onConnectCloud?: () => Promise<void> | void;
   onDisconnectCloud?: () => Promise<void> | void;
   onForceSyncNow?: () => Promise<void> | void;
+  onOpenMedianPairing?: (mode: 'receive' | 'authorize') => void;
   onAddAdminAccount: (acc: Omit<AdminRTAccount, 'id'>) => void;
   onUpdateAdminAccount: (id: string, acc: Partial<AdminRTAccount>) => void;
   onDeleteAdminAccount: (id: string) => void;
@@ -83,6 +85,7 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
   onConnectCloud,
   onDisconnectCloud,
   onForceSyncNow,
+  onOpenMedianPairing,
   onAddAdminAccount,
   onUpdateAdminAccount,
   onDeleteAdminAccount,
@@ -670,6 +673,18 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                     >
                       <Cloud size={14} />
                       <span>Hubungkan Cloud Firestore</span>
+                    </button>
+                  )}
+
+                  {onOpenMedianPairing && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenMedianPairing(cloudUser ? 'authorize' : 'receive')}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 px-3.5 py-2 text-xs font-bold text-indigo-700 transition-all cursor-pointer"
+                      title="Hubungkan atau kirim sesi login Google Firebase ke Aplikasi Android Median APK"
+                    >
+                      <Smartphone size={14} />
+                      <span>{cloudUser ? 'Kirim Sesi ke Median APK' : 'Pairing APK Median'}</span>
                     </button>
                   )}
 
