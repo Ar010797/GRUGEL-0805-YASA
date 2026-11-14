@@ -101,15 +101,16 @@ export const WargaModal: React.FC<WargaModalProps> = ({
   };
 
   const handleConfirmBulkImport = () => {
-    if (!importResult) return;
-    if (onBulkImport) {
-      onBulkImport(importResult.wargaList, importResult.bantuanList, { mergeExisting });
-    } else {
-      importResult.wargaList.forEach((w) => onSave(w));
-    }
+    if (!importResult || isParsingExcel) return;
+    const resultSnapshot = importResult;
     setImportResult(null);
     setExcelFileName(null);
     setExcelError(null);
+    if (onBulkImport) {
+      onBulkImport(resultSnapshot.wargaList, resultSnapshot.bantuanList, { mergeExisting });
+    } else {
+      resultSnapshot.wargaList.forEach((w) => onSave(w));
+    }
     onClose();
   };
 

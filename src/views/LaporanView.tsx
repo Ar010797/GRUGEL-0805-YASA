@@ -23,6 +23,8 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
   const profilRT = pengaturanKas?.profilRT;
   const rtStr = profilRT?.namaRT || '08';
   const rwStr = profilRT?.namaRW || '05';
+  const isAllRT = rtStr.toLowerCase().includes('semua');
+  const rtRwLabel = isAllRT ? `Seluruh RT • RW ${rwStr}` : `RT ${rtStr} RW ${rwStr}`;
   const desaStr = profilRT?.desa || 'Desa Kotayasa';
   const kecStr = profilRT?.kecamatan || 'Kecamatan Sumbang';
   const kabStr = profilRT?.kabupaten || 'Kabupaten Banyumas';
@@ -66,7 +68,7 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
           </button>
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Laporan Kas & Rekapitulasi</h1>
-            <p className="text-xs text-slate-500">Transparansi Keuangan RT {rtStr} RW {rwStr} {desaStr}</p>
+            <p className="text-xs text-slate-500">Transparansi Keuangan {rtRwLabel} {desaStr}</p>
           </div>
         </div>
 

@@ -1,4 +1,5 @@
 import React from 'react';
+import { motion } from 'framer-motion';
 import {
   Wallet,
   ArrowUp,
@@ -48,6 +49,8 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
   const profilRT = pengaturanKas?.profilRT;
   const rtStr = profilRT?.namaRT || '08';
   const rwStr = profilRT?.namaRW || '05';
+  const isAllRT = rtStr.toLowerCase().includes('semua');
+  const rtRwLabel = isAllRT ? `Seluruh RT • RW ${rwStr}` : `RT ${rtStr} RW ${rwStr}`;
   const desaStr = profilRT?.desa || 'Desa Kotayasa';
   const kecShort = (profilRT?.kecamatan || 'Kecamatan Sumbang').replace(/^Kecamatan\s+/i, 'Kec. ');
   const ketuaNama = pengaturanKas?.kontakKetuaRT?.nama?.trim();
@@ -121,7 +124,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
     {
       id: 'data-warga',
       title: 'Data Warga',
-      desc: `Daftar seluruh warga RT ${rtStr}`,
+      desc: isAllRT ? `Daftar warga ${desaStr}` : `Daftar seluruh warga RT ${rtStr}`,
       icon: <Users size={24} className="text-white" />,
       color: 'bg-[#0D9488]',
       badge: 'Data KK & Jiwa',
@@ -147,7 +150,12 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Top Hero Banner & Greeting */}
-      <div className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-[#0B5D3F] via-[#094E34] to-[#063F2A] p-6 lg:p-8 text-white shadow-lg">
+      <motion.div
+        initial={{ opacity: 0, y: 14 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+        className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-[#0B5D3F] via-[#094E34] to-[#063F2A] p-6 lg:p-8 text-white shadow-lg"
+      >
         {/* Decorative elements */}
         <div className="absolute right-0 top-0 h-full w-1/3 opacity-15 pointer-events-none">
           <HouseLogo size={320} variant="white" />
@@ -163,7 +171,9 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
             </div>
             
             <h1 className="text-2xl lg:text-3xl font-extrabold tracking-tight">
-              Assalamu'alaikum, Warga RT {rtStr} RW {rwStr}
+              {isAllRT
+                ? `Assalamu'alaikum, Warga ${desaStr}`
+                : `Assalamu'alaikum, Warga RT ${rtStr} RW ${rwStr}`}
             </h1>
             <p className="mt-1 text-sm text-emerald-100/90 leading-relaxed">
               Semoga selalu sehat dan mendapat keberkahan. Sistem keuangan transparan dan terbuka untuk kemaslahatan bersama warga.
@@ -221,18 +231,23 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
             <GreetingVillageIllustration className="w-full h-full" />
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Main Financial Metrics Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         {/* Total Kas RT (Dominant Card) */}
-        <div 
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3, delay: 0.05 }}
+          whileHover={{ y: -3 }}
+          whileTap={{ scale: 0.98 }}
           onClick={() => onNavigate('kas-warga')}
-          className="lg:col-span-2 group relative overflow-hidden rounded-3xl bg-gradient-to-br from-[#0B5D3F] to-[#06422C] p-6 text-white shadow-md hover:shadow-xl transition-all cursor-pointer border border-emerald-800"
+          className="lg:col-span-2 group relative overflow-hidden rounded-3xl bg-gradient-to-br from-[#0B5D3F] to-[#06422C] p-6 text-white shadow-md hover:shadow-xl transition-shadow cursor-pointer border border-emerald-800"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold tracking-wider text-emerald-200 uppercase">
-              Total Kas RT {rtStr} RW {rwStr}
+              Total Kas {rtRwLabel}
             </span>
             <div className="flex h-7 w-7 items-center justify-center rounded-full bg-white/10 group-hover:translate-x-1 transition-transform">
               <ChevronRight size={16} />
@@ -252,12 +267,17 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
               </p>
             </div>
           </div>
-        </div>
+        </motion.div>
 
         {/* 1. Kas Masuk */}
-        <div 
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3, delay: 0.09 }}
+          whileHover={{ y: -3 }}
+          whileTap={{ scale: 0.98 }}
           onClick={() => onNavigate('kas-masuk')}
-          className="rounded-3xl bg-white p-5 shadow-xs border border-slate-100 hover:border-emerald-300 hover:shadow-md transition-all cursor-pointer"
+          className="rounded-3xl bg-white p-5 shadow-xs border border-slate-100 hover:border-emerald-300 hover:shadow-md transition-shadow cursor-pointer"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-500">Kas Masuk</span>
@@ -271,12 +291,17 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
           <span className="mt-1 block text-[11px] font-medium text-emerald-700">
             {totalMasuk === 0 ? 'Belum ada pemasukan' : 'Iuran & donasi warga'}
           </span>
-        </div>
+        </motion.div>
 
         {/* 2. Kas Keluar */}
-        <div 
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3, delay: 0.13 }}
+          whileHover={{ y: -3 }}
+          whileTap={{ scale: 0.98 }}
           onClick={() => onNavigate('kas-keluar')}
-          className="rounded-3xl bg-white p-5 shadow-xs border border-slate-100 hover:border-rose-300 hover:shadow-md transition-all cursor-pointer"
+          className="rounded-3xl bg-white p-5 shadow-xs border border-slate-100 hover:border-rose-300 hover:shadow-md transition-shadow cursor-pointer"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-500">Kas Keluar</span>
@@ -290,12 +315,17 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
           <span className="mt-1 block text-[11px] font-medium text-rose-600">
             {totalKeluar === 0 ? 'Belum ada pengeluaran' : 'Kegiatan RT & operasional'}
           </span>
-        </div>
+        </motion.div>
 
         {/* 3. Kas Kematian */}
-        <div 
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3, delay: 0.17 }}
+          whileHover={{ y: -3 }}
+          whileTap={{ scale: 0.98 }}
           onClick={() => onNavigate('kas-kematian')}
-          className="rounded-3xl bg-white p-5 shadow-xs border border-slate-100 hover:border-rose-300 hover:shadow-md transition-all cursor-pointer"
+          className="rounded-3xl bg-white p-5 shadow-xs border border-slate-100 hover:border-rose-300 hover:shadow-md transition-shadow cursor-pointer"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-500">Kas Kematian</span>
@@ -309,7 +339,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
           <span className="mt-1 block text-[11px] font-medium text-rose-600">
             {totalKematian === 0 ? 'Belum ada data duka' : 'Santunan keluarga duka'}
           </span>
-        </div>
+        </motion.div>
       </div>
 
       {/* Status Pembayaran Iuran & Summary Section */}
@@ -323,7 +353,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
               </div>
               <div>
                 <h3 className="text-sm font-bold text-slate-900">Status Pembayaran Iuran Warga</h3>
-                <p className="text-xs text-slate-500">Periode Kas RT {rtStr} RW {rwStr} {desaStr}</p>
+                <p className="text-xs text-slate-500">Periode Kas {rtRwLabel} {desaStr}</p>
               </div>
             </div>
             <button
@@ -414,10 +444,10 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
 
           <div className="mt-4 pt-4 border-t border-emerald-900/10 space-y-1.5 text-xs text-[#0B5D3F]">
             <div className="flex items-center justify-between font-semibold">
-              <span>RT {rtStr} RW {rwStr} {desaStr}</span>
+              <span>{rtRwLabel} {desaStr}</span>
               <span className="italic">{kecShort}</span>
             </div>
-            {(ketuaNama || bendaharaNama) && (
+            {!isAllRT && (ketuaNama || bendaharaNama) && (
               <p className="text-[11px] font-medium text-emerald-900/80">
                 {ketuaNama ? `Ketua RT: ${ketuaNama}` : ''}
                 {ketuaNama && bendaharaNama ? ' • ' : ''}
@@ -446,16 +476,21 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
 
         {/* Grid of 8 Menu Cards */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {menuItems.map((item) => (
-            <div
+          {menuItems.map((item, idx) => (
+            <motion.div
               key={item.id}
+              initial={{ opacity: 0, y: 14, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ duration: 0.28, delay: 0.06 + idx * 0.035, ease: [0.22, 1, 0.36, 1] }}
+              whileHover={{ y: -4, scale: 1.015 }}
+              whileTap={{ scale: 0.96 }}
               onClick={() => onNavigate(item.id)}
-              className="group relative flex flex-col justify-between rounded-2xl bg-slate-50 p-5 border border-slate-200/80 hover:bg-white hover:border-emerald-400 hover:shadow-lg transition-all duration-200 cursor-pointer"
+              className="group relative flex flex-col justify-between rounded-2xl bg-slate-50 p-5 border border-slate-200/80 hover:bg-white hover:border-emerald-400 hover:shadow-lg transition-colors duration-200 cursor-pointer"
             >
               <div>
                 <div className="flex items-center justify-between mb-3">
                   <div
-                    className={`flex h-12 w-12 items-center justify-center rounded-2xl shadow-xs transition-transform group-hover:scale-105 ${item.color}`}
+                    className={`flex h-12 w-12 items-center justify-center rounded-2xl shadow-xs transition-transform group-hover:scale-110 group-hover:-rotate-3 ${item.color}`}
                   >
                     {item.icon}
                   </div>
@@ -475,7 +510,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
                 <span>Buka Menu</span>
                 <ChevronRight size={14} className="group-hover:translate-x-1 transition-transform" />
               </div>
-            </div>
+            </motion.div>
           ))}
         </div>
       </div>

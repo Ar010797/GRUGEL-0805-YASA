@@ -318,7 +318,7 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                 className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden cursor-pointer"
               >
                 <option value="">-- Pilih Kepala Keluarga Terdaftar --</option>
-                {wargaList.map((w) => (
+                {Array.from(new Map(wargaList.map((w) => [w.id, w])).values()).map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.nama} &bull; No KK: {w.noKK || '-'} &bull; Rumah: {w.noRumah} &bull; {w.jumlahJiwa || 1} Jiwa
                   </option>

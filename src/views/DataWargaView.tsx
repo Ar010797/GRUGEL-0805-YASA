@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { motion } from 'framer-motion';
 import {
   ArrowLeft,
   Users,
@@ -23,12 +24,17 @@ import {
   RefreshCw,
   Sparkles,
   History,
+  ChevronLeft,
+  ChevronRight,
+  LayoutGrid,
+  Table as TableIcon,
 } from 'lucide-react';
 import { Warga, BantuanPemerintah, ProfilRT, PengaturanKas } from '../types';
 import { exportDataWargaPerKK_PDF, exportSingleKK_PDF, exportKartuKeluargaPemerintah_PDF } from '../utils/pdfExport';
 import { downloadTemplateExcelWargaBansos } from '../utils/excelWargaImport';
 import { ConfirmationModal } from '../components/ConfirmationModal';
 import { searchWargaOnServer } from '../utils/cloudSync';
+import { normalizeRTCode } from '../utils/rtFilter';
 
 interface DataWargaViewProps {
   wargaList: Warga[];
@@ -56,6 +62,8 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
   const effectiveProfil = pengaturanKas?.profilRT || profilRT;
   const rtStr = effectiveProfil?.namaRT || '08';
   const rwStr = effectiveProfil?.namaRW || '05';
+  const isAllRT = rtStr.toLowerCase().includes('semua');
+  const rtRwLabel = isAllRT ? `Seluruh RT • RW ${rwStr}` : `RT ${rtStr} RW ${rwStr}`;
   const desaStr = effectiveProfil?.desa || 'Desa Kotayasa';
   const kecStr = effectiveProfil?.kecamatan || 'Kecamatan Sumbang';
   const kabStr = effectiveProfil?.kabupaten || 'Kabupaten Banyumas';
@@ -64,6 +72,12 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
   const [search, setSearch] = useState('');
   const [serverSearchResults, setServerSearchResults] = useState<Warga[] | null>(null);
   const [selectedWarga, setSelectedWarga] = useState<Warga | null>(null);
+  const [viewMode, setViewMode] = useState<'auto' | 'cards' | 'table'>('auto');
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollTableBy = (delta: number) => {
+    tableScrollRef.current?.scrollBy({ left: delta, behavior: 'smooth' });
+  };
 
   // Query database server directly on search input
   useEffect(() => {
@@ -104,7 +118,18 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
   const totalKK = wargaList.length;
   const totalJiwa = wargaList.reduce((acc, w) => acc + (w.anggotaKeluarga?.length || w.jumlahJiwa || 1), 0);
 
-  const sourceList = search.trim() && serverSearchResults !== null ? serverSearchResults : wargaList;
+  const rawServerList =
+    search.trim() && serverSearchResults !== null
+      ? !isAllRT && isServer
+        ? serverSearchResults.filter((w) => normalizeRTCode(w.rt) === normalizeRTCode(rtStr))
+        : serverSearchResults
+      : wargaList;
+  const seenIds = new Set<string>();
+  const sourceList = rawServerList.filter((w) => {
+    if (!w || !w.id || seenIds.has(w.id)) return false;
+    seenIds.add(w.id);
+    return true;
+  });
   const filtered = sourceList.filter((w) => {
     if (filterGender !== 'semua' && w.jenisKelamin !== filterGender) return false;
     if (
@@ -143,7 +168,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Data Warga & Rekapitulasi KK</h1>
             <p className="text-xs text-slate-500">
-              Daftar Kartu Keluarga, Anggota Keluarga &amp; Alokasi Bantuan Sosial RT {rtStr} RW {rwStr} {desaStr}
+              Daftar Kartu Keluarga, Anggota Keluarga &amp; Alokasi Bantuan Sosial {rtRwLabel} {desaStr}
             </p>
           </div>
         </div>
@@ -233,41 +258,83 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
       </div>
 
       {/* Filter & Search "Cari Nama Warga" */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
-        <div className="flex items-center gap-2">
-          {[
-            { id: 'semua', label: 'Semua Warga' },
-            { id: 'Laki-laki', label: 'Laki-laki' },
-            { id: 'Perempuan', label: 'Perempuan' },
-          ].map((tab) => (
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {[
+              { id: 'semua', label: 'Semua Warga' },
+              { id: 'Laki-laki', label: 'Laki-laki' },
+              { id: 'Perempuan', label: 'Perempuan' },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setFilterGender(tab.id as any)}
+                className={`rounded-xl px-3.5 py-2 text-xs font-bold transition-all cursor-pointer ${
+                  filterGender === tab.id
+                    ? 'bg-[#0B5D3F] text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Responsive View Switcher */}
+          <div className="flex items-center gap-1 rounded-xl bg-slate-100 p-1 border border-slate-200/70">
             <button
-              key={tab.id}
-              onClick={() => setFilterGender(tab.id as any)}
-              className={`rounded-xl px-4 py-2 text-xs font-bold transition-all cursor-pointer ${
-                filterGender === tab.id
-                  ? 'bg-[#0B5D3F] text-white shadow-xs'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              type="button"
+              onClick={() => setViewMode('cards')}
+              className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-bold transition-all cursor-pointer ${
+                viewMode === 'cards'
+                  ? 'bg-white text-[#0B5D3F] shadow-2xs'
+                  : 'text-slate-500 hover:text-slate-800'
               }`}
+              title="Tampilan Kartu Responsif (Scroll vertikal halus)"
             >
-              {tab.label}
+              <LayoutGrid size={13} />
+              <span>Kartu</span>
             </button>
-          ))}
+            <button
+              type="button"
+              onClick={() => setViewMode('table')}
+              className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-bold transition-all cursor-pointer ${
+                viewMode === 'table'
+                  ? 'bg-white text-[#0B5D3F] shadow-2xs'
+                  : 'text-slate-500 hover:text-slate-800'
+              }`}
+              title="Tampilan Tabel Lengkap"
+            >
+              <TableIcon size={13} />
+              <span>Tabel</span>
+            </button>
+            {viewMode !== 'auto' && (
+              <button
+                type="button"
+                onClick={() => setViewMode('auto')}
+                className="rounded-lg px-2 py-1.5 text-[10px] font-bold text-slate-500 hover:text-[#0B5D3F] cursor-pointer"
+                title="Kembali ke mode otomatis (Kartu di HP, Tabel di Desktop)"
+              >
+                Auto
+              </button>
+            )}
+          </div>
         </div>
 
         {/* FUNGSI CARI NAMA WARGA UNTUK ADMIN */}
-        <div className="relative w-full sm:w-80">
+        <div className="relative w-full lg:w-80">
           <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Cari nama warga, NIK, No KK, anggota..."
-            className="w-full rounded-xl border border-slate-300 py-2.5 pl-10 pr-4 text-xs font-semibold text-slate-800 placeholder-slate-400 focus:border-[#0B5D3F] focus:ring-2 focus:ring-[#0B5D3F]/10 outline-hidden"
+            className="w-full rounded-xl border border-slate-300 py-2.5 pl-10 pr-8 text-xs font-semibold text-slate-800 placeholder-slate-400 focus:border-[#0B5D3F] focus:ring-2 focus:ring-[#0B5D3F]/10 outline-hidden"
           />
           {search && (
             <button
               onClick={() => setSearch('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
             >
               &times;
             </button>
@@ -316,30 +383,21 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
           </div>
         ) : (
           <div>
-            {/* Petunjuk Geser Layar HP untuk Responsivitas Mobile */}
-            <div className="sm:hidden flex items-center justify-between text-[11px] font-bold text-emerald-800 bg-[#E8F5EE] px-3.5 py-2 border-b border-emerald-200">
-              <span className="flex items-center gap-1.5">
-                <span className="text-sm font-black">&larr; &rarr;</span>
-                <span>Geser tabel ke samping untuk melihat seluruh data</span>
-              </span>
-              <span className="text-[10px] text-emerald-700 font-semibold">{filtered.length} KK</span>
-            </div>
+            {/* RESPONSIVE CARD VIEW (Default di HP < md, atau saat mode 'Kartu' dipilih) */}
+            <div className={viewMode === 'cards' ? 'block' : viewMode === 'table' ? 'hidden' : 'block md:hidden'}>
+              <div className="flex items-center justify-between bg-[#E8F5EE] px-4 py-2.5 border-b border-emerald-200 text-[11px] font-bold text-emerald-900">
+                <span>Menampilkan {filtered.length} Kepala Keluarga</span>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('table')}
+                  className="inline-flex items-center gap-1 rounded-lg bg-white px-2.5 py-1 text-[10px] font-extrabold text-[#0B5D3F] border border-emerald-200 shadow-2xs cursor-pointer"
+                >
+                  <TableIcon size={11} />
+                  <span>Buka Mode Tabel</span>
+                </button>
+              </div>
 
-            <div className="overflow-x-auto touch-pan-x scrollbar-thin">
-              <table className="w-full text-left text-xs min-w-[780px]">
-              <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200/80">
-                <tr>
-                  <th className="py-3.5 px-4 text-center">No</th>
-                  <th className="py-3.5 px-4">Nama Kepala Keluarga</th>
-                  <th className="py-3.5 px-4">No. Kartu Keluarga (KK)</th>
-                  <th className="py-3.5 px-4">Alamat & Rumah</th>
-                  <th className="py-3.5 px-4 text-center">Anggota</th>
-                  <th className="py-3.5 px-4">Bantuan Pemerintah</th>
-                  <th className="py-3.5 px-4">Status Iuran</th>
-                  <th className="py-3.5 px-4 text-right">Aksi & Periksa</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
+              <div className="max-h-[70vh] overflow-y-auto smooth-scroll scrollbar-thin p-3 sm:p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
                 {filtered.map((w, index) => {
                   const bansosCount = bantuanList.filter(
                     (b) =>
@@ -348,40 +406,28 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                   ).length;
 
                   return (
-                    <tr key={w.id} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="py-3.5 px-4 text-slate-400 font-medium text-center">{index + 1}</td>
-                      <td className="py-3.5 px-4">
-                        <div className="font-bold text-slate-900">{w.nama}</div>
-                        <div className="text-[10px] text-slate-400">Username: {w.nama}</div>
-                      </td>
-                      <td className="py-3.5 px-4">
-                        <span className="font-mono text-xs font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
-                          {w.noKK || '330214050800000' + (index + 1)}
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4">
-                        <div className="text-slate-700 font-semibold">Rumah {w.noRumah}</div>
-                        <div className="text-[10px] text-slate-400 truncate max-w-[140px]">
-                          {w.alamat || `RT ${w.rt || rtStr} / RW ${w.rw || rwStr}`}
+                    <motion.div
+                      key={w.id}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.2, delay: Math.min(index * 0.015, 0.2) }}
+                      className="rounded-2xl border border-slate-200 bg-slate-50/70 hover:bg-white hover:border-emerald-300 p-4 space-y-3 shadow-2xs transition-colors"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-md bg-emerald-100 px-1.5 text-[10px] font-black text-[#0B5D3F]">
+                              {index + 1}
+                            </span>
+                            <h4 className="text-sm font-extrabold text-slate-900 truncate">{w.nama}</h4>
+                          </div>
+                          <p className="mt-1 font-mono text-[11px] font-semibold text-emerald-800">
+                            KK: {w.noKK || '—'}
+                          </p>
                         </div>
-                      </td>
-                      <td className="py-3.5 px-4 text-center">
-                        <span className="font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md">
-                          {w.anggotaKeluarga?.length || w.jumlahJiwa || 1} Jiwa
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4">
-                        {bansosCount > 0 ? (
-                          <span className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
-                            ★ {bansosCount} Bantuan
-                          </span>
-                        ) : (
-                          <span className="text-[10px] text-slate-400 italic">Tidak ada bansos</span>
-                        )}
-                      </td>
-                      <td className="py-3.5 px-4">
+
                         <span
-                          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
+                          className={`shrink-0 inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
                             w.statusIuran === 'Sudah'
                               ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                               : 'bg-orange-50 text-orange-600 border border-orange-200'
@@ -389,57 +435,216 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                         >
                           {w.statusIuran === 'Sudah' ? 'Lunas' : 'Belum'}
                         </span>
-                      </td>
-                      <td className="py-3.5 px-4 text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          {/* Tombol Upgrade / Perbarui KK */}
-                          {onOpenUpgradeModal && (
-                            <button
-                              onClick={() => onOpenUpgradeModal(w)}
-                              className="flex items-center gap-1 rounded-lg bg-blue-50 hover:bg-blue-100 px-2.5 py-1 text-[11px] font-bold text-blue-700 transition-colors cursor-pointer"
-                              title="Perbarui KK jika ada yang meninggal atau pisah KK (Riwayat kas otomatis dipindahkan)"
-                            >
-                              <RefreshCw size={12} />
-                              <span>Upgrade KK</span>
-                            </button>
-                          )}
+                      </div>
 
-                          {/* Tombol Periksa / Lihat Detail KK */}
-                          <button
-                            onClick={() => setSelectedWarga(w)}
-                            className="flex items-center gap-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 text-[11px] font-bold text-[#0B5D3F] transition-colors cursor-pointer"
-                            title="Periksa Data Lengkap KK & Bantuan Pemerintah"
-                          >
-                            <Eye size={13} />
-                            <span>Detail KK</span>
-                          </button>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-600">
+                        <span className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 border border-slate-200/80 font-semibold">
+                          <Home size={11} className="text-[#0B5D3F]" />
+                          Rumah {w.noRumah} • RT {w.rt || rtStr}
+                        </span>
+                        <span className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 border border-slate-200/80 font-bold">
+                          <Users size={11} className="text-slate-500" />
+                          {w.anggotaKeluarga?.length || w.jumlahJiwa || 1} Jiwa
+                        </span>
+                        {bansosCount > 0 && (
+                          <span className="inline-flex items-center gap-1 rounded-lg bg-amber-50 px-2 py-1 border border-amber-200 font-bold text-amber-800">
+                            ★ {bansosCount} Bantuan
+                          </span>
+                        )}
+                      </div>
 
+                      <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-slate-200/70">
+                        {onOpenUpgradeModal && (
                           <button
-                            onClick={() => {
-                              setConfirmDialog({
-                                isOpen: true,
-                                title: 'Hapus Data Warga & Kartu Keluarga',
-                                message: `Apakah Anda yakin ingin menghapus data warga "${w.nama}" (No KK: ${w.noKK || '-'}) beserta seluruh data anggota keluarganya? Tindakan ini tidak dapat dibatalkan.`,
-                                targetName: `${w.nama} (No KK: ${w.noKK})`,
-                                variant: 'danger',
-                                onConfirm: () => onDeleteWarga(w.id),
-                              });
-                            }}
-                            className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
-                            title="Hapus data warga"
+                            onClick={() => onOpenUpgradeModal(w)}
+                            className="flex items-center gap-1 rounded-lg bg-blue-50 hover:bg-blue-100 px-2.5 py-1.5 text-[11px] font-bold text-blue-700 transition-colors cursor-pointer"
                           >
-                            <Trash2 size={14} />
+                            <RefreshCw size={12} />
+                            <span>Upgrade KK</span>
                           </button>
-                        </div>
-                      </td>
-                    </tr>
+                        )}
+
+                        <button
+                          onClick={() => setSelectedWarga(w)}
+                          className="flex items-center gap-1 rounded-lg bg-[#0B5D3F] hover:bg-[#084831] px-3 py-1.5 text-[11px] font-bold text-white transition-colors cursor-pointer"
+                        >
+                          <Eye size={13} />
+                          <span>Detail KK</span>
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            setConfirmDialog({
+                              isOpen: true,
+                              title: 'Hapus Data Warga & Kartu Keluarga',
+                              message: `Apakah Anda yakin ingin menghapus data warga "${w.nama}" (No KK: ${w.noKK || '-'}) beserta seluruh data anggota keluarganya? Tindakan ini tidak dapat dibatalkan.`,
+                              targetName: `${w.nama} (No KK: ${w.noKK})`,
+                              variant: 'danger',
+                              onConfirm: () => onDeleteWarga(w.id),
+                            });
+                          }}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                          title="Hapus data warga"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </motion.div>
                   );
                 })}
-              </tbody>
-            </table>
+              </div>
+            </div>
+
+            {/* SMOOTH SCROLL TABLE VIEW (Default di Desktop md+, atau saat mode 'Tabel' dipilih) */}
+            <div className={viewMode === 'table' ? 'block' : viewMode === 'cards' ? 'hidden' : 'hidden md:block'}>
+              <div className="flex items-center justify-between text-[11px] font-bold text-emerald-900 bg-[#E8F5EE] px-4 py-2 border-b border-emerald-200">
+                <span className="flex items-center gap-2">
+                  <span>{filtered.length} Kepala Keluarga</span>
+                  <span className="hidden sm:inline text-[10px] font-medium text-emerald-700">
+                    • Kolom nama tetap diam saat digeser
+                  </span>
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => scrollTableBy(-260)}
+                    className="inline-flex items-center gap-0.5 rounded-lg bg-white hover:bg-emerald-100 px-2 py-1 text-[10px] font-extrabold text-[#0B5D3F] border border-emerald-200 cursor-pointer transition-colors"
+                    title="Geser tabel ke kiri"
+                  >
+                    <ChevronLeft size={12} />
+                    <span>Kiri</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => scrollTableBy(260)}
+                    className="inline-flex items-center gap-0.5 rounded-lg bg-white hover:bg-emerald-100 px-2 py-1 text-[10px] font-extrabold text-[#0B5D3F] border border-emerald-200 cursor-pointer transition-colors"
+                    title="Geser tabel ke kanan"
+                  >
+                    <span>Kanan</span>
+                    <ChevronRight size={12} />
+                  </button>
+                </div>
+              </div>
+
+              <div
+                ref={tableScrollRef}
+                className="max-h-[68vh] overflow-auto touch-pan-x touch-pan-y smooth-scroll scrollbar-thin"
+              >
+                <table className="w-full text-left text-xs min-w-[820px] border-separate border-spacing-0">
+                  <thead className="sticky top-0 z-20 bg-slate-50/95 backdrop-blur-xs text-slate-600 font-semibold">
+                    <tr>
+                      <th className="py-3.5 px-4 text-center border-b border-slate-200/80">No</th>
+                      <th className="sticky left-0 z-30 bg-slate-50/95 backdrop-blur-xs py-3.5 px-4 border-b border-slate-200/80 shadow-[4px_0_8px_-4px_rgba(0,0,0,0.08)]">
+                        Nama Kepala Keluarga
+                      </th>
+                      <th className="py-3.5 px-4 border-b border-slate-200/80">No. Kartu Keluarga (KK)</th>
+                      <th className="py-3.5 px-4 border-b border-slate-200/80">Alamat & Rumah</th>
+                      <th className="py-3.5 px-4 text-center border-b border-slate-200/80">Anggota</th>
+                      <th className="py-3.5 px-4 border-b border-slate-200/80">Bantuan Pemerintah</th>
+                      <th className="py-3.5 px-4 border-b border-slate-200/80">Status Iuran</th>
+                      <th className="py-3.5 px-4 text-right border-b border-slate-200/80">Aksi & Periksa</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filtered.map((w, index) => {
+                      const bansosCount = bantuanList.filter(
+                        (b) =>
+                          (b.noKK && b.noKK === w.noKK) ||
+                          b.namaPenerima.toLowerCase() === w.nama.toLowerCase()
+                      ).length;
+
+                      return (
+                        <tr key={w.id} className="group hover:bg-slate-50/90 transition-colors">
+                          <td className="py-3.5 px-4 text-slate-400 font-medium text-center border-b border-slate-100">{index + 1}</td>
+                          <td className="sticky left-0 z-10 bg-white group-hover:bg-slate-50 py-3.5 px-4 border-b border-slate-100 shadow-[4px_0_8px_-4px_rgba(0,0,0,0.06)]">
+                            <div className="font-bold text-slate-900">{w.nama}</div>
+                            <div className="text-[10px] text-slate-400">Username: {w.nama}</div>
+                          </td>
+                          <td className="py-3.5 px-4 border-b border-slate-100">
+                            <span className="font-mono text-xs font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                              {w.noKK || '330214050800000' + (index + 1)}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4 border-b border-slate-100">
+                            <div className="text-slate-700 font-semibold">Rumah {w.noRumah}</div>
+                            <div className="text-[10px] text-slate-400 truncate max-w-[140px]">
+                              {w.alamat || `RT ${w.rt || rtStr} / RW ${w.rw || rwStr}`}
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4 text-center border-b border-slate-100">
+                            <span className="font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md">
+                              {w.anggotaKeluarga?.length || w.jumlahJiwa || 1} Jiwa
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4 border-b border-slate-100">
+                            {bansosCount > 0 ? (
+                              <span className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                                ★ {bansosCount} Bantuan
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-slate-400 italic">Tidak ada bansos</span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4 border-b border-slate-100">
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
+                                w.statusIuran === 'Sudah'
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : 'bg-orange-50 text-orange-600 border border-orange-200'
+                              }`}
+                            >
+                              {w.statusIuran === 'Sudah' ? 'Lunas' : 'Belum'}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4 text-right border-b border-slate-100">
+                            <div className="flex items-center justify-end gap-1">
+                              {onOpenUpgradeModal && (
+                                <button
+                                  onClick={() => onOpenUpgradeModal(w)}
+                                  className="flex items-center gap-1 rounded-lg bg-blue-50 hover:bg-blue-100 px-2.5 py-1 text-[11px] font-bold text-blue-700 transition-colors cursor-pointer"
+                                  title="Perbarui KK jika ada yang meninggal atau pisah KK (Riwayat kas otomatis dipindahkan)"
+                                >
+                                  <RefreshCw size={12} />
+                                  <span>Upgrade KK</span>
+                                </button>
+                              )}
+
+                              <button
+                                onClick={() => setSelectedWarga(w)}
+                                className="flex items-center gap-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 text-[11px] font-bold text-[#0B5D3F] transition-colors cursor-pointer"
+                                title="Periksa Data Lengkap KK & Bantuan Pemerintah"
+                              >
+                                <Eye size={13} />
+                                <span>Detail KK</span>
+                              </button>
+
+                              <button
+                                onClick={() => {
+                                  setConfirmDialog({
+                                    isOpen: true,
+                                    title: 'Hapus Data Warga & Kartu Keluarga',
+                                    message: `Apakah Anda yakin ingin menghapus data warga "${w.nama}" (No KK: ${w.noKK || '-'}) beserta seluruh data anggota keluarganya? Tindakan ini tidak dapat dibatalkan.`,
+                                    targetName: `${w.nama} (No KK: ${w.noKK})`,
+                                    variant: 'danger',
+                                    onConfirm: () => onDeleteWarga(w.id),
+                                  });
+                                }}
+                                className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                                title="Hapus data warga"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
-        </div>
-      )}
+        )}
     </div>
 
       {/* MODAL DETAIL KARTU KELUARGA & BANTUAN PEMERINTAH (UNTUK ADMIN) */}

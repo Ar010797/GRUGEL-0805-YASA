@@ -17,6 +17,8 @@ export const KasKeluarView: React.FC<KasKeluarViewProps> = ({
 }) => {
   const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
   const rwStr = pengaturanKas?.profilRT?.namaRW || '05';
+  const isAllRT = rtStr.toLowerCase().includes('semua');
+  const rtRwLabel = isAllRT ? `Seluruh RT • RW ${rwStr}` : `RT ${rtStr} RW ${rwStr}`;
   const [search, setSearch] = useState('');
   const keluarList = transactions.filter((t) => t.tipe === 'keluar');
   const totalKeluar = keluarList.reduce((acc, t) => acc + t.nominal, 0);
@@ -35,7 +37,7 @@ export const KasKeluarView: React.FC<KasKeluarViewProps> = ({
           </button>
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Kas Keluar</h1>
-            <p className="text-xs text-slate-500">Pencatatan pengeluaran kegiatan warga dan operasional RT {rtStr} RW {rwStr}</p>
+            <p className="text-xs text-slate-500">Pencatatan pengeluaran kegiatan warga dan operasional {rtRwLabel}</p>
           </div>
         </div>
 

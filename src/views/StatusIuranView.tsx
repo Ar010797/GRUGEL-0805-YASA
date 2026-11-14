@@ -33,6 +33,8 @@ export const StatusIuranView: React.FC<StatusIuranViewProps> = ({
   const profilRT = pengaturanKas?.profilRT;
   const rtStr = profilRT?.namaRT || '08';
   const rwStr = profilRT?.namaRW || '05';
+  const isAllRT = rtStr.toLowerCase().includes('semua');
+  const rtRwLabel = isAllRT ? `Seluruh RT • RW ${rwStr}` : `RT ${rtStr} RW ${rwStr}`;
   const desaStr = profilRT?.desa || 'Desa Kotayasa';
 
   const totalKK = wargaList.length;
@@ -41,7 +43,14 @@ export const StatusIuranView: React.FC<StatusIuranViewProps> = ({
   const persenSudah = totalKK > 0 ? Math.round((sudahCount / totalKK) * 100) : 0;
   const persenBelum = totalKK > 0 ? 100 - persenSudah : 0;
 
-  const filtered = wargaList.filter((w) => {
+  const seenIds = new Set<string>();
+  const uniqueWarga = wargaList.filter((w) => {
+    if (!w || !w.id || seenIds.has(w.id)) return false;
+    seenIds.add(w.id);
+    return true;
+  });
+
+  const filtered = uniqueWarga.filter((w) => {
     if (filter === 'sudah' && w.statusIuran !== 'Sudah') return false;
     if (filter === 'belum' && w.statusIuran !== 'Belum') return false;
     if (search && !w.nama.toLowerCase().includes(search.toLowerCase()) && !w.noRumah.toLowerCase().includes(search.toLowerCase())) {
@@ -62,7 +71,7 @@ export const StatusIuranView: React.FC<StatusIuranViewProps> = ({
           </button>
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Status Pembayaran Iuran</h1>
-            <p className="text-xs text-slate-500">Monitoring pembayaran iuran kas warga RT {rtStr} RW {rwStr} {desaStr}</p>
+            <p className="text-xs text-slate-500">Monitoring pembayaran iuran kas warga {rtRwLabel} {desaStr}</p>
           </div>
         </div>
 
@@ -187,9 +196,9 @@ export const StatusIuranView: React.FC<StatusIuranViewProps> = ({
               <span className="text-[10px] text-emerald-700 font-semibold">{filtered.length} KK</span>
             </div>
 
-            <div className="overflow-x-auto touch-pan-x scrollbar-thin">
+            <div className="max-h-[65vh] overflow-auto touch-pan-x touch-pan-y smooth-scroll scrollbar-thin">
               <table className="w-full text-left text-xs min-w-[650px]">
-                <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200/80">
+                <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-xs text-slate-500 font-semibold border-b border-slate-200/80">
                   <tr>
                     <th className="py-3.5 px-6">No</th>
                     <th className="py-3.5 px-6">Nama Kepala Keluarga</th>

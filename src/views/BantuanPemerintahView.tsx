@@ -401,7 +401,7 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
                   className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-800 focus:border-[#0B5D3F] outline-hidden cursor-pointer"
                 >
                   <option value="">-- Pilih dari Daftar Warga RT {rtStr} --</option>
-                  {wargaList.map((w) => (
+                  {Array.from(new Map(wargaList.map((w) => [w.id, w])).values()).map((w) => (
                     <option key={w.id} value={w.nama}>
                       {w.nama} (No Rumah: {w.noRumah}, KK: {w.noKK})
                     </option>

@@ -231,7 +231,37 @@ function unionIds(a: string[] = [], b: string[] = []): string[] {
 }
 
 /**
+ * Deduplicates a single entity array by id (and optional altMatch like noKK/username), keeping the newest updatedAt.
+ */
+export function dedupeEntityList<T extends { id: string; updatedAt?: string }>(
+  list: T[],
+  deletedIds: string[] = [],
+  altMatch?: (a: T, b: T) => boolean
+): T[] {
+  const deletedSet = new Set(deletedIds);
+  const result: T[] = [];
+
+  for (const item of list) {
+    if (!item || !item.id || deletedSet.has(item.id)) continue;
+    const existingIdx = result.findIndex(
+      (p) => p.id === item.id || (altMatch ? altMatch(p, item) : false)
+    );
+    if (existingIdx === -1) {
+      result.push(item);
+    } else {
+      const existing = result[existingIdx];
+      if (toEpoch(item.updatedAt) > toEpoch(existing.updatedAt)) {
+        result[existingIdx] = item;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
  * Merges two entity arrays preserving newer edits by updatedAt and respecting tombstones.
+ * Always guarantees unique ids (and unique altMatch keys) in the returned array.
  */
 export function mergeEntityList<T extends { id: string; updatedAt?: string }>(
   primaryList: T[],
@@ -240,16 +270,10 @@ export function mergeEntityList<T extends { id: string; updatedAt?: string }>(
   altMatch?: (a: T, b: T) => boolean
 ): T[] {
   const deletedSet = new Set(deletedIds);
-  const result: T[] = [];
-
-  for (const item of primaryList) {
-    if (!deletedSet.has(item.id)) {
-      result.push(item);
-    }
-  }
+  const result = dedupeEntityList(primaryList, deletedIds, altMatch);
 
   for (const sec of secondaryList) {
-    if (deletedSet.has(sec.id)) continue;
+    if (!sec || !sec.id || deletedSet.has(sec.id)) continue;
     const existingIdx = result.findIndex(
       (p) => p.id === sec.id || (altMatch ? altMatch(p, sec) : false)
     );
@@ -935,8 +959,8 @@ export async function saveSingleWargaToServer(
 }
 
 export async function bulkImportWargaOnServer(params: {
-  wargaList: Array<Omit<Warga, 'id' | 'no'>>;
-  bantuanList: Array<Omit<BantuanPemerintah, 'id'>>;
+  wargaList: Array<Omit<Warga, 'id' | 'no'> & { id?: string }>;
+  bantuanList: Array<Omit<BantuanPemerintah, 'id'> & { id?: string }>;
   mergeExisting: boolean;
   tahunAktif: number;
 }): Promise<{ ok: boolean; addedKK?: number; updatedKK?: number; addedBantuan?: number; message?: string }> {

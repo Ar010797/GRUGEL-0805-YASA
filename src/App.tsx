@@ -97,6 +97,7 @@ import {
   checkServerRevision,
   flushSaveAppDataKeepalive,
   mergeDatabaseStates,
+  dedupeEntityList,
   subscribeServerStream,
   EMPTY_DELETED_IDS,
   type DeletedIdsMap,
@@ -108,6 +109,11 @@ import {
   shareOrSaveExcelFile,
   triggerServerExcelDownload,
 } from './utils/excelWargaImport';
+import {
+  collectRegisteredRTs,
+  buildServerFilteredViewData,
+  normalizeRTCode,
+} from './utils/rtFilter';
 
 // Views
 import { BerandaView } from './views/BerandaView';
@@ -197,6 +203,9 @@ export default function App() {
     if (saved?.role === 'warga') return 'dasbor-warga';
     return 'beranda';
   });
+
+  // Server RT filter ('SEMUA' or specific RT code e.g. '08', '01')
+  const [selectedServerRT, setSelectedServerRT] = useState<string>('SEMUA');
 
   // Mobile sidebar open state
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
@@ -305,6 +314,7 @@ export default function App() {
 
   // Real-time Bidirectional Sync Refs (Central SQL + REST API + Live SSE + Polling)
   const isLoadedRef = useRef(false);
+  const bulkImportInFlightRef = useRef(false);
   const deletedIdsRef = useRef<DeletedIdsMap>({ ...EMPTY_DELETED_IDS });
   const lastServerHashRef = useRef<string>('');
   const lastServerRevisionRef = useRef<number>(0);
@@ -383,11 +393,45 @@ export default function App() {
       };
     }
 
-    const currentHash = computeStateHash(latestStateRef.current);
-    const nextHash = computeStateHash(nextState);
+    const normalizedState: AppDatabaseSchema = {
+      ...nextState,
+      wargaList: dedupeEntityList(
+        Array.isArray(nextState.wargaList) ? nextState.wargaList : [],
+        deletedIdsRef.current.warga,
+        (a, b) => Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
+      ),
+      transactions: dedupeEntityList(
+        Array.isArray(nextState.transactions) ? nextState.transactions : [],
+        deletedIdsRef.current.transactions
+      ),
+      bantuanList: dedupeEntityList(
+        Array.isArray(nextState.bantuanList) ? nextState.bantuanList : [],
+        deletedIdsRef.current.bantuan
+      ),
+      pengumumanList: dedupeEntityList(
+        Array.isArray(nextState.pengumumanList) ? nextState.pengumumanList : [],
+        deletedIdsRef.current.pengumuman
+      ),
+      dokumenList: dedupeEntityList(
+        Array.isArray(nextState.dokumenList) ? nextState.dokumenList : [],
+        deletedIdsRef.current.dokumen
+      ),
+      adminAccounts: dedupeEntityList(
+        Array.isArray(nextState.adminAccounts) ? nextState.adminAccounts : [],
+        deletedIdsRef.current.adminAccounts,
+        (a, b) => a.username.toLowerCase() === b.username.toLowerCase()
+      ),
+      laporanBulananRT: dedupeEntityList(
+        Array.isArray(nextState.laporanBulananRT) ? nextState.laporanBulananRT : [],
+        deletedIdsRef.current.laporanBulananRT
+      ),
+    };
 
-    if (typeof nextState.revision === 'number' && nextState.revision > lastServerRevisionRef.current) {
-      lastServerRevisionRef.current = nextState.revision;
+    const currentHash = computeStateHash(latestStateRef.current);
+    const nextHash = computeStateHash(normalizedState);
+
+    if (typeof normalizedState.revision === 'number' && normalizedState.revision > lastServerRevisionRef.current) {
+      lastServerRevisionRef.current = normalizedState.revision;
     }
 
     if (source === 'init' || source === 'sse' || source === 'refresh') {
@@ -398,25 +442,22 @@ export default function App() {
       return;
     }
 
-    latestStateRef.current = nextState;
+    latestStateRef.current = normalizedState;
 
-    if (nextState.tahunAktif) setTahunAktif(nextState.tahunAktif);
-    if (nextState.pengaturanKas) setPengaturanKas(nextState.pengaturanKas);
-    setWargaList(Array.isArray(nextState.wargaList) ? nextState.wargaList : []);
-    setTransactions(Array.isArray(nextState.transactions) ? nextState.transactions : []);
-    setBantuanList(Array.isArray(nextState.bantuanList) ? nextState.bantuanList : []);
-    setPengumumanList(Array.isArray(nextState.pengumumanList) ? nextState.pengumumanList : []);
-    setDokumenList(Array.isArray(nextState.dokumenList) ? nextState.dokumenList : []);
-    if (Array.isArray(nextState.adminAccounts)) {
-      setAdminAccounts(nextState.adminAccounts);
-    }
-    setLaporanBulananRT(Array.isArray(nextState.laporanBulananRT) ? nextState.laporanBulananRT : []);
+    if (normalizedState.tahunAktif) setTahunAktif(normalizedState.tahunAktif);
+    if (normalizedState.pengaturanKas) setPengaturanKas(normalizedState.pengaturanKas);
+    setWargaList(normalizedState.wargaList);
+    setTransactions(normalizedState.transactions);
+    setBantuanList(normalizedState.bantuanList);
+    setPengumumanList(normalizedState.pengumumanList);
+    setDokumenList(normalizedState.dokumenList);
+    setAdminAccounts(normalizedState.adminAccounts);
+    setLaporanBulananRT(normalizedState.laporanBulananRT);
     if (
       currentUser?.role === 'warga' &&
-      Array.isArray(nextState.wargaList) &&
-      nextState.wargaList[0]?.pin
+      normalizedState.wargaList[0]?.pin
     ) {
-      setCurrentPin(nextState.wargaList[0].pin);
+      setCurrentPin(normalizedState.wargaList[0].pin);
     }
   };
 
@@ -691,6 +732,7 @@ export default function App() {
   // Auto-Save for Admin/Server when state changes -> pushes straight to Central SQL Server
   useEffect(() => {
     if (!isLoadedRef.current || !dataLoadedReady) return;
+    if (bulkImportInFlightRef.current) return;
     if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'server')) return;
 
     const stateToPersist = buildCurrentSchema();
@@ -702,6 +744,7 @@ export default function App() {
 
     setSyncStatus('saving');
     const timer = setTimeout(async () => {
+      if (bulkImportInFlightRef.current) return;
       const res = await saveAppData(stateToPersist, {
         deletedIds: deletedIdsRef.current,
       });
@@ -1398,10 +1441,17 @@ export default function App() {
   // Add Transaction
   const handleSaveTransaction = async (tx: Omit<Transaction, 'id'>) => {
     const nowIso = new Date().toISOString();
+    const resolvedRtScope =
+      tx.rtScope ||
+      (currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
+        ? `RT ${selectedServerRT}`
+        : currentUser?.rtScope ||
+          `RT ${pengaturanKas.profilRT?.namaRT || '08'} RW ${pengaturanKas.profilRT?.namaRW || '05'}`);
     const newTx: Transaction = {
       ...tx,
       id: Date.now().toString(),
       tahun: tahunAktif,
+      rtScope: resolvedRtScope,
       updatedAt: nowIso,
     };
     setTransactions((prev) => [newTx, ...prev]);
@@ -1417,8 +1467,13 @@ export default function App() {
   // Add Resident
   const handleSaveWarga = async (w: Omit<Warga, 'id' | 'no'>) => {
     const nowIso = new Date().toISOString();
+    const fallbackRT =
+      currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
+        ? selectedServerRT
+        : pengaturanKas.profilRT?.namaRT || '08';
     const newW: Warga = {
       ...w,
+      rt: w.rt || fallbackRT,
       id: Date.now().toString(),
       no: wargaList.length + 1,
       statusIuran: w.statusIuran || 'Belum',
@@ -1442,110 +1497,126 @@ export default function App() {
     options: { mergeExisting: boolean }
   ) => {
     const baseTime = Date.now();
+    const nonce = Math.random().toString(36).slice(2, 6);
     const nowIso = new Date().toISOString();
+
+    const currentWarga = latestStateRef.current.wargaList || [];
+    const updatedWarga = [...currentWarga];
+    const payloadWargaForServer: Array<Omit<Warga, 'id' | 'no'> & { id?: string }> = [];
     let addedKKCount = 0;
     let updatedKKCount = 0;
 
-    setWargaList((prev) => {
-      const updated = [...prev];
-      importedWarga.forEach((incoming, idx) => {
-        const existingIndex = incoming.noKK
-          ? updated.findIndex((w) => w.noKK === incoming.noKK)
-          : updated.findIndex((w) => w.nama.toLowerCase() === incoming.nama.toLowerCase());
+    importedWarga.forEach((incoming, idx) => {
+      const existingIndex = incoming.noKK
+        ? updatedWarga.findIndex((w) => w.noKK === incoming.noKK)
+        : updatedWarga.findIndex((w) => w.nama.toLowerCase() === incoming.nama.toLowerCase());
 
-        if (existingIndex >= 0) {
-          if (options.mergeExisting) {
-            const existing = updated[existingIndex];
-            const nextStatus = incoming.statusIuran || existing.statusIuran || 'Belum';
-            updated[existingIndex] = {
-              ...existing,
-              nama: incoming.nama || existing.nama,
-              noKK: incoming.noKK || existing.noKK,
-              nik: incoming.nik || existing.nik,
-              noRumah: incoming.noRumah || existing.noRumah,
-              rt: incoming.rt || existing.rt,
-              rw: incoming.rw || existing.rw,
-              alamat: incoming.alamat || existing.alamat,
-              kodePos: incoming.kodePos || existing.kodePos,
-              jenisKelamin: incoming.jenisKelamin || existing.jenisKelamin,
-              anggotaKeluarga:
-                incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
-                  ? incoming.anggotaKeluarga
-                  : existing.anggotaKeluarga,
-              jumlahJiwa:
-                incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
-                  ? incoming.anggotaKeluarga.length
-                  : existing.jumlahJiwa,
-              telepon: incoming.telepon || existing.telepon,
-              statusIuran: nextStatus,
-              statusIuranPerTahun: {
-                ...(existing.statusIuranPerTahun || {}),
-                [tahunAktif]: nextStatus,
-              },
-              updatedAt: nowIso,
-            };
-            updatedKKCount++;
-          }
-        } else {
-          const newWarga: Warga = {
-            ...incoming,
-            id: `w_${baseTime}_${idx}`,
-            no: updated.length + 1,
-            statusIuran: incoming.statusIuran || 'Belum',
-            statusIuranPerTahun: { [tahunAktif]: incoming.statusIuran || 'Belum' },
-            pin: incoming.pin || '123456',
+      if (existingIndex >= 0) {
+        if (options.mergeExisting) {
+          const existing = updatedWarga[existingIndex];
+          const nextStatus = incoming.statusIuran || existing.statusIuran || 'Belum';
+          updatedWarga[existingIndex] = {
+            ...existing,
+            nama: incoming.nama || existing.nama,
+            noKK: incoming.noKK || existing.noKK,
+            nik: incoming.nik || existing.nik,
+            noRumah: incoming.noRumah || existing.noRumah,
+            rt: incoming.rt || existing.rt,
+            rw: incoming.rw || existing.rw,
+            alamat: incoming.alamat || existing.alamat,
+            kodePos: incoming.kodePos || existing.kodePos,
+            jenisKelamin: incoming.jenisKelamin || existing.jenisKelamin,
+            anggotaKeluarga:
+              incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
+                ? incoming.anggotaKeluarga
+                : existing.anggotaKeluarga,
+            jumlahJiwa:
+              incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
+                ? incoming.anggotaKeluarga.length
+                : existing.jumlahJiwa,
+            telepon: incoming.telepon || existing.telepon,
+            statusIuran: nextStatus,
+            statusIuranPerTahun: {
+              ...(existing.statusIuranPerTahun || {}),
+              [tahunAktif]: nextStatus,
+            },
             updatedAt: nowIso,
           };
-          updated.push(newWarga);
-          addedKKCount++;
+          payloadWargaForServer.push({ ...incoming, id: existing.id });
+          updatedKKCount++;
         }
-      });
-      return updated;
-    });
-
-    let addedBantuanCount = 0;
-    if (importedBantuan.length > 0) {
-      setBantuanList((prev) => {
-        const nextList = [...prev];
-        importedBantuan.forEach((b, idx) => {
-          const isDuplicate = nextList.some(
-            (existing) =>
-              existing.noKK === b.noKK &&
-              existing.namaPenerima.toLowerCase() === b.namaPenerima.toLowerCase() &&
-              existing.jenisBantuan.toLowerCase() === b.jenisBantuan.toLowerCase() &&
-              existing.tanggal === b.tanggal
-          );
-          if (!isDuplicate) {
-            nextList.unshift({
-              ...b,
-              id: `b_${baseTime}_${idx}`,
-              updatedAt: nowIso,
-            });
-            addedBantuanCount++;
-          }
-        });
-        return nextList;
-      });
-    }
-
-    // Persist bulk import directly to Central SQL Server
-    bulkImportWargaOnServer({
-      wargaList: importedWarga,
-      bantuanList: importedBantuan,
-      mergeExisting: options.mergeExisting,
-      tahunAktif,
-    }).then(async (bulkRes) => {
-      if (!bulkRes.ok) {
-        setSyncStatus('offline');
-        setCloudError(bulkRes.message || 'Gagal menyinkronkan import Excel ke server.');
       } else {
-        setServerConnected(true);
-        const snap = await fetchServerSnapshotWithStatus();
-        if (snap.ok && snap.data) {
-          applyMergedStateToReact(snap.data, 'refresh', true);
-        }
+        const assignedId = `w_${baseTime}_${idx}_${nonce}`;
+        const newWarga: Warga = {
+          ...incoming,
+          id: assignedId,
+          no: updatedWarga.length + 1,
+          statusIuran: incoming.statusIuran || 'Belum',
+          statusIuranPerTahun: { [tahunAktif]: incoming.statusIuran || 'Belum' },
+          pin: incoming.pin || '123456',
+          updatedAt: nowIso,
+        };
+        updatedWarga.push(newWarga);
+        payloadWargaForServer.push({ ...incoming, id: assignedId });
+        addedKKCount++;
       }
     });
+
+    const currentBantuan = latestStateRef.current.bantuanList || [];
+    const nextBantuanList = [...currentBantuan];
+    const payloadBantuanForServer: Array<Omit<BantuanPemerintah, 'id'> & { id?: string }> = [];
+    let addedBantuanCount = 0;
+
+    importedBantuan.forEach((b, idx) => {
+      const isDuplicate = nextBantuanList.some(
+        (existing) =>
+          existing.noKK === b.noKK &&
+          existing.namaPenerima.toLowerCase() === b.namaPenerima.toLowerCase() &&
+          existing.jenisBantuan.toLowerCase() === b.jenisBantuan.toLowerCase() &&
+          existing.tanggal === b.tanggal
+      );
+      if (!isDuplicate) {
+        const assignedBId = `b_${baseTime}_${idx}_${nonce}`;
+        nextBantuanList.unshift({
+          ...b,
+          id: assignedBId,
+          updatedAt: nowIso,
+        });
+        payloadBantuanForServer.push({ ...b, id: assignedBId });
+        addedBantuanCount++;
+      }
+    });
+
+    bulkImportInFlightRef.current = true;
+    setSyncStatus('saving');
+    setWargaList(updatedWarga);
+    if (addedBantuanCount > 0) {
+      setBantuanList(nextBantuanList);
+    }
+
+    // Persist bulk import directly to Central SQL Server without auto-save racing
+    bulkImportWargaOnServer({
+      wargaList: payloadWargaForServer,
+      bantuanList: payloadBantuanForServer,
+      mergeExisting: options.mergeExisting,
+      tahunAktif,
+    })
+      .then(async (bulkRes) => {
+        if (!bulkRes.ok) {
+          setSyncStatus('offline');
+          setCloudError(bulkRes.message || 'Gagal menyinkronkan import Excel ke server.');
+        } else {
+          setServerConnected(true);
+          setSyncStatus('synced');
+          const snap = await fetchServerSnapshotWithStatus();
+          if (snap.ok && snap.data) {
+            applyMergedStateToReact(snap.data, 'refresh', true);
+          }
+        }
+      })
+      .finally(() => {
+        bulkImportInFlightRef.current = false;
+      });
 
     const totalJiwa = importedWarga.reduce(
       (sum, w) => sum + (w.anggotaKeluarga?.length || w.jumlahJiwa || 1),
@@ -1949,7 +2020,7 @@ export default function App() {
   };
 
   // Quick switch role helper (only triggered from inside Server control view)
-  const handleSwitchToRole = (targetRole: 'server' | 'admin' | 'warga') => {
+  const handleSwitchToRole = (targetRole: 'server' | 'admin' | 'warga', targetRtScope?: string) => {
     if (targetRole === 'server') {
       const nextUser: AuthUser = {
         role: 'server',
@@ -1962,13 +2033,21 @@ export default function App() {
       setCurrentUser(nextUser);
       setCurrentView('server-kontrol');
     } else if (targetRole === 'admin') {
-      const rtStr = pengaturanKas.profilRT?.namaRT || '08';
-      const rwStr = pengaturanKas.profilRT?.namaRW || '05';
-      const ketuaStr = pengaturanKas.kontakKetuaRT?.nama?.trim();
+      const targetRTCode = normalizeRTCode(targetRtScope);
+      const matchedAcc = targetRTCode
+        ? adminAccounts.find((a) => normalizeRTCode(a.rt) === targetRTCode)
+        : undefined;
+      const rtStr = matchedAcc?.rt || targetRTCode || pengaturanKas.profilRT?.namaRT || '08';
+      const rwStr = matchedAcc?.rw || pengaturanKas.profilRT?.namaRW || '05';
+      const ketuaStr = matchedAcc?.nama || pengaturanKas.kontakKetuaRT?.nama?.trim();
       const nextUser: AuthUser = {
         role: 'admin',
-        username: 'Admin',
-        nama: ketuaStr ? `${ketuaStr} (Ketua RT ${rtStr})` : `Administrator RT ${rtStr} RW ${rwStr}`,
+        username: matchedAcc?.username || 'Admin',
+        nama: matchedAcc
+          ? `${matchedAcc.nama} (${matchedAcc.jabatan || `Ketua RT ${rtStr}`})`
+          : ketuaStr
+          ? `${ketuaStr} (Ketua RT ${rtStr})`
+          : `Administrator RT ${rtStr} RW ${rwStr}`,
         rtScope: `RT ${rtStr} RW ${rwStr}`,
         isPinAuthenticated: true,
       };
@@ -1996,6 +2075,34 @@ export default function App() {
   const isAdminRT = currentUser?.role === 'admin';
   const isWarga = currentUser?.role === 'warga';
 
+  const serverRegisteredRTs = isServer
+    ? collectRegisteredRTs({
+        adminAccounts,
+        wargaList,
+        transactions,
+        bantuanList,
+        laporanBulananRT,
+        pengaturanKas,
+      })
+    : [];
+
+  const serverViewData = isServer
+    ? buildServerFilteredViewData({
+        selectedRT: selectedServerRT,
+        adminAccounts,
+        wargaList,
+        transactions,
+        bantuanList,
+        pengaturanKas,
+      })
+    : {
+        wargaList,
+        transactions,
+        bantuanList,
+        pengaturanKas,
+        scopeTitle: '',
+      };
+
   const matchedServerAdmin = isAdminRT
     ? serverAdminAccounts.find(
         (acc) => acc.username.trim().toLowerCase() === (currentUser?.username || '').trim().toLowerCase()
@@ -2013,9 +2120,14 @@ export default function App() {
   // Navigation Items per Role
   const serverNavItems: NavItem[] = [
     { id: 'server-kontrol', label: 'Pusat Server & RT', icon: <Server size={18} /> },
+    {
+      id: 'beranda',
+      label: selectedServerRT === 'SEMUA' ? 'Lihat Kas Semua RT' : `Lihat Kas RT ${selectedServerRT}`,
+      icon: <LayoutDashboard size={18} />,
+    },
+    { id: 'kas-warga', label: 'Mutasi Kas RT', icon: <Wallet size={18} /> },
     { id: 'data-warga', label: 'Data Warga Desa', icon: <Users size={18} /> },
     { id: 'bantuan-pemerintah', label: 'Bantuan Sosial Desa', icon: <HandHeart size={18} /> },
-    { id: 'beranda', label: `Lihat Kas RT ${pengaturanKas.profilRT?.namaRT || '08'}`, icon: <LayoutDashboard size={18} /> },
     { id: 'status-iuran', label: 'Monitoring Iuran', icon: <CalendarCheck size={18} /> },
     { id: 'pengumuman', label: 'Warta Pengumuman', icon: <Megaphone size={18} /> },
     { id: 'laporan', label: 'Laporan Rekap', icon: <FileText size={18} /> },
@@ -2194,33 +2306,47 @@ export default function App() {
             {currentNavItems.map((item) => {
               const isActive = currentView === item.id;
               return (
-                <button
+                <motion.button
                   key={item.id}
+                  type="button"
+                  whileHover={{ x: 3 }}
+                  whileTap={{ scale: 0.97 }}
                   onClick={() => {
                     setCurrentView(item.id);
                     setIsSidebarOpen(false);
                   }}
-                  className={`w-full flex items-center justify-between rounded-xl px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
+                  className={`relative w-full flex items-center justify-between rounded-xl px-3.5 py-2.5 text-xs font-bold transition-colors cursor-pointer ${
                     isActive
                       ? isServer
-                        ? 'bg-white text-indigo-900 shadow-sm'
-                        : 'bg-white text-[#0B5D3F] shadow-sm'
+                        ? 'text-indigo-900'
+                        : 'text-[#0B5D3F]'
                       : 'text-white/80 hover:bg-white/10 hover:text-white'
                   }`}
                 >
-                  <div className="flex items-center gap-3">
-                    <span className={isActive ? (isServer ? 'text-indigo-700' : 'text-[#0B5D3F]') : 'text-white/70'}>
+                  {isActive && (
+                    <motion.span
+                      layoutId="activeSidebarPill"
+                      transition={{ type: 'spring', stiffness: 450, damping: 34 }}
+                      className="absolute inset-0 rounded-xl bg-white shadow-sm"
+                    />
+                  )}
+                  <div className="relative z-10 flex items-center gap-3">
+                    <motion.span
+                      animate={isActive ? { scale: [1, 1.15, 1] } : { scale: 1 }}
+                      transition={{ duration: 0.25 }}
+                      className={isActive ? (isServer ? 'text-indigo-700' : 'text-[#0B5D3F]') : 'text-white/70'}
+                    >
                       {item.icon}
-                    </span>
+                    </motion.span>
                     <span>{item.label}</span>
                   </div>
 
                   {item.badge && (
-                    <span className="rounded-md bg-rose-500/90 px-1.5 py-0.5 text-[9px] font-black text-white uppercase">
+                    <span className="relative z-10 rounded-md bg-rose-500/90 px-1.5 py-0.5 text-[9px] font-black text-white uppercase">
                       {item.badge}
                     </span>
                   )}
-                </button>
+                </motion.button>
               );
             })}
           </nav>
@@ -2314,9 +2440,15 @@ export default function App() {
             </button>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-extrabold text-slate-900">
+                <motion.h2
+                  key={currentView}
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="text-sm font-extrabold text-slate-900"
+                >
                   {currentNavItems.find((n) => n.id === currentView)?.label || `Aplikasi ${pengaturanKas.profilRT?.desa || 'Desa Kotayasa'}`}
-                </h2>
+                </motion.h2>
                 {isServer && (
                   <span className="hidden sm:inline-flex items-center gap-1 rounded-md bg-indigo-100 px-2 py-0.5 text-[10px] font-black text-indigo-700">
                     <Server size={10} /> SERVER PUSAT
@@ -2324,7 +2456,7 @@ export default function App() {
                 )}
               </div>
               <p className="text-[11px] text-slate-500 hidden sm:block">
-                {pengaturanKas.profilRT?.desa || 'Desa Kotayasa'} &bull; {currentUser?.nama} ({currentUser?.rtScope || `RT ${pengaturanKas.profilRT?.namaRT || '08'}`})
+                {pengaturanKas.profilRT?.desa || 'Desa Kotayasa'} &bull; {currentUser?.nama} ({isServer && currentView !== 'server-kontrol' ? (selectedServerRT === 'SEMUA' ? 'Semua RT Terdaftar' : `Filter RT ${selectedServerRT}`) : currentUser?.rtScope || `RT ${pengaturanKas.profilRT?.namaRT || '08'}`})
               </p>
             </div>
           </div>
@@ -2514,16 +2646,89 @@ export default function App() {
           </div>
         )}
 
-        {/* Scrollable Content Container with mobile horizontal safety */}
-        <main className="flex-1 overflow-y-auto p-3 sm:p-5 lg:p-8 no-scrollbar">
+        {/* Scrollable Content Container with smooth scroll & mobile horizontal safety */}
+        <main className="flex-1 overflow-y-auto smooth-scroll p-3 sm:p-5 lg:p-8 scrollbar-thin">
           <div className="mx-auto max-w-7xl">
+            {/* SERVER MULTI-ADMIN RT FILTER BAR */}
+            {isServer &&
+              currentView !== 'server-kontrol' &&
+              currentView !== 'kebijakan-privasi' &&
+              currentView !== 'pengaturan' && (
+                <motion.div
+                  initial={{ opacity: 0, y: -6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.22 }}
+                  className="mb-4 rounded-2xl bg-white p-3 border border-indigo-200/80 shadow-xs space-y-2"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700">
+                        <Server size={13} />
+                      </span>
+                      <span className="text-xs font-extrabold text-slate-800">
+                        Filter Wilayah Admin RT: <span className="text-indigo-700">{serverViewData.scopeTitle}</span>
+                      </span>
+                    </div>
+                    <span className="text-[11px] font-semibold text-slate-500">
+                      {serverViewData.wargaList.length} KK &bull; {serverViewData.transactions.length} Transaksi
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 overflow-x-auto smooth-scroll no-scrollbar pb-0.5">
+                    <motion.button
+                      type="button"
+                      whileTap={{ scale: 0.96 }}
+                      onClick={() => setSelectedServerRT('SEMUA')}
+                      className={`shrink-0 rounded-xl px-3.5 py-1.5 text-xs font-bold border transition-all cursor-pointer ${
+                        selectedServerRT === 'SEMUA'
+                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                          : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-indigo-50 hover:border-indigo-200'
+                      }`}
+                    >
+                      Semua Admin RT ({serverRegisteredRTs.length} RT)
+                    </motion.button>
+
+                    {serverRegisteredRTs.map((rtInfo) => {
+                      const active = selectedServerRT === rtInfo.rt;
+                      return (
+                        <motion.button
+                          key={rtInfo.rt}
+                          type="button"
+                          whileTap={{ scale: 0.96 }}
+                          onClick={() => setSelectedServerRT(rtInfo.rt)}
+                          className={`shrink-0 inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold border transition-all cursor-pointer ${
+                            active
+                              ? 'bg-[#0B5D3F] text-white border-[#0B5D3F] shadow-xs'
+                              : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-emerald-50 hover:border-emerald-200'
+                          }`}
+                        >
+                          <span>RT {rtInfo.rt}</span>
+                          {rtInfo.adminNames[0] && (
+                            <span className={`text-[10px] font-medium ${active ? 'text-emerald-100' : 'text-slate-500'}`}>
+                              • {rtInfo.adminNames[0]}
+                            </span>
+                          )}
+                          <span
+                            className={`rounded-md px-1.5 py-0.5 text-[10px] font-extrabold ${
+                              active ? 'bg-white/20 text-white' : 'bg-white text-[#0B5D3F] border border-slate-200'
+                            }`}
+                          >
+                            {rtInfo.totalKK} KK
+                          </span>
+                        </motion.button>
+                      );
+                    })}
+                  </div>
+                </motion.div>
+              )}
+
             <AnimatePresence mode="wait">
               <motion.div
-                key={`${currentUser?.role}-${currentView}`}
-                initial={{ opacity: 0, y: 14 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                transition={{ duration: 0.22, ease: "easeOut" }}
+                key={`${currentUser?.role}-${currentView}-${isServer ? selectedServerRT : ''}`}
+                initial={{ opacity: 0, y: 12, scale: 0.992 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -8, scale: 0.992 }}
+                transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
                 className="w-full"
               >
                 {/* SERVER (SUPER ADMIN DESA) VIEWS */}
@@ -2548,16 +2753,20 @@ export default function App() {
                   onDeleteAdminAccount={handleDeleteAdminAccount}
                   onUpdateStatusLaporan={handleUpdateStatusLaporan}
                   onRestoreDatabase={handleRestoreDatabase}
-                  onSwitchToRTAdmin={() => {
-                    handleSwitchToRole('admin');
+                  onSwitchToRTAdmin={(rtScope) => {
+                    handleSwitchToRole('admin', rtScope);
+                  }}
+                  onViewRTKas={(rtCode) => {
+                    setSelectedServerRT(rtCode || 'SEMUA');
+                    setCurrentView('beranda');
                   }}
                 />
               ) : currentView === 'data-warga' ? (
                 <DataWargaView
-                  wargaList={wargaList}
-                  bantuanList={bantuanList}
-                  profilRT={pengaturanKas.profilRT}
-                  pengaturanKas={pengaturanKas}
+                  wargaList={serverViewData.wargaList}
+                  bantuanList={serverViewData.bantuanList}
+                  profilRT={serverViewData.pengaturanKas.profilRT}
+                  pengaturanKas={serverViewData.pengaturanKas}
                   isServer={true}
                   onOpenWargaModal={() => setIsWargaModalOpen(true)}
                   onOpenUpgradeModal={(w) => {
@@ -2569,9 +2778,9 @@ export default function App() {
                 />
               ) : currentView === 'bantuan-pemerintah' ? (
                 <BantuanPemerintahView
-                  bantuanList={bantuanList}
-                  wargaList={wargaList}
-                  pengaturanKas={pengaturanKas}
+                  bantuanList={serverViewData.bantuanList}
+                  wargaList={serverViewData.wargaList}
+                  pengaturanKas={serverViewData.pengaturanKas}
                   onAddBantuan={handleAddBantuan}
                   onUpdateStatus={handleUpdateStatusBantuan}
                   onDeleteBantuan={handleDeleteBantuan}
@@ -2580,9 +2789,9 @@ export default function App() {
                 />
               ) : currentView === 'beranda' ? (
                 <BerandaView
-                  transactions={transactions}
-                  wargaList={wargaList}
-                  pengaturanKas={pengaturanKas}
+                  transactions={serverViewData.transactions}
+                  wargaList={serverViewData.wargaList}
+                  pengaturanKas={serverViewData.pengaturanKas}
                   onNavigate={(view) => setCurrentView(view)}
                   onOpenTxModal={(type) => {
                     setTxModalType(type || 'masuk');
@@ -2592,10 +2801,52 @@ export default function App() {
                   onOpenPengumumanModal={() => setIsPengumumanModalOpen(true)}
                   onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
                 />
+              ) : currentView === 'kas-warga' ? (
+                <KasWargaView
+                  transactions={serverViewData.transactions}
+                  pengaturanKas={serverViewData.pengaturanKas}
+                  onOpenTxModal={(type) => {
+                    setTxModalType(type || 'masuk');
+                    setIsTxModalOpen(true);
+                  }}
+                  onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
+                  onBack={() => setCurrentView('beranda')}
+                />
+              ) : currentView === 'kas-masuk' ? (
+                <KasMasukView
+                  transactions={serverViewData.transactions}
+                  pengaturanKas={serverViewData.pengaturanKas}
+                  onOpenTxModal={() => {
+                    setTxModalType('masuk');
+                    setIsTxModalOpen(true);
+                  }}
+                  onBack={() => setCurrentView('beranda')}
+                />
+              ) : currentView === 'kas-keluar' ? (
+                <KasKeluarView
+                  transactions={serverViewData.transactions}
+                  pengaturanKas={serverViewData.pengaturanKas}
+                  onOpenTxModal={() => {
+                    setTxModalType('keluar');
+                    setIsTxModalOpen(true);
+                  }}
+                  onBack={() => setCurrentView('beranda')}
+                />
+              ) : currentView === 'kas-kematian' ? (
+                <KasKematianView
+                  transactions={serverViewData.transactions}
+                  pengaturanKas={serverViewData.pengaturanKas}
+                  onOpenTxModal={() => {
+                    setTxModalType('kematian');
+                    setIsTxModalOpen(true);
+                  }}
+                  onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
+                  onBack={() => setCurrentView('beranda')}
+                />
               ) : currentView === 'status-iuran' ? (
                 <StatusIuranView
-                  wargaList={wargaList}
-                  pengaturanKas={pengaturanKas}
+                  wargaList={serverViewData.wargaList}
+                  pengaturanKas={serverViewData.pengaturanKas}
                   onToggleStatus={handleToggleWargaStatus}
                   onOpenWargaModal={() => setIsWargaModalOpen(true)}
                   onBack={() => setCurrentView('server-kontrol')}
@@ -2607,15 +2858,15 @@ export default function App() {
                   onOpenCreateModal={() => setIsPengumumanModalOpen(true)}
                   onDeletePengumuman={handleDeletePengumuman}
                   onBack={() => setCurrentView('server-kontrol')}
-                  pengaturanKas={pengaturanKas}
+                  pengaturanKas={serverViewData.pengaturanKas}
                 />
               ) : currentView === 'laporan' ? (
                 <LaporanView
-                  transactions={transactions}
-                  wargaList={wargaList}
-                  bantuanList={bantuanList}
+                  transactions={serverViewData.transactions}
+                  wargaList={serverViewData.wargaList}
+                  bantuanList={serverViewData.bantuanList}
                   onBack={() => setCurrentView('server-kontrol')}
-                  pengaturanKas={pengaturanKas}
+                  pengaturanKas={serverViewData.pengaturanKas}
                   tahun={tahunAktif}
                 />
               ) : currentView === 'pengaturan' ? (
@@ -2889,7 +3140,7 @@ export default function App() {
           onClose={() => setIsTxModalOpen(false)}
           onSave={handleSaveTransaction}
           defaultType={txModalType}
-          pengaturanKas={pengaturanKas}
+          pengaturanKas={isServer && selectedServerRT !== 'SEMUA' ? serverViewData.pengaturanKas : pengaturanKas}
         />
       )}
 
@@ -2900,7 +3151,7 @@ export default function App() {
           onClose={() => setIsWargaModalOpen(false)}
           onSave={handleSaveWarga}
           onBulkImport={handleBulkImportWargaBantuan}
-          profilRT={pengaturanKas.profilRT}
+          profilRT={isServer && selectedServerRT !== 'SEMUA' ? serverViewData.pengaturanKas.profilRT : pengaturanKas.profilRT}
         />
       )}
 

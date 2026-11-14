@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   ShieldCheck,
   User,
@@ -275,14 +276,22 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   };
 
   return (
-    <div
-      className={`fixed inset-0 z-50 flex items-center justify-center p-4 animate-in fade-in duration-200 overflow-y-auto ${
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.28 }}
+      className={`fixed inset-0 z-50 flex items-center justify-center p-4 overflow-y-auto ${
         canClose
           ? 'bg-black/65 backdrop-blur-sm'
           : 'bg-gradient-to-br from-[#063A27] via-[#0B5D3F] to-[#0F172A]'
       }`}
     >
-      <div className="w-full max-w-md rounded-3xl bg-white shadow-2xl border border-emerald-900/10 overflow-hidden my-auto">
+      <motion.div
+        initial={{ opacity: 0, y: 24, scale: 0.96 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
+        className="w-full max-w-md rounded-3xl bg-white shadow-2xl border border-emerald-900/10 overflow-hidden my-auto"
+      >
         {/* Top Header */}
         <div className="relative bg-gradient-to-r from-[#0B5D3F] to-[#06442D] px-6 pt-6 pb-5 text-white">
           {canClose && (
@@ -297,9 +306,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           )}
 
           <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/15 backdrop-blur-xs p-1">
+            <motion.div
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ delay: 0.1, duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+              className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/15 backdrop-blur-xs p-1"
+            >
               <HouseLogo size={36} variant="white" />
-            </div>
+            </motion.div>
             <div>
               <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-200 flex items-center gap-1.5">
                 <span>Menu Login Aplikasi</span>
@@ -331,59 +345,91 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             showServerTab ? 'grid-cols-3' : 'grid-cols-2'
           } border-b border-slate-200 bg-slate-50 p-1.5 gap-1 transition-all`}
         >
-          <button
+          <motion.button
             type="button"
+            whileTap={{ scale: 0.97 }}
             onClick={() => {
               setActiveTab('admin');
               setAdminError('');
             }}
-            className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
-              activeTab === 'admin'
-                ? 'bg-[#0B5D3F] text-white shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+            className={`relative flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-colors cursor-pointer ${
+              activeTab === 'admin' ? 'text-white' : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <ShieldCheck size={14} />
-            <span>Admin RT</span>
-          </button>
+            {activeTab === 'admin' && (
+              <motion.span
+                layoutId="loginActiveTabPill"
+                transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                className="absolute inset-0 rounded-xl bg-[#0B5D3F] shadow-xs"
+              />
+            )}
+            <span className="relative z-10 flex items-center gap-1.5">
+              <ShieldCheck size={14} />
+              <span>Admin RT</span>
+            </span>
+          </motion.button>
 
-          <button
+          <motion.button
             type="button"
+            whileTap={{ scale: 0.97 }}
             onClick={() => {
               setActiveTab('warga');
               setWargaError('');
             }}
-            className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
-              activeTab === 'warga'
-                ? 'bg-[#0B5D3F] text-white shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+            className={`relative flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-colors cursor-pointer ${
+              activeTab === 'warga' ? 'text-white' : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <User size={14} />
-            <span>Warga (KK)</span>
-          </button>
+            {activeTab === 'warga' && (
+              <motion.span
+                layoutId="loginActiveTabPill"
+                transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                className="absolute inset-0 rounded-xl bg-[#0B5D3F] shadow-xs"
+              />
+            )}
+            <span className="relative z-10 flex items-center gap-1.5">
+              <User size={14} />
+              <span>Warga (KK)</span>
+            </span>
+          </motion.button>
 
           {showServerTab && (
-            <button
+            <motion.button
               type="button"
+              whileTap={{ scale: 0.97 }}
               onClick={() => {
                 setActiveTab('server');
                 setServerError('');
               }}
-              className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'server'
-                  ? 'bg-indigo-600 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
+              className={`relative flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-colors cursor-pointer ${
+                activeTab === 'server' ? 'text-white' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <Server size={14} />
-              <span>Server Pusat</span>
-            </button>
+              {activeTab === 'server' && (
+                <motion.span
+                  layoutId="loginActiveTabPill"
+                  transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                  className="absolute inset-0 rounded-xl bg-indigo-600 shadow-xs"
+                />
+              )}
+              <span className="relative z-10 flex items-center gap-1.5">
+                <Server size={14} />
+                <span>Server Pusat</span>
+              </span>
+            </motion.button>
           )}
         </div>
 
         {/* Content Body */}
         <div className="p-6">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeTab}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            >
           {activeTab === 'server' ? (
             /* SERVER (SUPER ADMIN) LOGIN FORM */
             <form onSubmit={handleServerSubmit} className="space-y-4">
@@ -813,6 +859,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               </button>
             </form>
           )}
+            </motion.div>
+          </AnimatePresence>
 
           {/* Footer security note & Discreet Server Access */}
           <div className="mt-5 pt-4 border-t border-slate-100 flex flex-col items-center gap-2 text-center">
@@ -972,7 +1020,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             </button>
           </div>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 };

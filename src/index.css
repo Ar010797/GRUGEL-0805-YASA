@@ -1,6 +1,10 @@
 @import "tailwindcss";
 
 @layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
   body {
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
   }
@@ -27,6 +31,41 @@
 .phone-shadow-hover:hover {
   transform: translateY(-4px);
   box-shadow: 0 30px 60px -12px rgba(11, 93, 63, 0.28), 0 0 0 1px rgba(11, 93, 63, 0.2), 0 20px 30px -10px rgba(0, 0, 0, 0.15);
+}
+
+/* Smooth scrolling & touch responsiveness */
+.smooth-scroll {
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(11, 93, 63, 0.28) #f1f5f9;
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+  overscroll-behavior-x: contain;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 7px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 9999px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(11, 93, 63, 0.28);
+  border-radius: 9999px;
+  transition: background-color 0.2s ease;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(11, 93, 63, 0.55);
 }
 
 /* Hide scrollbar for neat mockup presentation */

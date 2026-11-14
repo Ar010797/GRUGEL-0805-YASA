@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { motion } from 'framer-motion';
 import {
   Server,
   Users,
@@ -38,6 +39,7 @@ import {
   DokumenPdfWarga,
 } from '../types';
 import { downloadBackupJSON, parseBackupFile, AppDatabaseSchema } from '../utils/cloudSync';
+import { collectRegisteredRTs } from '../utils/rtFilter';
 import { ConfirmationModal } from '../components/ConfirmationModal';
 
 interface ServerKontrolViewProps {
@@ -60,6 +62,7 @@ interface ServerKontrolViewProps {
   onUpdateStatusLaporan: (id: string, status: PembaruanBulananRT['statusVerifikasi']) => void;
   onRestoreDatabase: (db: AppDatabaseSchema) => void;
   onSwitchToRTAdmin?: (rtScope: string) => void;
+  onViewRTKas?: (rtCode: string) => void;
 }
 
 export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
@@ -82,6 +85,7 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
   onUpdateStatusLaporan,
   onRestoreDatabase,
   onSwitchToRTAdmin,
+  onViewRTKas,
 }) => {
   const [activeTab, setActiveTab] = useState<'admin-rt' | 'laporan-masuk' | 'database'>('admin-rt');
   const [searchAdmin, setSearchAdmin] = useState('');
@@ -128,8 +132,17 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
   const totalKKGlobal = wargaList.length;
   const totalJiwaGlobal = wargaList.reduce((acc, w) => acc + (w.anggotaKeluarga?.length || w.jumlahJiwa || 1), 0);
   const totalMasukGlobal = transactions.filter((t) => t.tipe === 'masuk').reduce((acc, t) => acc + t.nominal, 0);
-  const totalKeluarGlobal = transactions.filter((t) => t.tipe === 'keluar' || t.tipe === 'kematian').reduce((acc, t) => acc + t.nominal, 0);
-  const saldoKasGlobal = totalMasukGlobal - totalKeluarGlobal + (pengaturanKas.saldoAwalKasUmum || 0);
+  const totalKeluarGlobal = transactions.filter((t) => t.tipe === 'keluar').reduce((acc, t) => acc + t.nominal, 0);
+  const saldoKasGlobal = totalMasukGlobal - totalKeluarGlobal;
+
+  const registeredRTs = collectRegisteredRTs({
+    adminAccounts,
+    wargaList,
+    transactions,
+    bantuanList,
+    laporanBulananRT,
+    pengaturanKas,
+  });
 
   const filteredAdmins = adminAccounts.filter(
     (a) =>
@@ -234,8 +247,14 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
       </div>
 
       {/* Aggregate Village Metrics */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <div className="rounded-3xl bg-white p-5 border border-slate-200 shadow-xs">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25 }}
+          whileHover={{ y: -2 }}
+          className="rounded-3xl bg-white p-5 border border-slate-200 shadow-xs"
+        >
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-500 uppercase">Admin RT Terdaftar</span>
             <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-[#0B5D3F]">
@@ -243,27 +262,152 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
             </span>
           </div>
           <p className="text-2xl font-black text-slate-900 mt-2">{adminAccounts.length} Akun RT</p>
-          <span className="text-[11px] text-slate-400 mt-0.5 block">Mengelola wilayah masing-masing</span>
-        </div>
+          <span className="text-[11px] text-slate-400 mt-0.5 block">Mengelola {registeredRTs.length} wilayah RT</span>
+        </motion.div>
 
-        <div className="rounded-3xl bg-white p-5 border border-slate-200 shadow-xs">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25, delay: 0.04 }}
+          whileHover={{ y: -2 }}
+          className="rounded-3xl bg-white p-5 border border-slate-200 shadow-xs"
+        >
           <span className="text-xs font-bold text-slate-500 uppercase">Laporan Bulanan Masuk</span>
           <p className="text-2xl font-black text-emerald-800 mt-2">{laporanBulananRT.length} Laporan</p>
           <span className="text-[11px] text-slate-400 mt-0.5 block">Pembaruan berkala dari RT</span>
-        </div>
+        </motion.div>
 
-        <div className="rounded-3xl bg-white p-5 border border-slate-200 shadow-xs">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25, delay: 0.08 }}
+          whileHover={{ y: -2 }}
+          className="rounded-3xl bg-white p-5 border border-slate-200 shadow-xs"
+        >
           <span className="text-xs font-bold text-slate-500 uppercase">Total Warga (Semua RT)</span>
           <p className="text-2xl font-black text-slate-900 mt-2">{totalKKGlobal} KK</p>
           <span className="text-[11px] text-slate-400 mt-0.5 block">{totalJiwaGlobal} Jiwa terdaftar</span>
-        </div>
+        </motion.div>
 
-        <div className="rounded-3xl bg-[#E8F5EE] p-5 border border-emerald-300 shadow-xs">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25, delay: 0.12 }}
+          whileHover={{ y: -2 }}
+          className="rounded-3xl bg-[#E8F5EE] p-5 border border-emerald-300 shadow-xs"
+        >
           <span className="text-xs font-bold text-emerald-900 uppercase">Saldo Kas Keseluruhan</span>
           <p className="text-xl font-black text-[#0B5D3F] mt-2">
             Rp {saldoKasGlobal.toLocaleString('id-ID')}
           </p>
-          <span className="text-[10px] text-emerald-700 mt-0.5 block">Kas umum & kematian RT berjalan</span>
+          <span className="text-[10px] text-emerald-700 mt-0.5 block">Gabungan seluruh RT terdaftar</span>
+        </motion.div>
+      </div>
+
+      {/* Monitoring Kas Seluruh Admin RT Terdaftar */}
+      <div className="rounded-3xl bg-white p-5 sm:p-6 border border-slate-200 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-700 border border-indigo-200">
+              <Wallet size={20} />
+            </div>
+            <div>
+              <h2 className="text-sm sm:text-base font-extrabold text-slate-900">
+                Pantau Kas Seluruh Admin RT Terdaftar
+              </h2>
+              <p className="text-xs text-slate-500">
+                Pilih salah satu Admin RT atau gabungkan seluruh RT untuk memeriksa kas masuk, kas keluar, kematian, dan iuran warga
+              </p>
+            </div>
+          </div>
+
+          {onViewRTKas && (
+            <motion.button
+              type="button"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.97 }}
+              onClick={() => onViewRTKas('SEMUA')}
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer shrink-0"
+            >
+              <Wallet size={14} />
+              <span>Lihat Kas Gabungan Semua RT</span>
+              <ArrowRight size={14} />
+            </motion.button>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
+          {registeredRTs.map((rtInfo, idx) => (
+            <motion.div
+              key={rtInfo.rt}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.22, delay: idx * 0.04 }}
+              whileHover={{ y: -2 }}
+              className="rounded-2xl border border-slate-200 bg-slate-50/70 hover:bg-white hover:border-emerald-300 hover:shadow-md p-4 transition-all space-y-3"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-lg bg-[#0B5D3F] px-2.5 py-0.5 text-xs font-black text-white">
+                      {rtInfo.label}
+                    </span>
+                    <span className="text-[11px] font-bold text-slate-600">
+                      {rtInfo.totalKK} KK
+                    </span>
+                  </div>
+                  <p className="mt-1.5 text-xs font-bold text-slate-800 truncate">
+                    {rtInfo.adminNames.length > 0
+                      ? `Admin: ${rtInfo.adminNames.join(', ')}`
+                      : `Admin RT ${rtInfo.rt} (Belum ada akun khusus)`}
+                  </p>
+                </div>
+
+                {rtInfo.latestLaporan && (
+                  <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-bold text-indigo-700 border border-indigo-200 shrink-0">
+                    {rtInfo.latestLaporan.bulanTahun}
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 text-[11px]">
+                <div className="rounded-xl bg-white p-2 border border-slate-200/70">
+                  <span className="text-[10px] text-slate-400 block">Kas Masuk</span>
+                  <strong className="text-emerald-700 font-extrabold">
+                    Rp {rtInfo.totalMasuk.toLocaleString('id-ID')}
+                  </strong>
+                </div>
+                <div className="rounded-xl bg-white p-2 border border-slate-200/70">
+                  <span className="text-[10px] text-slate-400 block">Kas Keluar</span>
+                  <strong className="text-rose-600 font-extrabold">
+                    Rp {rtInfo.totalKeluar.toLocaleString('id-ID')}
+                  </strong>
+                </div>
+                <div className="rounded-xl bg-[#E8F5EE] p-2 border border-emerald-200">
+                  <span className="text-[10px] text-emerald-800 block">Saldo Kas</span>
+                  <strong className="text-[#0B5D3F] font-extrabold">
+                    Rp {rtInfo.saldoKas.toLocaleString('id-ID')}
+                  </strong>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between pt-1 border-t border-slate-200/70 text-[11px]">
+                <span className="text-slate-500">
+                  Kematian: <strong className="text-rose-600">Rp {rtInfo.totalKematian.toLocaleString('id-ID')}</strong>
+                </span>
+                {onViewRTKas && (
+                  <button
+                    type="button"
+                    onClick={() => onViewRTKas(rtInfo.rt)}
+                    className="inline-flex items-center gap-1 rounded-lg bg-emerald-100 hover:bg-[#0B5D3F] px-2.5 py-1 text-[11px] font-extrabold text-[#0B5D3F] hover:text-white transition-colors cursor-pointer"
+                  >
+                    <span>Lihat Kas RT {rtInfo.rt}</span>
+                    <ArrowRight size={12} />
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          ))}
         </div>
       </div>
 
@@ -275,42 +419,37 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
       )}
 
       {/* Tabs */}
-      <div className="flex border-b border-slate-200 bg-white rounded-2xl p-1.5 shadow-xs">
-        <button
-          onClick={() => setActiveTab('admin-rt')}
-          className={`flex-1 flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
-            activeTab === 'admin-rt'
-              ? 'bg-[#0B5D3F] text-white shadow-xs'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-          }`}
-        >
-          <Users size={15} />
-          <span>Kelola Akun Admin RT ({adminAccounts.length})</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('laporan-masuk')}
-          className={`flex-1 flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
-            activeTab === 'laporan-masuk'
-              ? 'bg-[#0B5D3F] text-white shadow-xs'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-          }`}
-        >
-          <Send size={15} />
-          <span>Data Pembaruan Bulanan Masuk ({laporanBulananRT.length})</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('database')}
-          className={`flex-1 flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
-            activeTab === 'database'
-              ? 'bg-[#0B5D3F] text-white shadow-xs'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-          }`}
-        >
-          <Server size={15} />
-          <span>Keamanan & Cadangan Cloud</span>
-        </button>
+      <div className="flex flex-col sm:flex-row border-b border-slate-200 bg-white rounded-2xl p-1.5 shadow-xs gap-1">
+        {[
+          { id: 'admin-rt' as const, label: `Kelola Akun Admin RT (${adminAccounts.length})`, icon: <Users size={15} /> },
+          { id: 'laporan-masuk' as const, label: `Data Pembaruan Bulanan Masuk (${laporanBulananRT.length})`, icon: <Send size={15} /> },
+          { id: 'database' as const, label: 'Keamanan & Cadangan Cloud', icon: <Server size={15} /> },
+        ].map((tab) => {
+          const isTabActive = activeTab === tab.id;
+          return (
+            <motion.button
+              key={tab.id}
+              type="button"
+              whileTap={{ scale: 0.98 }}
+              onClick={() => setActiveTab(tab.id)}
+              className={`relative flex-1 flex items-center justify-center gap-2 rounded-xl py-2.5 px-3 text-xs font-bold transition-colors cursor-pointer ${
+                isTabActive ? 'text-white' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              {isTabActive && (
+                <motion.span
+                  layoutId="serverTabPill"
+                  transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                  className="absolute inset-0 rounded-xl bg-[#0B5D3F] shadow-xs"
+                />
+              )}
+              <span className="relative z-10 flex items-center gap-2">
+                {tab.icon}
+                <span>{tab.label}</span>
+              </span>
+            </motion.button>
+          );
+        })}
       </div>
 
       {/* TAB 1: KELOLA AKUN ADMIN RT */}

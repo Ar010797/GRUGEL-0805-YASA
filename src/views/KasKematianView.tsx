@@ -25,6 +25,7 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
   const iuranBulan = pengaturanKas?.nominalKematianBulanan || 10000;
   const iuranTahun = pengaturanKas?.nominalKematianTahunan || (iuranBulan * 12); // Rp 120.000
   const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
+  const isAllRT = rtStr.toLowerCase().includes('semua');
 
   return (
     <div className="space-y-6">
@@ -39,7 +40,7 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Kas Kematian & Duka</h1>
             <p className="text-xs text-slate-500">
-              Dana gotong royong warga RT {rtStr} untuk pengadaan kain mori, pemulasaraan, dan santunan duka
+              Dana gotong royong warga {isAllRT ? 'Seluruh RT' : `RT ${rtStr}`} untuk pengadaan kain mori, pemulasaraan, dan santunan duka
             </p>
           </div>
         </div>

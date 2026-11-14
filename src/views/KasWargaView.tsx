@@ -32,6 +32,8 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
   const profilRT = pengaturanKas?.profilRT;
   const rtStr = profilRT?.namaRT || '08';
   const rwStr = profilRT?.namaRW || '05';
+  const isAllRT = rtStr.toLowerCase().includes('semua');
+  const rtRwLabel = isAllRT ? `Seluruh RT • RW ${rwStr}` : `RT ${rtStr} RW ${rwStr}`;
   const desaStr = profilRT?.desa || 'Desa Kotayasa';
   const [activeTab, setActiveTab] = useState<'semua' | 'masuk' | 'keluar' | 'kematian'>('semua');
   const [search, setSearch] = useState('');
@@ -73,7 +75,7 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
           </button>
           <div>
             <h1 className="text-xl font-extrabold text-slate-900">Kas Warga</h1>
-            <p className="text-xs text-slate-500">Rekapitulasi seluruh mutasi kas RT {rtStr} RW {rwStr} {desaStr}</p>
+            <p className="text-xs text-slate-500">Rekapitulasi seluruh mutasi kas {rtRwLabel} {desaStr}</p>
           </div>
         </div>
 

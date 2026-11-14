@@ -115,6 +115,43 @@ function unionIdLists(...lists: Array<string[] | undefined>): string[] {
   return Array.from(s).slice(-2000);
 }
 
+let dbWriteTail: Promise<unknown> = Promise.resolve();
+
+function withDbWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = dbWriteTail.then(fn, fn);
+  dbWriteTail = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+function dedupeEntities<T extends { id: string; updatedAt?: string }>(
+  list: T[],
+  deletedIds: string[],
+  altMatch?: (a: T, b: T) => boolean
+): T[] {
+  const deletedSet = new Set(deletedIds);
+  const result: T[] = [];
+
+  for (const item of list) {
+    if (!item || !item.id || deletedSet.has(item.id)) continue;
+    const idx = result.findIndex(
+      (ex) => ex.id === item.id || (altMatch ? altMatch(ex, item) : false)
+    );
+    if (idx === -1) {
+      result.push(item);
+    } else {
+      const existingItem = result[idx];
+      if (toEpochMs(item.updatedAt) >= toEpochMs(existingItem.updatedAt)) {
+        result[idx] = item;
+      }
+    }
+  }
+
+  return result;
+}
+
 function mergeEntities<T extends { id: string; updatedAt?: string }>(
   existingList: T[],
   incomingList: T[],
@@ -122,13 +159,7 @@ function mergeEntities<T extends { id: string; updatedAt?: string }>(
   altMatch?: (a: T, b: T) => boolean
 ): T[] {
   const deletedSet = new Set(deletedIds);
-  const result: T[] = [];
-
-  for (const item of existingList) {
-    if (item && item.id && !deletedSet.has(item.id)) {
-      result.push(item);
-    }
-  }
+  const result = dedupeEntities(existingList, deletedIds, altMatch);
 
   for (const inc of incomingList) {
     if (!inc || !inc.id || deletedSet.has(inc.id)) continue;
@@ -679,26 +710,34 @@ async function writeFullStateRaw(state: FullAppDatabaseState, explicitRevision?:
         },
       });
 
-    if (state.wargaList.length > 0) {
-      await tx.insert(warga).values(state.wargaList.map((w) => toWargaRow(w, nowIso)));
+    const safeWarga = dedupeEntities(state.wargaList, [], (a, b) => Boolean(a.noKK && b.noKK && a.noKK === b.noKK));
+    const safeTx = dedupeEntities(state.transactions, []);
+    const safeBantuan = dedupeEntities(state.bantuanList, []);
+    const safePengumuman = dedupeEntities(state.pengumumanList, []);
+    const safeDokumen = dedupeEntities(state.dokumenList, []);
+    const safeAdmins = dedupeEntities(state.adminAccounts, [], (a, b) => a.username.toLowerCase() === b.username.toLowerCase());
+    const safeLaporan = dedupeEntities(state.laporanBulananRT, []);
+
+    if (safeWarga.length > 0) {
+      await tx.insert(warga).values(safeWarga.map((w) => toWargaRow(w, nowIso)));
     }
-    if (state.transactions.length > 0) {
-      await tx.insert(transactions).values(state.transactions.map((t) => toTransactionRow(t, nowIso)));
+    if (safeTx.length > 0) {
+      await tx.insert(transactions).values(safeTx.map((t) => toTransactionRow(t, nowIso)));
     }
-    if (state.bantuanList.length > 0) {
-      await tx.insert(bantuan).values(state.bantuanList.map((b) => toBantuanRow(b, nowIso)));
+    if (safeBantuan.length > 0) {
+      await tx.insert(bantuan).values(safeBantuan.map((b) => toBantuanRow(b, nowIso)));
     }
-    if (state.pengumumanList.length > 0) {
-      await tx.insert(pengumuman).values(state.pengumumanList.map((p) => toPengumumanRow(p, nowIso)));
+    if (safePengumuman.length > 0) {
+      await tx.insert(pengumuman).values(safePengumuman.map((p) => toPengumumanRow(p, nowIso)));
     }
-    if (state.dokumenList.length > 0) {
-      await tx.insert(dokumen).values(state.dokumenList.map((d) => toDokumenRow(d, nowIso)));
+    if (safeDokumen.length > 0) {
+      await tx.insert(dokumen).values(safeDokumen.map((d) => toDokumenRow(d, nowIso)));
     }
-    if (state.adminAccounts.length > 0) {
-      await tx.insert(adminAccounts).values(state.adminAccounts.map((a) => toAdminRow(a, nowIso)));
+    if (safeAdmins.length > 0) {
+      await tx.insert(adminAccounts).values(safeAdmins.map((a) => toAdminRow(a, nowIso)));
     }
-    if (state.laporanBulananRT.length > 0) {
-      await tx.insert(laporanBulanan).values(state.laporanBulananRT.map((l) => toLaporanRow(l, nowIso)));
+    if (safeLaporan.length > 0) {
+      await tx.insert(laporanBulanan).values(safeLaporan.map((l) => toLaporanRow(l, nowIso)));
     }
 
     const delRows: Array<{ id: string; entityType: string; entityId: string; deletedAt: string }> = [];
@@ -788,7 +827,11 @@ export async function readFullStateSql(): Promise<FullAppDatabaseState> {
       lastUpdated,
       tahunAktif: settings.tahunAktif || 2026,
       pengaturanKas: settings,
-      wargaList: wargaRows.map(mapRowToWarga).sort((a, b) => (a.no || 0) - (b.no || 0)),
+      wargaList: dedupeEntities(
+        wargaRows.map(mapRowToWarga).sort((a, b) => (a.no || 0) - (b.no || 0)),
+        deletedIds.warga,
+        (a, b) => Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
+      ),
       transactions: txRows.map(mapRowToTransaction).sort((a, b) => b.tanggal.localeCompare(a.tanggal)),
       bantuanList: bantuanRows.map(mapRowToBantuan),
       pengumumanList: pengumumanRows.map(mapRowToPengumuman).sort((a, b) => b.tanggal.localeCompare(a.tanggal)),
@@ -1181,7 +1224,11 @@ export async function searchWargaSql(user: AuthUser, searchQuery = '', rtFilter 
   try {
     await ensureSqlSeeded();
     const rows = await db.select().from(warga);
-    let list = rows.map(mapRowToWarga).sort((a, b) => (a.no || 0) - (b.no || 0));
+    let list = dedupeEntities(
+      rows.map(mapRowToWarga).sort((a, b) => (a.no || 0) - (b.no || 0)),
+      [],
+      (a, b) => Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
+    );
 
     if (user.role === 'warga') {
       const targetKK = String(user.noKK || '').replace(/\D/g, '');
@@ -1216,6 +1263,7 @@ export async function searchWargaSql(user: AuthUser, searchQuery = '', rtFilter 
 }
 
 export async function upsertWargaSql(incoming: Warga): Promise<{ warga: Warga; revision: number }> {
+  return withDbWriteLock(async () => {
   try {
     await ensureSqlSeeded();
     const nowIso = new Date().toISOString();
@@ -1257,6 +1305,7 @@ export async function upsertWargaSql(incoming: Warga): Promise<{ warga: Warga; r
     console.error('Upsert warga SQL error:', err);
     throw new Error('Gagal menyimpan data warga ke database server.', { cause: err });
   }
+  });
 }
 
 export async function updateWargaSelfSql(
@@ -1300,158 +1349,179 @@ export async function updateWargaSelfSql(
 }
 
 export async function bulkImportWargaBantuanSql(params: {
-  wargaList: Array<Omit<Warga, 'id' | 'no'>>;
-  bantuanList: Array<Omit<BantuanPemerintah, 'id'>>;
+  wargaList: Array<Omit<Warga, 'id' | 'no'> & { id?: string }>;
+  bantuanList: Array<Omit<BantuanPemerintah, 'id'> & { id?: string }>;
   mergeExisting: boolean;
   tahunAktif: number;
 }): Promise<{ addedKK: number; updatedKK: number; addedBantuan: number; revision: number }> {
-  try {
-    await ensureSqlSeeded();
-    const nowIso = new Date().toISOString();
-    const baseTime = Date.now();
-    const existingWargaRows = await db.select().from(warga);
-    const existingWarga = existingWargaRows.map(mapRowToWarga);
-    const existingBantuanRows = await db.select().from(bantuan);
-    const existingBantuan = existingBantuanRows.map(mapRowToBantuan);
+  return withDbWriteLock(async () => {
+    try {
+      await ensureSqlSeeded();
+      const nowIso = new Date().toISOString();
+      const baseTime = Date.now();
+      const existingWargaRows = await db.select().from(warga);
+      const existingWarga = existingWargaRows.map(mapRowToWarga);
+      const existingBantuanRows = await db.select().from(bantuan);
+      const existingBantuan = existingBantuanRows.map(mapRowToBantuan);
 
-    let addedKK = 0;
-    let updatedKK = 0;
-    let addedBantuan = 0;
+      let addedKK = 0;
+      let updatedKK = 0;
+      let addedBantuan = 0;
 
-    const wargaToUpsert: Warga[] = [];
-    const bantuanToInsert: BantuanPemerintah[] = [];
+      const wargaToUpsert: Warga[] = [];
+      const bantuanToInsert: BantuanPemerintah[] = [];
+      const usedIds = new Set(existingWarga.map((w) => w.id));
 
-    params.wargaList.forEach((incoming, idx) => {
-      const existing = incoming.noKK
-        ? existingWarga.find((w) => w.noKK === incoming.noKK)
-        : existingWarga.find((w) => w.nama.toLowerCase() === incoming.nama.toLowerCase());
+      params.wargaList.forEach((incoming, idx) => {
+        const findInPool = (pool: Warga[]) =>
+          incoming.noKK
+            ? pool.find((w) => w.noKK === incoming.noKK)
+            : pool.find((w) => w.nama.toLowerCase() === incoming.nama.toLowerCase());
 
-      if (existing) {
-        if (params.mergeExisting) {
-          const nextStatus = incoming.statusIuran || existing.statusIuran || 'Belum';
-          const merged: Warga = {
-            ...existing,
-            nama: incoming.nama || existing.nama,
-            noKK: incoming.noKK || existing.noKK,
-            nik: incoming.nik || existing.nik,
-            noRumah: incoming.noRumah || existing.noRumah,
-            rt: incoming.rt || existing.rt,
-            rw: incoming.rw || existing.rw,
-            alamat: incoming.alamat || existing.alamat,
-            kodePos: incoming.kodePos || existing.kodePos,
-            jenisKelamin: incoming.jenisKelamin || existing.jenisKelamin,
-            anggotaKeluarga:
-              incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
-                ? incoming.anggotaKeluarga
-                : existing.anggotaKeluarga,
-            jumlahJiwa:
-              incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
-                ? incoming.anggotaKeluarga.length
-                : existing.jumlahJiwa,
-            telepon: incoming.telepon || existing.telepon,
-            statusIuran: nextStatus,
-            statusIuranPerTahun: {
-              ...(existing.statusIuranPerTahun || {}),
-              [params.tahunAktif]: nextStatus,
-            },
+        const existing = findInPool(wargaToUpsert) || findInPool(existingWarga);
+
+        if (existing) {
+          if (params.mergeExisting) {
+            const nextStatus = incoming.statusIuran || existing.statusIuran || 'Belum';
+            const merged: Warga = {
+              ...existing,
+              nama: incoming.nama || existing.nama,
+              noKK: incoming.noKK || existing.noKK,
+              nik: incoming.nik || existing.nik,
+              noRumah: incoming.noRumah || existing.noRumah,
+              rt: incoming.rt || existing.rt,
+              rw: incoming.rw || existing.rw,
+              alamat: incoming.alamat || existing.alamat,
+              kodePos: incoming.kodePos || existing.kodePos,
+              jenisKelamin: incoming.jenisKelamin || existing.jenisKelamin,
+              anggotaKeluarga:
+                incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
+                  ? incoming.anggotaKeluarga
+                  : existing.anggotaKeluarga,
+              jumlahJiwa:
+                incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
+                  ? incoming.anggotaKeluarga.length
+                  : existing.jumlahJiwa,
+              telepon: incoming.telepon || existing.telepon,
+              statusIuran: nextStatus,
+              statusIuranPerTahun: {
+                ...(existing.statusIuranPerTahun || {}),
+                [params.tahunAktif]: nextStatus,
+              },
+              updatedAt: nowIso,
+            };
+            const queuedIdx = wargaToUpsert.findIndex((w) => w.id === merged.id);
+            if (queuedIdx >= 0) {
+              wargaToUpsert[queuedIdx] = merged;
+            } else {
+              wargaToUpsert.push(merged);
+              updatedKK++;
+            }
+          }
+        } else {
+          let candidateId =
+            incoming.id && !usedIds.has(incoming.id)
+              ? incoming.id
+              : `w_${baseTime}_${idx}_${randomBytes(3).toString('hex')}`;
+          while (usedIds.has(candidateId)) {
+            candidateId = `w_${baseTime}_${idx}_${randomBytes(4).toString('hex')}`;
+          }
+          usedIds.add(candidateId);
+
+          const newWarga: Warga = {
+            ...incoming,
+            id: candidateId,
+            no: existingWarga.length + addedKK + 1,
+            statusIuran: incoming.statusIuran || 'Belum',
+            statusIuranPerTahun: { [params.tahunAktif]: incoming.statusIuran || 'Belum' },
+            pin: incoming.pin || '123456',
             updatedAt: nowIso,
           };
-          wargaToUpsert.push(merged);
-          updatedKK++;
+          wargaToUpsert.push(newWarga);
+          addedKK++;
         }
-      } else {
-        const newWarga: Warga = {
-          ...incoming,
-          id: `w_${baseTime}_${idx}`,
-          no: existingWarga.length + addedKK + 1,
-          statusIuran: incoming.statusIuran || 'Belum',
-          statusIuranPerTahun: { [params.tahunAktif]: incoming.statusIuran || 'Belum' },
-          pin: incoming.pin || '123456',
-          updatedAt: nowIso,
-        };
-        wargaToUpsert.push(newWarga);
-        addedKK++;
-      }
-    });
+      });
 
-    params.bantuanList.forEach((b, idx) => {
-      const dup = existingBantuan.some(
-        (ex) =>
+      params.bantuanList.forEach((b, idx) => {
+        const matchesBantuan = (ex: BantuanPemerintah) =>
           ex.noKK === b.noKK &&
           ex.namaPenerima.toLowerCase() === b.namaPenerima.toLowerCase() &&
           ex.jenisBantuan.toLowerCase() === b.jenisBantuan.toLowerCase() &&
-          ex.tanggal === b.tanggal
-      );
-      if (!dup) {
-        bantuanToInsert.push({
-          ...b,
-          id: `b_${baseTime}_${idx}`,
-          updatedAt: nowIso,
-        });
-        addedBantuan++;
-      }
-    });
+          ex.tanggal === b.tanggal;
+        const dup = existingBantuan.some(matchesBantuan) || bantuanToInsert.some(matchesBantuan);
+        if (!dup) {
+          bantuanToInsert.push({
+            ...b,
+            id: b.id || `b_${baseTime}_${idx}_${randomBytes(3).toString('hex')}`,
+            updatedAt: nowIso,
+          });
+          addedBantuan++;
+        }
+      });
 
-    const meta = await db.transaction(async (tx) => {
-      for (const item of wargaToUpsert) {
-        const row = toWargaRow(item, nowIso);
-        await tx.delete(deletedEntities).where(eq(deletedEntities.id, `warga:${row.id}`));
-        await tx
-          .insert(warga)
-          .values(row)
-          .onConflictDoUpdate({ target: warga.id, set: row });
-      }
-      for (const bItem of bantuanToInsert) {
-        const row = toBantuanRow(bItem, nowIso);
-        await tx
-          .insert(bantuan)
-          .values(row)
-          .onConflictDoUpdate({ target: bantuan.id, set: row });
-      }
-      return bumpRevisionTx(tx);
-    });
+      const meta = await db.transaction(async (tx) => {
+        for (const item of wargaToUpsert) {
+          const row = toWargaRow(item, nowIso);
+          await tx.delete(deletedEntities).where(eq(deletedEntities.id, `warga:${row.id}`));
+          await tx
+            .insert(warga)
+            .values(row)
+            .onConflictDoUpdate({ target: warga.id, set: row });
+        }
+        for (const bItem of bantuanToInsert) {
+          const row = toBantuanRow(bItem, nowIso);
+          await tx
+            .insert(bantuan)
+            .values(row)
+            .onConflictDoUpdate({ target: bantuan.id, set: row });
+        }
+        return bumpRevisionTx(tx);
+      });
 
-    return { addedKK, updatedKK, addedBantuan, revision: meta.revision };
-  } catch (err) {
-    console.error('Bulk import SQL error:', err);
-    throw new Error('Gagal mengimpor data Excel ke database server.', { cause: err });
-  }
+      return { addedKK, updatedKK, addedBantuan, revision: meta.revision };
+    } catch (err) {
+      console.error('Bulk import SQL error:', err);
+      throw new Error('Gagal mengimpor data Excel ke database server.', { cause: err });
+    }
+  });
 }
 
 export async function deleteWargaSql(idOrKK: string): Promise<{ revision: number; totalWarga: number }> {
-  try {
-    await ensureSqlSeeded();
-    const nowIso = new Date().toISOString();
-    const rows = await db.select().from(warga);
-    const matchingIds = rows
-      .filter((r) => r.id === idOrKK || (r.noKK && r.noKK === idOrKK))
-      .map((r) => r.id);
-    if (matchingIds.length === 0) {
-      matchingIds.push(idOrKK);
-    }
-
-    const meta = await db.transaction(async (tx) => {
-      await tx.delete(warga).where(inArray(warga.id, matchingIds));
-      for (const id of matchingIds) {
-        await tx
-          .insert(deletedEntities)
-          .values({
-            id: `warga:${id}`,
-            entityType: 'warga',
-            entityId: id,
-            deletedAt: nowIso,
-          })
-          .onConflictDoNothing();
+  return withDbWriteLock(async () => {
+    try {
+      await ensureSqlSeeded();
+      const nowIso = new Date().toISOString();
+      const rows = await db.select().from(warga);
+      const matchingIds = rows
+        .filter((r) => r.id === idOrKK || (r.noKK && r.noKK === idOrKK))
+        .map((r) => r.id);
+      if (matchingIds.length === 0) {
+        matchingIds.push(idOrKK);
       }
-      return bumpRevisionTx(tx);
-    });
 
-    const remaining = await db.select({ id: warga.id }).from(warga);
-    return { revision: meta.revision, totalWarga: remaining.length };
-  } catch (err) {
-    console.error('Delete warga SQL error:', err);
-    throw new Error('Gagal menghapus data warga dari database server.', { cause: err });
-  }
+      const meta = await db.transaction(async (tx) => {
+        await tx.delete(warga).where(inArray(warga.id, matchingIds));
+        for (const id of matchingIds) {
+          await tx
+            .insert(deletedEntities)
+            .values({
+              id: `warga:${id}`,
+              entityType: 'warga',
+              entityId: id,
+              deletedAt: nowIso,
+            })
+            .onConflictDoNothing();
+        }
+        return bumpRevisionTx(tx);
+      });
+
+      const remaining = await db.select({ id: warga.id }).from(warga);
+      return { revision: meta.revision, totalWarga: remaining.length };
+    } catch (err) {
+      console.error('Delete warga SQL error:', err);
+      throw new Error('Gagal menghapus data warga dari database server.', { cause: err });
+    }
+  });
 }
 
 export async function upsertTransactionSql(txItem: Transaction): Promise<number> {
@@ -1672,6 +1742,7 @@ export async function mergeAndSaveFullStateSql(
   payload: any,
   options?: { reviveAdminIds?: string[] }
 ): Promise<FullAppDatabaseState> {
+  return withDbWriteLock(async () => {
   try {
     await ensureSqlSeeded();
 
@@ -1804,6 +1875,7 @@ export async function mergeAndSaveFullStateSql(
     console.error('Merge and save SQL error:', err);
     throw new Error('Gagal menyinkronkan data ke database server.', { cause: err });
   }
+  });
 }
 
 export async function syncAdminAccountSql(params: {
