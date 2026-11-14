@@ -123,7 +123,7 @@ async function readApiJsonSafely(
       json: null,
       errorMessage: isAuthRedirect
         ? `Akses ke ${endpointUrl} dialihkan ke halaman autentikasi AI Studio (HTTP ${res.status}). APK/perangkat luar memerlukan URL Server Publik (Shared/Production URL) yang dapat diakses tanpa login browser AI Studio.`
-        : `Server mengembalikan HTML (HTTP ${res.status}) bukan JSON API pada ${endpointUrl}. Pastikan backend Node.js/Express aktif dan URL Server sudah benar.`,
+        : `Server mengembalikan HTML (HTTP ${res.status}) bukan JSON API pada ${endpointUrl}. Pastikan backend Node.js/Vercel /api aktif dan URL Server sudah benar.`,
     };
   }
 
@@ -132,7 +132,7 @@ async function readApiJsonSafely(
       json: null,
       errorMessage:
         res.status === 404
-          ? `Endpoint API tidak ditemukan (HTTP 404) pada ${endpointUrl}. Server publik belum di-publish atau URL backend belum sesuai.`
+          ? `Endpoint API tidak ditemukan (HTTP 404) pada ${endpointUrl}. Hosting domain ini belum menjalankan backend /api (redeploy versi terbaru dengan folder /api + DATABASE_URL, atau atur Alamat Server API).`
           : `Server merespons kosong (HTTP ${res.status}) pada ${endpointUrl}.`,
     };
   }
@@ -144,6 +144,12 @@ async function readApiJsonSafely(
       errorMessage: parsed?.message,
     };
   } catch {
+    if (res.status === 404) {
+      return {
+        json: null,
+        errorMessage: `Endpoint API tidak ditemukan (HTTP 404, bukan JSON) pada ${endpointUrl}. Domain ini baru menayangkan frontend statis: redeploy versi terbaru (yang memiliki folder /api & vercel.json + DATABASE_URL) atau masukkan URL server backend aktif di Pengaturan Alamat Server API.`,
+      };
+    }
     return {
       json: null,
       errorMessage: `Respons server tidak valid (HTTP ${res.status}, bukan JSON) dari ${endpointUrl}.`,

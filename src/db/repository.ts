@@ -3,7 +3,7 @@ import path from 'path';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'url';
 import { eq, inArray, sql } from 'drizzle-orm';
-import { db } from './index.ts';
+import { db, getDatabaseConfigStatus, pool } from './index.ts';
 import {
   adminAccounts,
   appSettings,
@@ -207,17 +207,250 @@ function readLegacyJsonFile(): any | null {
 
 let seedPromise: Promise<void> | null = null;
 let hasCheckedInitialSeed = false;
+let hasEnsuredTables = false;
+let ensureTablesPromise: Promise<void> | null = null;
+
+function assertDatabaseConfigured() {
+  const status = getDatabaseConfigStatus();
+  if (!status.configured) {
+    throw new Error(
+      status.errorMessage ||
+        'Database PostgreSQL belum dikonfigurasi (DATABASE_URL / SQL_HOST tidak ditemukan).'
+    );
+  }
+  return status;
+}
 
 /**
- * Automatically migrates existing data_store.json data into Cloud SQL on first access
- * if Cloud SQL has no sync_meta row yet. Idempotent and safe under concurrency.
+ * Ensures all required PostgreSQL tables exist (idempotent DDL) so fresh databases
+ * connected via DATABASE_URL on Vercel/Neon/Supabase work immediately on first boot
+ * without touching existing Cloud SQL rows.
+ */
+export async function ensureTablesExistSql(): Promise<void> {
+  if (hasEnsuredTables) return;
+  assertDatabaseConfigured();
+  if (!ensureTablesPromise) {
+    ensureTablesPromise = (async () => {
+      try {
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            uid TEXT NOT NULL UNIQUE,
+            email TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'warga',
+            created_at TIMESTAMP DEFAULT NOW()
+          );
+
+          CREATE TABLE IF NOT EXISTS app_settings (
+            id TEXT PRIMARY KEY,
+            tahun_aktif INTEGER NOT NULL DEFAULT 2026,
+            nominal_jimpitan_tahunan BIGINT NOT NULL DEFAULT 300000,
+            nominal_jimpitan_bulanan BIGINT NOT NULL DEFAULT 25000,
+            nominal_kematian_tahunan BIGINT NOT NULL DEFAULT 120000,
+            nominal_kematian_bulanan BIGINT NOT NULL DEFAULT 10000,
+            saldo_awal_kas_umum BIGINT NOT NULL DEFAULT 0,
+            saldo_awal_kas_kematian BIGINT NOT NULL DEFAULT 0,
+            keterangan_saldo_awal TEXT NOT NULL DEFAULT 'Sisa Kas RT Periode Lalu',
+            tanggal_saldo_awal TEXT NOT NULL DEFAULT '2026-01-01',
+            kontak_ketua_rt JSONB NOT NULL,
+            kontak_bendahara JSONB NOT NULL,
+            saldo_berlanjut_per_tahun JSONB,
+            profil_rt JSONB,
+            updated_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS admin_accounts (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            nama TEXT NOT NULL,
+            rt TEXT NOT NULL DEFAULT '08',
+            rw TEXT NOT NULL DEFAULT '05',
+            kontak TEXT NOT NULL DEFAULT '',
+            jabatan TEXT NOT NULL DEFAULT 'Ketua RT',
+            status TEXT NOT NULL DEFAULT 'aktif',
+            terakhir_login TEXT,
+            terakhir_sinkronisasi TEXT,
+            updated_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS warga (
+            id TEXT PRIMARY KEY,
+            no INTEGER NOT NULL DEFAULT 0,
+            nama TEXT NOT NULL,
+            no_kk TEXT NOT NULL DEFAULT '',
+            nik TEXT,
+            no_rumah TEXT NOT NULL DEFAULT '',
+            rt TEXT NOT NULL DEFAULT '08',
+            rw TEXT DEFAULT '05',
+            alamat TEXT,
+            kode_pos TEXT,
+            tanggal_dikeluarkan TEXT,
+            jenis_kelamin TEXT NOT NULL DEFAULT 'Laki-laki',
+            jumlah_jiwa INTEGER NOT NULL DEFAULT 1,
+            status_iuran TEXT NOT NULL DEFAULT 'Belum',
+            anggota_keluarga JSONB,
+            riwayat_iuran JSONB,
+            riwayat_kematian JSONB,
+            riwayat_iuran_per_tahun JSONB,
+            riwayat_kematian_per_tahun JSONB,
+            status_iuran_per_tahun JSONB,
+            iuran_umum_terbayar BIGINT,
+            iuran_kematian_terbayar BIGINT,
+            pilihan_skema TEXT,
+            telepon TEXT,
+            pin TEXT,
+            pin_attempts INTEGER,
+            pin_locked_until BIGINT,
+            riwayat_perubahan_kk JSONB,
+            updated_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS transactions (
+            id TEXT PRIMARY KEY,
+            tanggal TEXT NOT NULL,
+            kategori TEXT NOT NULL,
+            keterangan TEXT NOT NULL DEFAULT '',
+            nominal BIGINT NOT NULL DEFAULT 0,
+            tipe TEXT NOT NULL DEFAULT 'masuk',
+            nama_warga TEXT,
+            nomor_rumah TEXT,
+            no_kk TEXT,
+            is_saldo_awal BOOLEAN,
+            tahun INTEGER DEFAULT 2026,
+            rt_scope TEXT,
+            updated_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS bantuan (
+            id TEXT PRIMARY KEY,
+            jenis_bantuan TEXT NOT NULL,
+            nama_penerima TEXT NOT NULL,
+            no_kk TEXT NOT NULL DEFAULT '',
+            nik TEXT,
+            nominal_atau_barang TEXT NOT NULL DEFAULT '',
+            tanggal TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'Sudah Disalurkan',
+            sumber_dana TEXT,
+            keterangan TEXT,
+            rt_scope TEXT,
+            updated_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS pengumuman (
+            id TEXT PRIMARY KEY,
+            judul TEXT NOT NULL,
+            tanggal TEXT NOT NULL,
+            tanggal_berakhir TEXT NOT NULL DEFAULT '',
+            kategori TEXT NOT NULL DEFAULT 'Umum',
+            isi TEXT NOT NULL,
+            penulis TEXT NOT NULL DEFAULT '',
+            nama_pengurus TEXT,
+            jabatan_pengurus TEXT,
+            penting BOOLEAN,
+            tentang TEXT,
+            hari_tanggal_acara TEXT,
+            waktu_acara TEXT,
+            tempat_acara TEXT,
+            keterangan_tambahan TEXT,
+            rt_scope TEXT,
+            updated_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS dokumen (
+            id TEXT PRIMARY KEY,
+            judul TEXT NOT NULL,
+            nama_file TEXT NOT NULL,
+            ukuran_kb INTEGER NOT NULL DEFAULT 0,
+            tanggal_upload TEXT NOT NULL DEFAULT '',
+            kategori TEXT NOT NULL DEFAULT 'Lainnya',
+            keterangan TEXT,
+            data_base64 TEXT,
+            rt_scope TEXT,
+            updated_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS laporan_bulanan (
+            id TEXT PRIMARY KEY,
+            rt TEXT NOT NULL,
+            rw TEXT NOT NULL,
+            nama_admin_pengirim TEXT NOT NULL,
+            tanggal_kirim TEXT NOT NULL,
+            bulan_tahun TEXT NOT NULL,
+            tahun INTEGER NOT NULL DEFAULT 2026,
+            total_kk INTEGER NOT NULL DEFAULT 0,
+            total_jiwa INTEGER NOT NULL DEFAULT 0,
+            total_lunas_iuran INTEGER NOT NULL DEFAULT 0,
+            total_belum_lunas INTEGER NOT NULL DEFAULT 0,
+            total_kas_masuk_bulan_ini BIGINT NOT NULL DEFAULT 0,
+            total_kas_keluar_bulan_ini BIGINT NOT NULL DEFAULT 0,
+            saldo_kas_umum_berjalan BIGINT NOT NULL DEFAULT 0,
+            saldo_kas_kematian_berjalan BIGINT NOT NULL DEFAULT 0,
+            total_penerima_bansos INTEGER NOT NULL DEFAULT 0,
+            catatan_khusus TEXT,
+            status_verifikasi TEXT NOT NULL DEFAULT 'Menunggu Verifikasi',
+            updated_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS deleted_entities (
+            id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            deleted_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS sync_meta (
+            id TEXT PRIMARY KEY,
+            revision BIGINT NOT NULL DEFAULT 1,
+            last_updated TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS auth_sessions (
+            token_hash TEXT PRIMARY KEY,
+            role TEXT NOT NULL,
+            username TEXT NOT NULL,
+            nama TEXT NOT NULL,
+            no_kk TEXT,
+            warga_id TEXT,
+            rt_scope TEXT,
+            expires_at BIGINT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+        `);
+        hasEnsuredTables = true;
+      } finally {
+        ensureTablesPromise = null;
+      }
+    })();
+  }
+  await ensureTablesPromise;
+}
+
+/**
+ * Automatically migrates existing data_store.json data into PostgreSQL on first access
+ * if PostgreSQL has no sync_meta row yet. Idempotent and safe under concurrency.
  */
 export async function ensureSqlSeeded(): Promise<void> {
   if (hasCheckedInitialSeed) return;
+  assertDatabaseConfigured();
   if (!seedPromise) {
     seedPromise = (async () => {
       try {
-        const metaRows = await db.select().from(syncMeta).where(eq(syncMeta.id, 'global')).limit(1);
+        let metaRows;
+        try {
+          metaRows = await db.select().from(syncMeta).where(eq(syncMeta.id, 'global')).limit(1);
+          hasEnsuredTables = true;
+        } catch (queryErr: any) {
+          const errCode = queryErr?.code || queryErr?.cause?.code;
+          const errMsg = String(queryErr?.message || '');
+          if (errCode === '42P01' || errMsg.includes('does not exist')) {
+            await ensureTablesExistSql();
+            metaRows = await db.select().from(syncMeta).where(eq(syncMeta.id, 'global')).limit(1);
+          } else {
+            throw queryErr;
+          }
+        }
+
         if (metaRows.length > 0) {
           hasCheckedInitialSeed = true;
           return;
@@ -254,7 +487,7 @@ export async function ensureSqlSeeded(): Promise<void> {
             },
             initRevision
           );
-          console.log('Legacy data_store.json berhasil dimigrasikan ke Cloud SQL PostgreSQL.');
+          console.log('Legacy data_store.json berhasil dimigrasikan ke PostgreSQL.');
         } else {
           await db
             .insert(appSettings)
@@ -287,9 +520,15 @@ export async function ensureSqlSeeded(): Promise<void> {
             .onConflictDoNothing();
         }
         hasCheckedInitialSeed = true;
-      } catch (err) {
+      } catch (err: any) {
         console.error('SQL initial seed error:', err);
-        throw new Error('Gagal menginisialisasi database server pusat.', { cause: err });
+        const detail = err?.code ? `${err.code}: ${err.message}` : err?.message;
+        throw new Error(
+          detail && detail.includes('belum dikonfigurasi')
+            ? detail
+            : `Gagal menginisialisasi database server pusat (${detail || 'SQL error'}).`,
+          { cause: err }
+        );
       } finally {
         seedPromise = null;
       }
@@ -872,12 +1111,14 @@ export async function getDatabaseSnapshotForUser(user: AuthUser): Promise<FullAp
 
 export async function checkDatabaseHealthSql(): Promise<{
   connected: boolean;
+  engine: string;
   revision: number;
   lastUpdated: string;
   totalWarga: number;
   totalAdminAccounts: number;
 }> {
   try {
+    const status = assertDatabaseConfigured();
     await db.execute(sql`SELECT 1`);
     await ensureSqlSeeded();
     const [metaRows, wargaCountRows, adminCountRows] = await Promise.all([
@@ -887,6 +1128,7 @@ export async function checkDatabaseHealthSql(): Promise<{
     ]);
     return {
       connected: true,
+      engine: status.engineLabel,
       revision: metaRows[0] ? Number(metaRows[0].revision) || 1 : 1,
       lastUpdated: metaRows[0]?.lastUpdated || new Date().toISOString(),
       totalWarga: Number(wargaCountRows[0]?.count) || 0,
@@ -895,6 +1137,9 @@ export async function checkDatabaseHealthSql(): Promise<{
   } catch (err: any) {
     console.error('Database health check failed:', err);
     const detail = err?.code ? `${err.code}: ${err.message}` : err?.message;
+    if (detail && detail.includes('belum dikonfigurasi')) {
+      throw new Error(detail, { cause: err });
+    }
     throw new Error(`Koneksi database server bermasalah (${detail || 'SQL error'}).`, { cause: err });
   }
 }
@@ -913,9 +1158,9 @@ export async function getPublicBootstrapInfoSql() {
       revision: metaRows[0] ? Number(metaRows[0].revision) || 1 : 1,
       lastUpdated: metaRows[0]?.lastUpdated || new Date().toISOString(),
     };
-  } catch (err) {
+  } catch (err: any) {
     console.error('Public bootstrap info error:', err);
-    throw new Error('Gagal memuat info server.', { cause: err });
+    throw new Error(err?.message || 'Gagal memuat info server.', { cause: err });
   }
 }
 
@@ -1144,9 +1389,15 @@ export async function authenticateAndCreateSessionSql(params: {
     });
 
     return { ok: true, token: rawToken, user: matchedUser };
-  } catch (err) {
+  } catch (err: any) {
     console.error('Authentication SQL error:', err);
-    throw new Error('Gagal melakukan autentikasi ke database server.', { cause: err });
+    const detail = err?.message || '';
+    throw new Error(
+      detail.includes('belum dikonfigurasi') || detail.includes('menginisialisasi database')
+        ? detail
+        : `Gagal melakukan autentikasi ke database server (${detail || 'SQL error'}).`,
+      { cause: err }
+    );
   }
 }
 
@@ -1170,12 +1421,29 @@ export async function createSessionForAdminUserSql(user: AuthUser): Promise<stri
 
 export async function verifySessionTokenSql(rawToken: string): Promise<ServerSessionRecord | null> {
   try {
+    assertDatabaseConfigured();
     const tokenHash = hashToken(rawToken);
-    const rows = await db
-      .select()
-      .from(authSessions)
-      .where(eq(authSessions.tokenHash, tokenHash))
-      .limit(1);
+    let rows;
+    try {
+      rows = await db
+        .select()
+        .from(authSessions)
+        .where(eq(authSessions.tokenHash, tokenHash))
+        .limit(1);
+    } catch (queryErr: any) {
+      const errCode = queryErr?.code || queryErr?.cause?.code;
+      const errMsg = String(queryErr?.message || '');
+      if (errCode === '42P01' || errMsg.includes('does not exist')) {
+        await ensureTablesExistSql();
+        rows = await db
+          .select()
+          .from(authSessions)
+          .where(eq(authSessions.tokenHash, tokenHash))
+          .limit(1);
+      } else {
+        throw queryErr;
+      }
+    }
     if (rows.length === 0) return null;
     const session = rows[0];
     if (Date.now() > Number(session.expiresAt)) {
@@ -1205,9 +1473,9 @@ export async function verifySessionTokenSql(rawToken: string): Promise<ServerSes
       isPinAuthenticated: false,
       expiresAt: Number(session.expiresAt),
     };
-  } catch (err) {
+  } catch (err: any) {
     console.error('Verify session token SQL error:', err);
-    throw new Error('Gagal memverifikasi sesi server.', { cause: err });
+    throw new Error(err?.message || 'Gagal memverifikasi sesi server.', { cause: err });
   }
 }
 

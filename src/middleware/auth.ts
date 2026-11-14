@@ -1,5 +1,4 @@
 import type { Request, Response, NextFunction } from 'express';
-import { adminAuth } from '../lib/firebase-admin.ts';
 import { verifySessionTokenSql } from '../db/repository.ts';
 import type { AuthUser } from '../types.ts';
 
@@ -45,25 +44,17 @@ export function createRequireAuth(options?: { allowQueryToken?: boolean }) {
         req.authToken = token;
         return next();
       }
-    } catch (err) {
-      console.error('SQL auth session verification error:', err);
-    }
-
-    // Optional Firebase Admin token verification fallback
-    try {
-      const decoded = await adminAuth.verifyIdToken(token);
-      req.authUser = {
-        role: decoded.email === 'ar01071997@gmail.com' ? 'server' : 'warga',
-        username: decoded.email || decoded.uid,
-        nama: decoded.name || decoded.email || 'Pengguna',
-        isPinAuthenticated: false,
-      };
-      req.authToken = token;
-      return next();
-    } catch {
       return res.status(401).json({
         success: false,
         message: 'Sesi login tidak valid atau sudah kedaluwarsa. Silakan login kembali.',
+      });
+    } catch (err: any) {
+      console.error('SQL auth session verification error:', err);
+      return res.status(503).json({
+        success: false,
+        message:
+          err?.message ||
+          'Gagal memverifikasi sesi ke database server. Periksa koneksi database server.',
       });
     }
   };

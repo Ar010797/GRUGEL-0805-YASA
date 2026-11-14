@@ -444,9 +444,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               </div>
 
               {serverError && (
-                <div className="flex items-center gap-2 rounded-xl bg-rose-50 p-3 text-xs font-semibold text-rose-700 border border-rose-200">
-                  <AlertCircle size={16} className="shrink-0" />
-                  <span>{serverError}</span>
+                <div className="flex items-start gap-2 rounded-xl bg-rose-50 p-3 text-xs font-semibold text-rose-700 border border-rose-200">
+                  <AlertCircle size={16} className="shrink-0 mt-0.5" />
+                  <span className="min-w-0 break-words">{serverError}</span>
                 </div>
               )}
 
@@ -528,7 +528,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 >
                   <div className="flex items-start gap-2">
                     <AlertCircle size={16} className="shrink-0 mt-0.5" />
-                    <span>{adminError}</span>
+                    <span className="min-w-0 break-words">{adminError}</span>
                   </div>
 
                   {pendingSyncAdmin && (
@@ -786,9 +786,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               </div>
 
               {wargaError && (
-                <div className="flex items-center gap-2 rounded-xl bg-rose-50 p-3 text-xs font-semibold text-rose-700 border border-rose-200">
-                  <AlertCircle size={16} className="shrink-0" />
-                  <span>{wargaError}</span>
+                <div className="flex items-start gap-2 rounded-xl bg-rose-50 p-3 text-xs font-semibold text-rose-700 border border-rose-200">
+                  <AlertCircle size={16} className="shrink-0 mt-0.5" />
+                  <span className="min-w-0 break-words">{wargaError}</span>
                 </div>
               )}
 
@@ -904,14 +904,23 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             )}
 
             {activeDiagnosticError && (
-              <div className="w-full rounded-xl bg-rose-50 border border-rose-200 p-2.5 text-left text-[11px] text-rose-800 space-y-1">
+              <div className="w-full rounded-xl bg-rose-50 border border-rose-200 p-2.5 text-left text-[11px] text-rose-800 space-y-1.5">
                 <p className="font-bold flex items-start gap-1.5 text-rose-900">
                   <AlertCircle size={13} className="shrink-0 mt-0.5" />
-                  <span>{activeDiagnosticError}</span>
+                  <span className="min-w-0 break-words">{activeDiagnosticError}</span>
                 </p>
                 <p className="text-[10px] text-rose-700 break-all">
                   Endpoint diuji: {diagnosticResult?.endpointUrl || getResolvedEndpointDisplay('/api/health')}
                 </p>
+                {!showUrlConfig && (
+                  <button
+                    type="button"
+                    onClick={() => setShowUrlConfig(true)}
+                    className="inline-flex items-center gap-1 rounded-lg bg-white border border-rose-300 px-2 py-1 text-[10px] font-bold text-rose-800 hover:bg-rose-100 cursor-pointer"
+                  >
+                    Atur Alamat Server API (APK / Domain Lain)
+                  </button>
+                )}
               </div>
             )}
 
