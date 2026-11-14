@@ -816,7 +816,7 @@ export const exportKartuKeluargaPemerintah_PDF = async (
   const kabStr = (profilRT?.kabupaten || 'Banyumas').replace(/^Kabupaten\s+/i, '');
   const provStr = (profilRT?.provinsi || 'Jawa Tengah').toUpperCase();
   const kodePosStr = warga.kodePos || profilRT?.kodePos || '53183';
-  const noKK = warga.noKK || '3302211101230002';
+  const noKK = warga.noKK || '3302000000000001';
   const alamatWarga = (warga.alamat || desaStr).toUpperCase();
 
   // Double Frame Border Standard Blangko Dukcapil

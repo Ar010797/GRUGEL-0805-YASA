@@ -24,10 +24,8 @@ import {
   ArrowRight,
   Eye,
   EyeOff,
-  Cloud,
+  Database,
   Wifi,
-  LogOut,
-  Smartphone,
 } from 'lucide-react';
 import {
   AdminRTAccount,
@@ -51,15 +49,11 @@ interface ServerKontrolViewProps {
   pengaturanKas: PengaturanKas;
   pengumumanList?: PengumumanRT[];
   dokumenList?: DokumenPdfWarga[];
-  cloudUser?: { email?: string | null; displayName?: string | null } | null;
-  isCloudAdmin?: boolean;
+  serverConnected?: boolean;
   sseConnected?: boolean;
   cloudSyncBusy?: boolean;
   cloudError?: string | null;
-  onConnectCloud?: () => Promise<void> | void;
-  onDisconnectCloud?: () => Promise<void> | void;
   onForceSyncNow?: () => Promise<void> | void;
-  onOpenMedianPairing?: (mode: 'receive' | 'authorize') => void;
   onAddAdminAccount: (acc: Omit<AdminRTAccount, 'id'>) => void;
   onUpdateAdminAccount: (id: string, acc: Partial<AdminRTAccount>) => void;
   onDeleteAdminAccount: (id: string) => void;
@@ -77,15 +71,11 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
   pengaturanKas,
   pengumumanList = [],
   dokumenList = [],
-  cloudUser,
-  isCloudAdmin = false,
+  serverConnected = true,
   sseConnected = false,
   cloudSyncBusy = false,
   cloudError = null,
-  onConnectCloud,
-  onDisconnectCloud,
   onForceSyncNow,
-  onOpenMedianPairing,
   onAddAdminAccount,
   onUpdateAdminAccount,
   onDeleteAdminAccount,
@@ -591,35 +581,41 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
         </div>
       )}
 
-      {/* TAB 3: KEAMANAN & CADANGAN CLOUD */}
+      {/* TAB 3: KEAMANAN & CADANGAN SERVER */}
       {activeTab === 'database' && (
         <div className="space-y-6 max-w-3xl">
-          {/* Cloud Firestore & Live Real-time Sync Panel */}
+          {/* Central SQL Database & Live Real-time Sync Panel */}
           <div className="rounded-3xl bg-white p-6 border border-slate-200 shadow-xs space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-100 text-indigo-700">
-                  <Cloud size={22} />
+                  <Database size={22} />
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-slate-900">
-                    Sinkronisasi Cloud & Real-Time Antar Aplikasi
+                    Database Server Pusat (SQL &amp; REST API)
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Menghubungkan data antara aplikasi Median Android, PWA/Web terinstal, akun Warga, Admin RT, dan Server Pusat secara otomatis
+                    Seluruh perangkat (Admin HP, Warga HP, Desktop, dan APK) terhubung langsung ke satu database server pusat secara online
                   </p>
                 </div>
               </div>
 
               <span
                 className={`inline-flex items-center gap-1.5 self-start sm:self-center rounded-full px-3 py-1 text-[11px] font-bold border ${
-                  sseConnected
+                  sseConnected || serverConnected
                     ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                    : 'bg-amber-50 text-amber-800 border-amber-200'
+                    : 'bg-rose-50 text-rose-800 border-rose-200'
                 }`}
               >
                 <Wifi size={12} />
-                <span>{sseConnected ? 'Server Live Terhubung' : 'Menghubungkan Server...'}</span>
+                <span>
+                  {sseConnected
+                    ? 'Database & SSE Live Terhubung'
+                    : serverConnected
+                    ? 'Database Server Online'
+                    : 'Koneksi Server Terputus'}
+                </span>
               </span>
             </div>
 
@@ -627,28 +623,28 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                   <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-                    Status Cloud Firestore Lintas-Server
+                    Status Koneksi &amp; Sinkronisasi Server Pusat
                   </span>
-                  {cloudUser ? (
-                    <div className="mt-1 flex flex-wrap items-center gap-2">
-                      <span className="text-xs font-extrabold text-emerald-800">
-                        Terhubung: {cloudUser.email || cloudUser.displayName || 'Akun Google'}
-                      </span>
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                          isCloudAdmin
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : 'bg-amber-100 text-amber-800'
-                        }`}
-                      >
-                        {isCloudAdmin ? 'Admin Cloud Terverifikasi' : 'Akses Baca Terbatas'}
-                      </span>
-                    </div>
-                  ) : (
-                    <p className="mt-1 text-xs text-slate-600">
-                      Belum terhubung ke Google Cloud Firestore. Hubungkan akun admin agar data di aplikasi Median & web berbeda otomatis menyatu ke satu database cloud.
-                    </p>
-                  )}
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <span
+                      className={`text-xs font-extrabold ${
+                        serverConnected ? 'text-emerald-800' : 'text-rose-700'
+                      }`}
+                    >
+                      {serverConnected
+                        ? 'Terhubung ke Database Server Pusat Online'
+                        : 'Gagal terhubung ke Database Server Pusat'}
+                    </span>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                        sseConnected
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : 'bg-amber-100 text-amber-800'
+                      }`}
+                    >
+                      {sseConnected ? 'Sinkronisasi Real-Time Aktif' : 'Polling Sinkronisasi Aktif'}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -661,41 +657,6 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                     >
                       <RefreshCw size={14} className={cloudSyncBusy ? 'animate-spin' : ''} />
                       <span>Sinkronkan Sekarang</span>
-                    </button>
-                  )}
-
-                  {!cloudUser && onConnectCloud && (
-                    <button
-                      type="button"
-                      disabled={cloudSyncBusy}
-                      onClick={onConnectCloud}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-bold text-white shadow-xs transition-all cursor-pointer disabled:opacity-60"
-                    >
-                      <Cloud size={14} />
-                      <span>Hubungkan Cloud Firestore</span>
-                    </button>
-                  )}
-
-                  {onOpenMedianPairing && (
-                    <button
-                      type="button"
-                      onClick={() => onOpenMedianPairing(cloudUser ? 'authorize' : 'receive')}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 px-3.5 py-2 text-xs font-bold text-indigo-700 transition-all cursor-pointer"
-                      title="Hubungkan atau kirim sesi login Google Firebase ke Aplikasi Android Median APK"
-                    >
-                      <Smartphone size={14} />
-                      <span>{cloudUser ? 'Kirim Sesi ke Median APK' : 'Pairing APK Median'}</span>
-                    </button>
-                  )}
-
-                  {cloudUser && onDisconnectCloud && (
-                    <button
-                      type="button"
-                      onClick={onDisconnectCloud}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 px-3.5 py-2 text-xs font-bold text-rose-700 transition-all cursor-pointer"
-                    >
-                      <LogOut size={14} />
-                      <span>Putuskan Cloud</span>
                     </button>
                   )}
                 </div>
@@ -716,15 +677,15 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                 <ShieldCheck size={22} />
               </div>
               <div>
-                <h3 className="text-sm font-bold text-slate-900">Penyimpanan Aman Multi-Perangkat</h3>
+                <h3 className="text-sm font-bold text-slate-900">Penyimpanan Terpusat &amp; Cadangan JSON</h3>
                 <p className="text-xs text-slate-500">
-                  Data kas dan warga tersimpan otomatis di server real-time, Cloud Firestore, dan memori perangkat
+                  Data kas, iuran, pengumuman, bansos, dan warga tersimpan permanen di Database Server Pusat
                 </p>
               </div>
             </div>
 
             <p className="text-xs text-slate-600 leading-relaxed">
-              Sistem dilengkapi <strong>Sinkronisasi Otomatis Multi-Jalur</strong> (Server Live SSE, Cloud Firestore, dan Cache Lokal): setiap input atau perubahan data warga, iuran, kas, pengumuman, maupun bansos dari aplikasi Median langsung disebarkan ke seluruh akun Warga, Admin RT, Server Pusat, dan aplikasi web yang terinstal tanpa menimpa perubahan terbaru.
+              Setiap perubahan dari HP Admin, akun Warga, maupun Server Pusat dikirim melalui <strong>REST API Terautentikasi</strong> ke database SQL pusat dan disiarkan real-time melalui SSE ke semua perangkat yang sedang aktif. Data tetap utuh saat logout, ganti HP, atau instal ulang aplikasi.
             </p>
 
             <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">

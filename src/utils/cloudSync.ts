@@ -7,6 +7,7 @@ import {
   DokumenPdfWarga,
   AdminRTAccount,
   PembaruanBulananRT,
+  AuthUser,
 } from '../types';
 
 export interface DeletedIdsMap {
@@ -45,7 +46,66 @@ export interface AppDatabaseSchema {
   deletedIds?: Partial<DeletedIdsMap>;
 }
 
-const LOCAL_STORAGE_KEY = 'kas_rt08_rw05_database_v2';
+const LEGACY_LOCAL_STORAGE_KEY = 'kas_rt08_rw05_database_v2';
+const AUTH_TOKEN_KEY = 'kaswarga_auth_token_v1';
+
+export function getAuthToken(): string | null {
+  try {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    return token && token.trim() ? token.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setAuthToken(token: string | null) {
+  try {
+    if (token && token.trim()) {
+      localStorage.setItem(AUTH_TOKEN_KEY, token.trim());
+    } else {
+      localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+  } catch {
+    // ignore storage restriction
+  }
+}
+
+export function clearAuthToken() {
+  setAuthToken(null);
+}
+
+export function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) };
+  const token = getAuthToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+/**
+ * Reads any legacy pre-migration HP Admin cache so it can be migrated once to Central SQL Database.
+ * Never used as the active database store.
+ */
+export function readLegacyLocalCacheForMigration(): AppDatabaseSchema | null {
+  try {
+    const cached = localStorage.getItem(LEGACY_LOCAL_STORAGE_KEY);
+    if (!cached) return null;
+    const parsed = JSON.parse(cached) as AppDatabaseSchema;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function clearLegacyLocalCache() {
+  try {
+    localStorage.removeItem(LEGACY_LOCAL_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+}
 
 function toEpoch(iso?: string): number {
   if (!iso) return 0;
@@ -53,9 +113,12 @@ function toEpoch(iso?: string): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
+function unionIds(a: string[] = [], b: string[] = []): string[] {
+  return Array.from(new Set([...a, ...b]));
+}
+
 /**
- * Merges two entity arrays without dropping records, preserving newer edits by updatedAt,
- * and respecting explicit deletion tombstones so deleted records never resurrect from stale caches.
+ * Merges two entity arrays preserving newer edits by updatedAt and respecting tombstones.
  */
 export function mergeEntityList<T extends { id: string; updatedAt?: string }>(
   primaryList: T[],
@@ -90,14 +153,6 @@ export function mergeEntityList<T extends { id: string; updatedAt?: string }>(
   return result;
 }
 
-function unionIds(a: string[] = [], b: string[] = []): string[] {
-  return Array.from(new Set([...a, ...b]));
-}
-
-/**
- * Smart bidirectional merge where `authoritative` (server or Firestore) takes precedence
- * on ties, while preserving newer local edits and honoring deletion tombstones.
- */
 export function mergeDatabaseStates(
   authoritative: AppDatabaseSchema,
   secondary: AppDatabaseSchema | null,
@@ -145,6 +200,7 @@ export function mergeDatabaseStates(
 
   return {
     version: 2,
+    revision: authoritative.revision,
     lastUpdated:
       toEpoch(secondary.lastUpdated) > toEpoch(authoritative.lastUpdated)
         ? secondary.lastUpdated
@@ -192,72 +248,152 @@ export function mergeDatabaseStates(
   };
 }
 
-export function writeLocalCache(data: AppDatabaseSchema) {
+export function formatWaktuSyncID(date: Date = new Date()): string {
   try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
-  } catch (err) {
-    console.warn('Gagal menulis cache lokal:', err);
+    return new Intl.DateTimeFormat('id-ID', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+      timeZone: 'Asia/Jakarta',
+    }).format(date);
+  } catch {
+    return date.toLocaleString('id-ID');
   }
 }
 
-export function readLocalCache(): AppDatabaseSchema | null {
+export async function checkServerHealth(): Promise<{
+  connected: boolean;
+  revision?: number;
+  message?: string;
+}> {
   try {
-    const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
-    return cached ? (JSON.parse(cached) as AppDatabaseSchema) : null;
-  } catch (err) {
-    console.warn('Gagal membaca cache lokal:', err);
+    const res = await fetch(`/api/health?t=${Date.now()}`, { cache: 'no-store' });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || json?.status !== 'ok') {
+      return {
+        connected: false,
+        message: json?.message || 'Koneksi database server sedang bermasalah.',
+      };
+    }
+    return {
+      connected: true,
+      revision: Number(json.revision) || 1,
+    };
+  } catch {
+    return {
+      connected: false,
+      message: 'Tidak dapat terhubung ke server pusat. Periksa koneksi internet Anda.',
+    };
+  }
+}
+
+export async function fetchPublicBootstrapInfo(): Promise<{
+  pengaturanKas: PengaturanKas;
+  tahunAktif: number;
+  revision: number;
+} | null> {
+  try {
+    const res = await fetch(`/api/public/info?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (!json?.success || !json?.pengaturanKas) return null;
+    return {
+      pengaturanKas: json.pengaturanKas as PengaturanKas,
+      tahunAktif: Number(json.tahunAktif) || 2026,
+      revision: Number(json.revision) || 1,
+    };
+  } catch {
     return null;
   }
 }
 
-/**
- * Loads data from Server backend API and returns both merged data and raw server snapshot
- * so caller knows accurately whether local/cloud items still need pushing to server.
- */
-export async function loadAppDataWithMeta(defaultData: AppDatabaseSchema): Promise<{
-  resolved: AppDatabaseSchema;
-  serverData: AppDatabaseSchema | null;
-}> {
-  const localData = readLocalCache();
-
+export async function loginWithServer(
+  role: 'server' | 'admin' | 'warga',
+  username: string,
+  password: string
+): Promise<{ ok: boolean; status?: number; token?: string; user?: AuthUser; message?: string }> {
   try {
-    const res = await fetch(`/api/data?t=${Date.now()}`, {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role, username, password }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.success || !json?.token || !json?.user) {
+      return {
+        ok: false,
+        status: res.status,
+        message: json?.message || 'Login gagal. Periksa kembali kredensial Anda.',
+      };
+    }
+    setAuthToken(json.token);
+    return {
+      ok: true,
+      status: res.status,
+      token: json.token,
+      user: json.user as AuthUser,
+    };
+  } catch {
+    return {
+      ok: false,
+      message: 'Gagal menghubungi server autentikasi. Periksa koneksi internet Anda.',
+    };
+  }
+}
+
+export async function verifySavedSession(): Promise<{
+  ok: boolean;
+  user?: AuthUser;
+  unauthorized?: boolean;
+}> {
+  const token = getAuthToken();
+  if (!token) return { ok: false, unauthorized: true };
+  try {
+    const res = await fetch(`/api/auth/me?t=${Date.now()}`, {
       method: 'GET',
+      headers: authHeaders(),
       cache: 'no-store',
     });
-    if (res.ok) {
-      const serverPayload = await res.json();
-      if (serverPayload && serverPayload.data) {
-        const remoteData = serverPayload.data as AppDatabaseSchema;
-        const resolvedData = mergeDatabaseStates(remoteData, localData);
-        writeLocalCache(resolvedData);
-        return { resolved: resolvedData, serverData: remoteData };
-      }
+    if (res.status === 401 || res.status === 403) {
+      clearAuthToken();
+      return { ok: false, unauthorized: true };
     }
+    if (!res.ok) return { ok: false };
+    const json = await res.json().catch(() => null);
+    if (json?.success && json?.user) {
+      return { ok: true, user: json.user as AuthUser };
+    }
+    return { ok: false };
   } catch {
-    // Server fetch error fallback to local
+    return { ok: false };
   }
-
-  return { resolved: localData || defaultData, serverData: null };
 }
 
-export async function loadAppData(defaultData: AppDatabaseSchema): Promise<AppDatabaseSchema> {
-  const { resolved } = await loadAppDataWithMeta(defaultData);
-  return resolved;
+export async function logoutFromServer(): Promise<void> {
+  try {
+    if (getAuthToken()) {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: authHeaders(),
+      }).catch(() => {});
+    }
+  } finally {
+    clearAuthToken();
+  }
 }
 
-/**
- * Checks lightweight server revision so mobile WebViews polling every few seconds
- * only download the full payload when a remote device actually saved new data.
- */
 export async function checkServerRevision(
   sinceRevision: number
 ): Promise<{ changed: boolean; revision: number; hasData: boolean } | null> {
+  if (!getAuthToken()) return null;
   try {
-    const res = await fetch(`/api/sync-check?since=${encodeURIComponent(String(sinceRevision))}&t=${Date.now()}`, {
-      method: 'GET',
-      cache: 'no-store',
-    });
+    const res = await fetch(
+      `/api/sync-check?since=${encodeURIComponent(String(sinceRevision))}&t=${Date.now()}`,
+      {
+        method: 'GET',
+        headers: authHeaders(),
+        cache: 'no-store',
+      }
+    );
     if (!res.ok) return null;
     const json = await res.json();
     if (!json || typeof json.revision !== 'number') return null;
@@ -271,30 +407,47 @@ export async function checkServerRevision(
   }
 }
 
-/**
- * Fetches latest state directly from Server without letting local cache resurrect deleted items.
- */
-export async function fetchServerSnapshot(): Promise<AppDatabaseSchema | null> {
+export async function fetchServerSnapshotWithStatus(): Promise<{
+  ok: boolean;
+  status?: number;
+  data?: AppDatabaseSchema;
+  message?: string;
+}> {
+  if (!getAuthToken()) {
+    return { ok: false, status: 401, message: 'Sesi login tidak ditemukan.' };
+  }
   try {
     const res = await fetch(`/api/data?t=${Date.now()}`, {
       method: 'GET',
+      headers: authHeaders(),
       cache: 'no-store',
     });
-    if (!res.ok) return null;
-    const json = await res.json();
-    if (json && json.data) {
-      return json.data as AppDatabaseSchema;
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.data) {
+      return {
+        ok: false,
+        status: res.status,
+        message: json?.message || 'Gagal mengambil data terbaru dari database server.',
+      };
     }
-    return null;
+    return {
+      ok: true,
+      status: res.status,
+      data: json.data as AppDatabaseSchema,
+    };
   } catch {
-    return null;
+    return {
+      ok: false,
+      message: 'Koneksi ke server pusat terputus saat mengambil data.',
+    };
   }
 }
 
-/**
- * Saves data immediately to localStorage and sends to server backend.
- * Returns the merged authoritative state from server so client stays 100% in sync.
- */
+export async function fetchServerSnapshot(): Promise<AppDatabaseSchema | null> {
+  const res = await fetchServerSnapshotWithStatus();
+  return res.ok && res.data ? res.data : null;
+}
+
 export async function saveAppData(
   data: AppDatabaseSchema,
   options?: {
@@ -304,13 +457,14 @@ export async function saveAppData(
     deletedPengumumanIds?: string[];
     keepalive?: boolean;
   }
-): Promise<{ ok: boolean; serverData?: AppDatabaseSchema }> {
+): Promise<{ ok: boolean; status?: number; message?: string; serverData?: AppDatabaseSchema }> {
+  if (!getAuthToken()) {
+    return { ok: false, status: 401, message: 'Sesi login berakhir. Silakan login kembali.' };
+  }
   const updatedData: AppDatabaseSchema = {
     ...data,
     lastUpdated: new Date().toISOString(),
   };
-
-  writeLocalCache(updatedData);
 
   try {
     const deletedIds: Partial<DeletedIdsMap> = {
@@ -329,49 +483,69 @@ export async function saveAppData(
 
     const res = await fetch('/api/data', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload),
       keepalive: options?.keepalive ?? false,
     });
-    if (!res.ok) return { ok: false };
-    const json = await res.json();
-    if (json?.data) {
-      writeLocalCache(json.data as AppDatabaseSchema);
-      return { ok: true, serverData: json.data as AppDatabaseSchema };
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: res.status,
+        message: json?.message || 'Gagal menyinkronkan data ke database server.',
+      };
     }
-    return { ok: true };
+    return {
+      ok: true,
+      status: res.status,
+      serverData: json?.data as AppDatabaseSchema | undefined,
+    };
   } catch {
-    return { ok: false };
+    return {
+      ok: false,
+      message: 'Koneksi ke server pusat gagal saat menyimpan data.',
+    };
   }
 }
 
-/**
- * Formats a concise WIB/local Indonesian timestamp for login & sync status logs.
- */
-export function formatWaktuSyncID(date: Date = new Date()): string {
+export async function migrateLegacyLocalDataToServer(
+  localData: Partial<AppDatabaseSchema>
+): Promise<{ ok: boolean; serverData?: AppDatabaseSchema; message?: string }> {
+  if (!getAuthToken()) return { ok: false, message: 'Belum login.' };
   try {
-    return new Intl.DateTimeFormat('id-ID', {
-      dateStyle: 'short',
-      timeStyle: 'short',
-      timeZone: 'Asia/Jakarta',
-    }).format(date);
+    const res = await fetch('/api/sync/migrate-local', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ ...localData, isHardReset: false }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.success) {
+      return {
+        ok: false,
+        message: json?.message || 'Gagal memigrasikan data lokal ke server pusat.',
+      };
+    }
+    return {
+      ok: true,
+      serverData: json.data as AppDatabaseSchema | undefined,
+      message: json.message,
+    };
   } catch {
-    return date.toLocaleString('id-ID');
+    return { ok: false, message: 'Koneksi gagal saat migrasi data ke server.' };
   }
 }
 
-/**
- * Fetches authoritative admin accounts actually stored on the backend server.
- */
 export async function fetchServerAdminAccounts(): Promise<{
   adminAccounts: AdminRTAccount[];
   deletedAdminIds: string[];
   serverHasData: boolean;
   revision: number;
 } | null> {
+  if (!getAuthToken()) return null;
   try {
     const res = await fetch(`/api/admin-accounts?t=${Date.now()}`, {
       method: 'GET',
+      headers: authHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return null;
@@ -388,26 +562,25 @@ export async function fetchServerAdminAccounts(): Promise<{
   }
 }
 
-/**
- * Registers/synchronizes an Admin RT account together with all locally-held data to the Server.
- * Removes old deletion tombstones for this account if needed, and non-destructively merges data.
- */
 export async function syncAdminAccountToServer(params: {
   account: AdminRTAccount;
   syncData?: AppDatabaseSchema;
   deletedIds?: Partial<DeletedIdsMap>;
   allowOverwrite?: boolean;
+  securityPin?: string;
 }): Promise<{
   ok: boolean;
   status?: number;
   message?: string;
   account?: AdminRTAccount;
+  token?: string;
+  user?: AuthUser;
   serverData?: AppDatabaseSchema;
 }> {
   try {
     const res = await fetch('/api/admin/sync-account', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(params),
     });
     const json = await res.json().catch(() => null);
@@ -418,14 +591,16 @@ export async function syncAdminAccountToServer(params: {
         message: json?.message || 'Gagal menyinkronkan akun admin ke server.',
       };
     }
-    if (json.data) {
-      writeLocalCache(json.data as AppDatabaseSchema);
+    if (json.token) {
+      setAuthToken(json.token);
     }
     return {
       ok: true,
       status: res.status,
       message: json.message,
       account: json.account as AdminRTAccount | undefined,
+      token: json.token as string | undefined,
+      user: json.user as AuthUser | undefined,
       serverData: json.data as AppDatabaseSchema | undefined,
     };
   } catch {
@@ -436,20 +611,15 @@ export async function syncAdminAccountToServer(params: {
   }
 }
 
-/**
- * Fire-and-forget keepalive flush for pagehide/backgrounding in Median WebView & mobile browsers.
- * Respects Chromium's ~64KB keepalive body limit by omitting heavy PDF blobs when needed
- * (while keeping deletedIds untouched so server PDFs are never deleted).
- */
 export function flushSaveAppDataKeepalive(
   data: AppDatabaseSchema,
   deletedIds?: Partial<DeletedIdsMap>
 ) {
+  if (!getAuthToken()) return;
   const updatedData: AppDatabaseSchema = {
     ...data,
     lastUpdated: new Date().toISOString(),
   };
-  writeLocalCache(updatedData);
 
   try {
     if (typeof fetch === 'undefined') return;
@@ -466,14 +636,13 @@ export function flushSaveAppDataKeepalive(
     if (byteLength <= 60000) {
       fetch('/api/data', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: fullPayloadStr,
         keepalive: true,
       }).catch(() => {});
       return;
     }
 
-    // Try compact payload (omit large PDF base64 files safely — merge keeps server copies)
     const compactPayloadStr = JSON.stringify({
       ...updatedData,
       dokumenList: [],
@@ -488,15 +657,9 @@ export function flushSaveAppDataKeepalive(
     if (compactLength <= 60000) {
       fetch('/api/data', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: compactPayloadStr,
         keepalive: true,
-      }).catch(() => {});
-    } else {
-      fetch('/api/data', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: fullPayloadStr,
       }).catch(() => {});
     }
   } catch {
@@ -504,15 +667,16 @@ export function flushSaveAppDataKeepalive(
   }
 }
 
-/**
- * Subscribes to live Server-Sent Events (/api/stream) so changes made from Median,
- * another browser, Admin RT, or Server appear in real time across all sessions.
- */
 export function subscribeServerStream(
   onRemoteData: (data: AppDatabaseSchema, isReset?: boolean) => void,
   onConnectionChange?: (connected: boolean) => void
 ): () => void {
   if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
+    return () => {};
+  }
+  const token = getAuthToken();
+  if (!token) {
+    onConnectionChange?.(false);
     return () => {};
   }
 
@@ -522,8 +686,13 @@ export function subscribeServerStream(
 
   const connect = () => {
     if (closed) return;
+    const latestToken = getAuthToken();
+    if (!latestToken) {
+      onConnectionChange?.(false);
+      return;
+    }
     try {
-      es = new EventSource('/api/stream');
+      es = new EventSource(`/api/stream?token=${encodeURIComponent(latestToken)}`);
       es.onopen = () => {
         onConnectionChange?.(true);
       };
@@ -562,14 +731,36 @@ export function subscribeServerStream(
   };
 }
 
-/**
- * Saves a single citizen directly to the server database.
- */
-export async function saveSingleWargaToServer(warga: Warga): Promise<boolean> {
+export async function searchWargaOnServer(q: string, rt = ''): Promise<Warga[] | null> {
+  if (!getAuthToken()) return null;
+  try {
+    const params = new URLSearchParams();
+    if (q.trim()) params.set('q', q.trim());
+    if (rt.trim()) params.set('rt', rt.trim());
+    params.set('t', String(Date.now()));
+    const res = await fetch(`/api/warga?${params.toString()}`, {
+      method: 'GET',
+      headers: authHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const json = await res.json().catch(() => null);
+    if (json?.success && Array.isArray(json.wargaList)) {
+      return json.wargaList as Warga[];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveSingleWargaToServer(
+  warga: Warga
+): Promise<{ ok: boolean; warga?: Warga; message?: string }> {
   try {
     const res = await fetch('/api/warga', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         warga: {
           ...warga,
@@ -577,36 +768,149 @@ export async function saveSingleWargaToServer(warga: Warga): Promise<boolean> {
         },
       }),
     });
-    return res.ok;
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      return {
+        ok: false,
+        message: json?.message || 'Gagal menyimpan data warga ke server.',
+      };
+    }
+    return { ok: true, warga: json?.warga as Warga | undefined };
   } catch {
-    return false;
+    return { ok: false, message: 'Koneksi gagal saat menyimpan data warga ke server.' };
   }
 }
 
-/**
- * Explicitly removes a citizen from the server database.
- */
-export async function deleteWargaFromServer(id: string): Promise<boolean> {
+export async function bulkImportWargaOnServer(params: {
+  wargaList: Array<Omit<Warga, 'id' | 'no'>>;
+  bantuanList: Array<Omit<BantuanPemerintah, 'id'>>;
+  mergeExisting: boolean;
+  tahunAktif: number;
+}): Promise<{ ok: boolean; addedKK?: number; updatedKK?: number; addedBantuan?: number; message?: string }> {
+  try {
+    const res = await fetch('/api/warga/bulk', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(params),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.success) {
+      return { ok: false, message: json?.message || 'Gagal mengimpor Excel ke server.' };
+    }
+    return {
+      ok: true,
+      addedKK: json.addedKK,
+      updatedKK: json.updatedKK,
+      addedBantuan: json.addedBantuan,
+    };
+  } catch {
+    return { ok: false, message: 'Koneksi gagal saat mengimpor Excel ke server.' };
+  }
+}
+
+export async function deleteWargaFromServer(
+  id: string
+): Promise<{ ok: boolean; message?: string }> {
   try {
     const res = await fetch(`/api/warga/${encodeURIComponent(id)}`, {
       method: 'DELETE',
+      headers: authHeaders(),
     });
-    return res.ok;
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      return { ok: false, message: json?.message || 'Gagal menghapus data warga di server.' };
+    }
+    return { ok: true };
   } catch {
-    return false;
+    return { ok: false, message: 'Koneksi gagal saat menghapus data warga di server.' };
   }
 }
 
-/**
- * Completely wipes all database data from both localStorage and server backend.
- * Explicitly passes isHardReset: true.
- */
-export async function clearAppData(): Promise<boolean> {
+export async function updateWargaSelfOnServer(patch: {
+  pin?: string;
+  telepon?: string;
+}): Promise<{ ok: boolean; message?: string }> {
   try {
-    localStorage.removeItem(LOCAL_STORAGE_KEY);
+    const res = await fetch('/api/warga/self', {
+      method: 'PATCH',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(patch),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      return { ok: false, message: json?.message || 'Gagal memperbarui PIN warga di server.' };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, message: 'Koneksi gagal saat memperbarui profil ke server.' };
+  }
+}
+
+async function postEntity(url: string, body: unknown, errMsg: string): Promise<{ ok: boolean; message?: string }> {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) return { ok: false, message: json?.message || errMsg };
+    return { ok: true };
+  } catch {
+    return { ok: false, message: `${errMsg} (koneksi gagal)` };
+  }
+}
+
+async function deleteEntity(url: string, errMsg: string): Promise<{ ok: boolean; message?: string }> {
+  try {
+    const res = await fetch(url, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) return { ok: false, message: json?.message || errMsg };
+    return { ok: true };
+  } catch {
+    return { ok: false, message: `${errMsg} (koneksi gagal)` };
+  }
+}
+
+export const saveTransactionOnServer = (tx: Transaction) =>
+  postEntity('/api/transactions', { transaction: tx }, 'Gagal menyimpan transaksi kas ke server.');
+
+export const deleteTransactionOnServer = (id: string) =>
+  deleteEntity(`/api/transactions/${encodeURIComponent(id)}`, 'Gagal menghapus transaksi dari server.');
+
+export const savePengumumanOnServer = (p: PengumumanRT) =>
+  postEntity('/api/pengumuman', { pengumuman: p }, 'Gagal menyimpan pengumuman ke server.');
+
+export const deletePengumumanOnServer = (id: string) =>
+  deleteEntity(`/api/pengumuman/${encodeURIComponent(id)}`, 'Gagal menghapus pengumuman dari server.');
+
+export const saveBantuanOnServer = (b: BantuanPemerintah) =>
+  postEntity('/api/bantuan', { bantuan: b }, 'Gagal menyimpan data bantuan ke server.');
+
+export const deleteBantuanOnServer = (id: string) =>
+  deleteEntity(`/api/bantuan/${encodeURIComponent(id)}`, 'Gagal menghapus data bantuan dari server.');
+
+export const saveDokumenOnServer = (d: DokumenPdfWarga) =>
+  postEntity('/api/dokumen', { dokumen: d }, 'Gagal menyimpan dokumen ke server.');
+
+export const deleteDokumenOnServer = (id: string) =>
+  deleteEntity(`/api/dokumen/${encodeURIComponent(id)}`, 'Gagal menghapus dokumen dari server.');
+
+export const saveLaporanOnServer = (l: PembaruanBulananRT) =>
+  postEntity('/api/laporan-bulanan', { laporan: l }, 'Gagal mengirim laporan bulanan ke server.');
+
+export const saveSettingsOnServer = (pengaturanKas: PengaturanKas, tahunAktif?: number) =>
+  postEntity('/api/settings', { pengaturanKas, tahunAktif }, 'Gagal menyimpan pengaturan ke server.');
+
+export async function clearAppData(preserveAdminAccounts: AdminRTAccount[] = []): Promise<boolean> {
+  clearLegacyLocalCache();
+  try {
     localStorage.removeItem('rt_dismissed_notifications_v2');
-  } catch (err) {
-    console.error('Error clearing localStorage:', err);
+  } catch {
+    // ignore
   }
 
   try {
@@ -646,27 +950,22 @@ export async function clearAppData(): Promise<boolean> {
       bantuanList: [],
       pengumumanList: [],
       dokumenList: [],
-      adminAccounts: [],
+      adminAccounts: preserveAdminAccounts,
       laporanBulananRT: [],
       deletedIds: { ...EMPTY_DELETED_IDS },
     };
 
-    writeLocalCache(emptyPayload);
-
     const res = await fetch('/api/data', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ ...emptyPayload, isHardReset: true }),
     });
     return res.ok;
   } catch {
-    return true;
+    return false;
   }
 }
 
-/**
- * Exports complete database to a downloadable .JSON backup file.
- */
 export function downloadBackupJSON(data: AppDatabaseSchema) {
   const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(data, null, 2));
   const downloadAnchor = document.createElement('a');
@@ -678,9 +977,6 @@ export function downloadBackupJSON(data: AppDatabaseSchema) {
   downloadAnchor.remove();
 }
 
-/**
- * Reads an uploaded .JSON file and restores database state.
- */
 export function parseBackupFile(file: File): Promise<AppDatabaseSchema> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

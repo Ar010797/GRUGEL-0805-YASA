@@ -1,54 +1,68 @@
 import React, { useState } from 'react';
-import { ShieldCheck, User, Lock, KeyRound, AlertCircle, HelpCircle, X, CreditCard, Server, Building2, Check, Eye, EyeOff, RefreshCw, LogOut, Wifi, CloudUpload, Cloud } from 'lucide-react';
-import { AuthUser, Warga, AdminRTAccount, PengaturanKas } from '../types';
+import {
+  ShieldCheck,
+  User,
+  Lock,
+  KeyRound,
+  AlertCircle,
+  HelpCircle,
+  X,
+  CreditCard,
+  Server,
+  Building2,
+  Check,
+  Eye,
+  EyeOff,
+  RefreshCw,
+  LogOut,
+  Wifi,
+  CloudUpload,
+} from 'lucide-react';
+import { AuthUser, AdminRTAccount, PengaturanKas } from '../types';
 import { HouseLogo } from './HouseLogo';
-import { fetchServerAdminAccounts } from '../utils/cloudSync';
+import {
+  loginWithServer,
+  readLegacyLocalCacheForMigration,
+  syncAdminAccountToServer,
+} from '../utils/cloudSync';
 
 interface LoginModalProps {
   isOpen: boolean;
   onClose: () => void;
   onLoginSuccess: (user: AuthUser) => void;
-  wargaList: Warga[];
   adminAccounts?: AdminRTAccount[];
-  serverAdminAccounts?: AdminRTAccount[];
   pengaturanKas?: PengaturanKas;
   currentPin?: string;
   onOpenLupaPassword: () => void;
   onRefreshSync?: () => Promise<void> | void;
   onSyncAdminAccountToServer?: (
-    account: AdminRTAccount
-  ) => Promise<{ ok: boolean; message?: string; account?: AdminRTAccount }>;
+    account: AdminRTAccount,
+    securityPin?: string
+  ) => Promise<{ ok: boolean; message?: string; account?: AdminRTAccount; user?: AuthUser }>;
   canClose?: boolean;
   onLogout?: () => void;
   sseConnected?: boolean;
-  isCloudConnected?: boolean;
-  onConnectCloud?: () => void;
+  serverConnected?: boolean;
 }
 
 export const LoginModal: React.FC<LoginModalProps> = ({
   isOpen,
   onClose,
   onLoginSuccess,
-  wargaList,
-  adminAccounts = [],
-  serverAdminAccounts,
   pengaturanKas,
-  currentPin = '123456',
   onOpenLupaPassword,
   onRefreshSync,
   onSyncAdminAccountToServer,
   canClose = true,
   onLogout,
   sseConnected = false,
-  isCloudConnected = false,
-  onConnectCloud,
+  serverConnected = true,
 }) => {
   const desaStr = pengaturanKas?.profilRT?.desa || 'Desa Kotayasa';
   const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
   const rwStr = pengaturanKas?.profilRT?.namaRW || '05';
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
-  // Default to 'warga' so new installs start at citizen/admin login and Server tab is hidden
   const [activeTab, setActiveTab] = useState<'server' | 'admin' | 'warga'>('warga');
   const [showServerTab, setShowServerTab] = useState(false);
 
@@ -57,10 +71,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [showAdminPassword, setShowAdminPassword] = useState(false);
   const [showWargaPassword, setShowWargaPassword] = useState(false);
 
-  // Server form (NEVER pre-fill password for security on fresh installs)
+  // Server form
   const [serverUsername, setServerUsername] = useState('');
   const [serverPassword, setServerPassword] = useState('');
   const [serverError, setServerError] = useState('');
+  const [serverChecking, setServerChecking] = useState(false);
 
   // Admin form
   const [adminUsername, setAdminUsername] = useState('');
@@ -81,52 +96,42 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [wargaUsername, setWargaUsername] = useState('');
   const [wargaPasswordKK, setWargaPasswordKK] = useState('');
   const [wargaError, setWargaError] = useState('');
+  const [wargaChecking, setWargaChecking] = useState(false);
 
   if (!isOpen) return null;
 
-  // Handle Server Submit
-  const handleServerSubmit = (e: React.FormEvent) => {
+  // Handle Server Submit via REST API
+  const handleServerSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setServerError('');
 
     const u = serverUsername.trim();
     const p = serverPassword.trim();
+    if (!u || !p) {
+      setServerError('Username dan password Server harus diisi.');
+      return;
+    }
 
-    // Specific user credentials: Username: RW05GLEMPANG, Password: Rw05glempang
-    if (u === 'RW05GLEMPANG' && p === 'Rw05glempang') {
-      onLoginSuccess({
-        role: 'server',
-        username: 'RW05GLEMPANG',
-        nama: 'Super Admin Server RW 05 Glempang',
-        rtScope: 'Semua RT se-RW 05 Glempang',
-        isPinAuthenticated: false,
-      });
-      onClose();
-    } else {
-      setServerError('Username atau password Server salah. Akses ini khusus Pengelola Server.');
+    setServerChecking(true);
+    try {
+      const res = await loginWithServer('server', u, p);
+      if (res.ok && res.user) {
+        onLoginSuccess(res.user);
+        onClose();
+      } else {
+        setServerError(res.message || 'Username atau password Server salah. Akses ini khusus Pengelola Server.');
+      }
+    } finally {
+      setServerChecking(false);
     }
   };
 
-  const getBuiltinDefaultAdmin = (): AdminRTAccount => ({
-    id: 'adm_rt08',
-    username: 'Admin',
-    passwordHash: 'rt08rw05',
-    nama: pengaturanKas?.kontakKetuaRT?.nama
-      ? `${pengaturanKas.kontakKetuaRT.nama} (Ketua RT ${rtStr})`
-      : `Ketua RT ${rtStr} RW ${rwStr}`,
-    rt: rtStr,
-    rw: rwStr,
-    kontak: pengaturanKas?.kontakKetuaRT?.telp || '0812-3456-7890',
-    jabatan: `Ketua RT ${rtStr} RW ${rwStr}`,
-    status: 'aktif',
-  });
-
-  const handleSyncAndLoginAdmin = async (accountToSync: AdminRTAccount) => {
+  const handleSyncAndLoginAdmin = async (accountToSync: AdminRTAccount, pinCode?: string) => {
     setAdminError('');
     setSyncAccountBusy(true);
     try {
       if (onSyncAdminAccountToServer) {
-        const res = await onSyncAdminAccountToServer(accountToSync);
+        const res = await onSyncAdminAccountToServer(accountToSync, pinCode);
         if (!res.ok) {
           setAdminError(res.message || 'Gagal menyinkronkan akun admin ke server.');
           return;
@@ -134,22 +139,30 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         const synced = res.account || accountToSync;
         setPendingSyncAdmin(null);
         setShowRegisterAdminBox(false);
-        onLoginSuccess({
-          role: 'admin',
-          username: synced.username,
-          nama: synced.nama,
-          rtScope: `RT ${synced.rt} RW ${synced.rw}`,
-          isPinAuthenticated: false,
-        });
+        onLoginSuccess(
+          res.user || {
+            role: 'admin',
+            username: synced.username,
+            nama: synced.nama,
+            rtScope: `RT ${synced.rt} RW ${synced.rw}`,
+            isPinAuthenticated: false,
+          }
+        );
         onClose();
       } else {
-        onLoginSuccess({
-          role: 'admin',
-          username: accountToSync.username,
-          nama: accountToSync.nama,
-          rtScope: `RT ${accountToSync.rt} RW ${accountToSync.rw}`,
-          isPinAuthenticated: false,
+        const legacyCache = readLegacyLocalCacheForMigration();
+        const res = await syncAdminAccountToServer({
+          account: accountToSync,
+          syncData: legacyCache || undefined,
+          securityPin: pinCode,
         });
+        if (!res.ok || !res.user) {
+          setAdminError(res.message || 'Gagal menyinkronkan akun admin ke server.');
+          return;
+        }
+        setPendingSyncAdmin(null);
+        setShowRegisterAdminBox(false);
+        onLoginSuccess(res.user);
         onClose();
       }
     } finally {
@@ -157,7 +170,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     }
   };
 
-  // Handle Admin RT Submit: verifies live against Server first, and offers "Sinkronkan Akun ke Server" if missing on Server
+  // Handle Admin RT Submit via Central Database REST API
   const handleAdminSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAdminError('');
@@ -177,69 +190,32 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     setAdminChecking(true);
     try {
-      // 1. Always fetch fresh server admin accounts so accounts added/synced on other devices are recognized immediately
-      const liveServerInfo = await fetchServerAdminAccounts();
-      const authoritativeServerList =
-        liveServerInfo?.adminAccounts ?? serverAdminAccounts ?? [];
-
-      const matchedOnServer = authoritativeServerList.find(
-        (acc) => acc.username.trim().toLowerCase() === u.toLowerCase()
-      );
-
-      if (matchedOnServer) {
-        if (matchedOnServer.passwordHash !== p) {
-          setAdminError(
-            'Password salah! Periksa kembali kata sandi admin RT Anda atau hubungi Server Pusat untuk pemulihan akses.'
-          );
-          return;
-        }
-        if (matchedOnServer.status === 'nonaktif') {
-          setAdminError(`Akun Admin ${matchedOnServer.nama} sedang dinonaktifkan oleh Server Pusat.`);
-          return;
-        }
-
-        // Valid & registered on server -> Refresh snapshot & log in
-        await onRefreshSync?.();
-        onLoginSuccess({
-          role: 'admin',
-          username: matchedOnServer.username,
-          nama: matchedOnServer.nama,
-          rtScope: `RT ${matchedOnServer.rt} RW ${matchedOnServer.rw}`,
-          isPinAuthenticated: false,
-        });
+      const res = await loginWithServer('admin', u, p);
+      if (res.ok && res.user) {
+        onLoginSuccess(res.user);
         onClose();
         return;
       }
 
-      // 2. Not found on Server yet: check local device accounts or built-in default RT Admin
-      const defaultAdm = getBuiltinDefaultAdmin();
-      const localCandidates = [
-        ...adminAccounts,
-        ...(adminAccounts.some((a) => a.username.toLowerCase() === 'admin') ? [] : [defaultAdm]),
-      ];
-      const matchedLocal = localCandidates.find(
-        (acc) => acc.username.trim().toLowerCase() === u.toLowerCase()
+      // Check legacy pre-migration HP local storage cache only if server didn't find the account
+      const legacyCache = readLegacyLocalCacheForMigration();
+      const legacyAdmins = Array.isArray(legacyCache?.adminAccounts) ? legacyCache.adminAccounts : [];
+      const matchedLegacy = legacyAdmins.find(
+        (acc) => acc.username?.trim().toLowerCase() === u.toLowerCase() && acc.passwordHash === p
       );
 
-      if (matchedLocal && matchedLocal.passwordHash === p) {
-        setPendingSyncAdmin(matchedLocal);
+      if (matchedLegacy) {
+        setPendingSyncAdmin(matchedLegacy);
         setShowRegisterAdminBox(false);
         setAdminError(
-          `Akun Admin "${matchedLocal.username}" valid di perangkat ini, namun belum terdaftar di Server Pusat. Klik "Sinkronkan Akun ke Server & Masuk" di bawah agar semua data terbaca oleh perangkat lain.`
+          `Akun Admin "${matchedLegacy.username}" ditemukan pada data lama perangkat ini. Klik "Sinkronkan Akun ke Server & Masuk" di bawah untuk memigrasikan akun dan seluruh datanya ke Database Server Pusat.`
         );
         return;
       }
 
-      if (matchedLocal && matchedLocal.passwordHash !== p) {
-        setAdminError(
-          'Password salah! Periksa kembali kata sandi admin RT Anda atau hubungi Server Pusat untuk pemulihan akses.'
-        );
-        return;
-      }
-
-      // 3. Account neither on server nor in local cache
       setAdminError(
-        `Akun Admin "${u}" belum terdaftar di Server Pusat. Anda dapat menyinkronkan data dari server atau mendaftarkan & menyinkronkan akun ini ke Server jika memiliki PIN Keamanan Pengurus.`
+        res.message ||
+          `Akun Admin "${u}" tidak ditemukan di Database Server. Periksa password atau daftarkan akun ini ke Server jika memiliki PIN Keamanan Pengurus.`
       );
       setShowRegisterAdminBox(false);
     } finally {
@@ -247,14 +223,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     }
   };
 
-  // Handle Warga Submit
-  const handleWargaSubmit = (e: React.FormEvent) => {
+  // Handle Warga Submit directly via Central Database REST API
+  const handleWargaSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setWargaError('');
 
     const name = wargaUsername.trim();
     const noKKRaw = wargaPasswordKK.trim().replace(/\s+/g, '');
-    const noKKDigits = noKKRaw.replace(/\D/g, '');
 
     if (!name) {
       setWargaError('Silakan masukkan Nama Asli Kepala Keluarga sesuai Kartu Keluarga.');
@@ -266,46 +241,21 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       return;
     }
 
-    // Match with resident list by name and normalized No KK (supports digits or dashed format)
-    const matched = wargaList.find((w) => {
-      const matchName =
-        w.nama.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(w.nama.toLowerCase());
-      if (!w.noKK) return false;
-      const storedRaw = w.noKK.trim().replace(/\s+/g, '');
-      const storedDigits = storedRaw.replace(/\D/g, '');
-      const matchKK =
-        storedRaw === noKKRaw ||
-        (noKKDigits.length >= 6 && storedDigits.length >= 6 && storedDigits === noKKDigits);
-      return matchName && matchKK;
-    });
-
-    if (matched) {
-      onLoginSuccess({
-        role: 'warga',
-        username: matched.nama,
-        nama: matched.nama,
-        noKK: matched.noKK,
-        wargaId: matched.id,
-        rtScope: `RT ${matched.rt || '08'} RW ${matched.rw || '05'}`,
-        isPinAuthenticated: false,
-      });
-      onClose();
-    } else {
-      const nameOnly = wargaList.find((w) =>
-        w.nama.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(w.nama.toLowerCase())
-      );
-
-      if (nameOnly) {
-        setWargaError(`Nomor KK untuk warga "${nameOnly.nama}" tidak sesuai. Pastikan 16 digit No KK sudah benar.`);
+    setWargaChecking(true);
+    try {
+      const res = await loginWithServer('warga', name, noKKRaw);
+      if (res.ok && res.user) {
+        onLoginSuccess(res.user);
+        onClose();
       } else {
-        setWargaError(`Data warga "${name}" dengan No KK tersebut tidak ditemukan. Silakan hubungi Admin RT atau tekan Sinkronkan Data.`);
+        setWargaError(
+          res.message ||
+            `Data warga "${name}" dengan No KK tersebut tidak ditemukan di Database Server. Silakan hubungi Admin RT.`
+        );
       }
+    } finally {
+      setWargaChecking(false);
     }
-  };
-
-  const handleQuickSelectWarga = (w: Warga) => {
-    setWargaUsername(w.nama);
-    setWargaPasswordKK(w.noKK);
   };
 
   return (
@@ -337,23 +287,40 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             <div>
               <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-200 flex items-center gap-1.5">
                 <span>Menu Login Aplikasi</span>
-                {(sseConnected || isCloudConnected) && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-400/20 px-1.5 py-0.5 text-[9px] text-emerald-100">
-                    <Wifi size={9} />
-                    <span>{isCloudConnected ? 'Cloud & Server Live' : 'Server Live'}</span>
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] ${
+                    sseConnected || serverConnected
+                      ? 'bg-emerald-400/20 text-emerald-100'
+                      : 'bg-rose-400/30 text-rose-100'
+                  }`}
+                >
+                  <Wifi size={9} />
+                  <span>
+                    {sseConnected
+                      ? 'Database Server Live'
+                      : serverConnected
+                      ? 'Database Server Online'
+                      : 'Server Terputus'}
                   </span>
-                )}
+                </span>
               </span>
               <h2 className="text-lg font-extrabold tracking-tight">Aplikasi {desaStr}</h2>
             </div>
           </div>
         </div>
 
-        {/* Tab Selection: Default hanya Admin RT dan Warga (KK), Server disembunyikan */}
-        <div className={`grid ${showServerTab ? 'grid-cols-3' : 'grid-cols-2'} border-b border-slate-200 bg-slate-50 p-1.5 gap-1 transition-all`}>
+        {/* Tab Selection */}
+        <div
+          className={`grid ${
+            showServerTab ? 'grid-cols-3' : 'grid-cols-2'
+          } border-b border-slate-200 bg-slate-50 p-1.5 gap-1 transition-all`}
+        >
           <button
             type="button"
-            onClick={() => { setActiveTab('admin'); setAdminError(''); }}
+            onClick={() => {
+              setActiveTab('admin');
+              setAdminError('');
+            }}
             className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
               activeTab === 'admin'
                 ? 'bg-[#0B5D3F] text-white shadow-xs'
@@ -366,7 +333,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
           <button
             type="button"
-            onClick={() => { setActiveTab('warga'); setWargaError(''); }}
+            onClick={() => {
+              setActiveTab('warga');
+              setWargaError('');
+            }}
             className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
               activeTab === 'warga'
                 ? 'bg-[#0B5D3F] text-white shadow-xs'
@@ -380,7 +350,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           {showServerTab && (
             <button
               type="button"
-              onClick={() => { setActiveTab('server'); setServerError(''); }}
+              onClick={() => {
+                setActiveTab('server');
+                setServerError('');
+              }}
               className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
                 activeTab === 'server'
                   ? 'bg-indigo-600 text-white shadow-xs'
@@ -404,7 +377,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   <span>Akses Server Pusat Desa:</span>
                 </p>
                 <p className="text-[11px] text-indigo-800 mt-1 leading-relaxed">
-                  Menerima data seluruh RT, menambahkan Admin untuk mengelola tiap RT, mengontrol pembukuan desa, dan backup database antar-perangkat.
+                  Menerima data seluruh RT, menambahkan Admin untuk mengelola tiap RT, mengontrol pembukuan desa, dan sinkronisasi database antar-perangkat.
                 </p>
               </div>
 
@@ -464,9 +437,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
               <button
                 type="submit"
-                className="w-full rounded-xl bg-indigo-600 py-3 text-sm font-bold text-white shadow-md hover:bg-indigo-700 active:scale-95 transition-all cursor-pointer"
+                disabled={serverChecking}
+                className="w-full rounded-xl bg-indigo-600 py-3 text-sm font-bold text-white shadow-md hover:bg-indigo-700 active:scale-95 transition-all cursor-pointer disabled:opacity-60"
               >
-                Masuk Sebagai Server RW 05
+                {serverChecking ? 'Memverifikasi ke Database Server...' : 'Masuk Sebagai Server RW 05'}
               </button>
             </form>
           ) : activeTab === 'admin' ? (
@@ -478,7 +452,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   <span>Akses Pengurus RT:</span>
                 </p>
                 <p className="text-[11px] text-emerald-800 mt-1 leading-relaxed">
-                  Mengelola data warga 1 RT, mencatat kas/kematian, input bansos, dan mengirim laporan bulanan ke Server Desa.
+                  Mengelola data warga 1 RT, mencatat kas/kematian, input bansos, dan sinkronisasi otomatis ke Database Server Pusat.
                 </p>
               </div>
 
@@ -541,7 +515,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       <span>Daftarkan & Sinkronkan Akun Admin ke Server</span>
                     </p>
                     <p className="mt-0.5 text-indigo-800 leading-relaxed">
-                      Akun beserta seluruh data yang tersimpan di perangkat ini akan didaftarkan ke Server agar terbaca oleh semua perangkat lain.
+                      Akun beserta data perangkat ini akan didaftarkan ke Database Server Pusat agar terbaca oleh seluruh perangkat lain.
                     </p>
                   </div>
 
@@ -569,7 +543,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   </div>
 
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-700 mb-0.5">Nama Lengkap Pengurus RT</label>
+                    <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                      Nama Lengkap Pengurus RT
+                    </label>
                     <input
                       type="text"
                       value={regNama}
@@ -625,8 +601,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         setAdminError('Nama lengkap pengurus harus diisi.');
                         return;
                       }
-                      if (regPin.trim() !== currentPin) {
-                        setAdminError('PIN Keamanan Pengurus salah. Gunakan PIN aplikasi yang valid untuk mendaftarkan akun ke Server.');
+                      if (regPin.trim().length !== 6) {
+                        setAdminError('PIN Keamanan Pengurus 6 digit wajib diisi.');
                         return;
                       }
                       const newAcc: AdminRTAccount = {
@@ -640,12 +616,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         jabatan: regJabatan.trim() || `Ketua RT ${regRT.trim() || rtStr}`,
                         status: 'aktif',
                       };
-                      await handleSyncAndLoginAdmin(newAcc);
+                      await handleSyncAndLoginAdmin(newAcc, regPin.trim());
                     }}
                     className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 py-2 text-xs font-bold text-white shadow-xs transition-all cursor-pointer disabled:opacity-60"
                   >
                     <CloudUpload size={13} />
-                    <span>{syncAccountBusy ? 'Menyinkronkan ke Server...' : 'Daftarkan, Sinkronkan Data & Masuk'}</span>
+                    <span>
+                      {syncAccountBusy ? 'Menyinkronkan ke Server...' : 'Daftarkan, Sinkronkan Data & Masuk'}
+                    </span>
                   </button>
                 </div>
               )}
@@ -702,7 +680,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   </button>
                 </div>
                 <p className="mt-1 text-[11px] text-slate-400">
-                  Akun diverifikasi langsung ke Server Pusat agar data Anda otomatis masuk ke semua perangkat.
+                  Akun diverifikasi langsung ke Database Server Pusat secara online.
                 </p>
               </div>
 
@@ -720,7 +698,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               <div className="rounded-2xl bg-amber-50 p-3 text-xs text-amber-900 border border-amber-200/80">
                 <p className="font-bold">Privasi Warga Terlindungi (Sesuai UU PDP):</p>
                 <p className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">
-                  Warga hanya dapat melihat data keluarganya sendiri berdasarkan Nomor Kartu Keluarga (16 digit).
+                  Warga hanya dapat melihat data keluarganya sendiri berdasarkan Nomor Kartu Keluarga (16 digit) yang tersinkron dengan Database Server.
                 </p>
               </div>
 
@@ -765,7 +743,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     value={wargaPasswordKK}
                     onChange={(e) => setWargaPasswordKK(e.target.value)}
                     className="w-full rounded-xl border border-slate-200 pl-10 pr-10 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-mono tracking-wider"
-                    placeholder="3302140508000001"
+                    placeholder="Contoh: 3302000000000001"
                   />
                   <button
                     type="button"
@@ -791,14 +769,15 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
               <button
                 type="submit"
-                className="w-full rounded-xl bg-[#0B5D3F] py-3 text-sm font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"
+                disabled={wargaChecking}
+                className="w-full rounded-xl bg-[#0B5D3F] py-3 text-sm font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer disabled:opacity-60"
               >
-                Masuk Sebagai Warga
+                {wargaChecking ? 'Memeriksa Data di Server...' : 'Masuk Sebagai Warga'}
               </button>
             </form>
           )}
 
-          {/* Footer security note & Discreet Server Access for App Owner */}
+          {/* Footer security note & Discreet Server Access */}
           <div className="mt-5 pt-4 border-t border-slate-100 flex flex-col items-center gap-2 text-center">
             {onRefreshSync && (
               <button
@@ -809,7 +788,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   setSyncNotice(null);
                   try {
                     await onRefreshSync();
-                    setSyncNotice('Data terbaru berhasil disinkronkan dari server.');
+                    setSyncNotice('Koneksi database server pusat diperbarui.');
                     setTimeout(() => setSyncNotice(null), 3500);
                   } finally {
                     setIsRefreshing(false);
@@ -819,22 +798,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               >
                 <RefreshCw size={12} className={isRefreshing ? 'animate-spin' : ''} />
                 <span>
-                  {isRefreshing
-                    ? 'Menyinkronkan data server...'
-                    : `Sinkronkan Data Server (${wargaList.length} KK, ${adminAccounts.length} Admin)`}
+                  {isRefreshing ? 'Memeriksa koneksi server...' : 'Periksa Koneksi Database Server'}
                 </span>
-              </button>
-            )}
-
-            {onConnectCloud && !isCloudConnected && (
-              <button
-                type="button"
-                onClick={onConnectCloud}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 border border-indigo-200 px-3 py-1.5 text-[11px] font-bold text-indigo-700 hover:bg-indigo-100 transition-colors cursor-pointer"
-                title="Hubungkan Cloud Firebase (via Chrome pairing jika di Aplikasi Median)"
-              >
-                <Cloud size={12} />
-                <span>Hubungkan Cloud Firebase</span>
               </button>
             )}
 
@@ -867,7 +832,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               <span>Butuh Bantuan Akun atau Reset PIN? Hubungi Pengurus RT</span>
             </button>
 
-            {/* Tombol Tersembunyi Khusus Pemilik / Pengelola Server RW 05 */}
             <button
               type="button"
               onClick={() => {
