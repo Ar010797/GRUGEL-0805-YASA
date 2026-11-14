@@ -21,9 +21,14 @@ import {
 import { AuthUser, AdminRTAccount, PengaturanKas } from '../types';
 import { HouseLogo } from './HouseLogo';
 import {
+  checkServerHealth,
+  getApiBaseUrl,
+  getResolvedEndpointDisplay,
   loginWithServer,
   readLegacyLocalCacheForMigration,
+  setApiBaseUrl,
   syncAdminAccountToServer,
+  type ServerHealthDiagnostic,
 } from '../utils/cloudSync';
 
 interface LoginModalProps {
@@ -43,6 +48,7 @@ interface LoginModalProps {
   onLogout?: () => void;
   sseConnected?: boolean;
   serverConnected?: boolean;
+  serverErrorDetail?: string | null;
 }
 
 export const LoginModal: React.FC<LoginModalProps> = ({
@@ -57,6 +63,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onLogout,
   sseConnected = false,
   serverConnected = true,
+  serverErrorDetail = null,
 }) => {
   const desaStr = pengaturanKas?.profilRT?.desa || 'Desa Kotayasa';
   const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
@@ -90,13 +97,22 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [regJabatan, setRegJabatan] = useState(`Ketua RT ${rtStr}`);
   const [regKontak, setRegKontak] = useState(pengaturanKas?.kontakKetuaRT?.telp || '');
   const [regPin, setRegPin] = useState('');
+  const [pendingSyncPin, setPendingSyncPin] = useState('');
   const [syncAccountBusy, setSyncAccountBusy] = useState(false);
+  const [diagnosticResult, setDiagnosticResult] = useState<ServerHealthDiagnostic | null>(null);
+  const [showUrlConfig, setShowUrlConfig] = useState(false);
+  const [apiUrlInput, setApiUrlInput] = useState(() => getApiBaseUrl());
 
   // Warga form: Username = Nama Asli, Password = Nomor KK (16 digit)
   const [wargaUsername, setWargaUsername] = useState('');
   const [wargaPasswordKK, setWargaPasswordKK] = useState('');
   const [wargaError, setWargaError] = useState('');
   const [wargaChecking, setWargaChecking] = useState(false);
+
+  const effectiveServerConnected = diagnosticResult ? diagnosticResult.connected : serverConnected;
+  const activeDiagnosticError =
+    (diagnosticResult && !diagnosticResult.connected && diagnosticResult.message) ||
+    (!effectiveServerConnected ? serverErrorDetail : null);
 
   if (!isOpen) return null;
 
@@ -289,16 +305,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 <span>Menu Login Aplikasi</span>
                 <span
                   className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] ${
-                    sseConnected || serverConnected
+                    sseConnected || effectiveServerConnected
                       ? 'bg-emerald-400/20 text-emerald-100'
-                      : 'bg-rose-400/30 text-rose-100'
+                      : 'bg-rose-500/40 text-rose-100'
                   }`}
                 >
                   <Wifi size={9} />
                   <span>
                     {sseConnected
                       ? 'Database Server Live'
-                      : serverConnected
+                      : effectiveServerConnected
                       ? 'Database Server Online'
                       : 'Server Terputus'}
                   </span>
@@ -470,19 +486,40 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   </div>
 
                   {pendingSyncAdmin && (
-                    <button
-                      type="button"
-                      disabled={syncAccountBusy}
-                      onClick={() => handleSyncAndLoginAdmin(pendingSyncAdmin)}
-                      className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] py-2.5 px-3 text-xs font-bold text-white shadow-xs transition-all cursor-pointer disabled:opacity-60"
-                    >
-                      <CloudUpload size={14} />
-                      <span>
-                        {syncAccountBusy
-                          ? 'Menyinkronkan Akun & Data ke Server...'
-                          : 'Sinkronkan Akun ke Server & Masuk'}
-                      </span>
-                    </button>
+                    <div className="space-y-2 pt-1">
+                      <div>
+                        <label className="block text-[10px] font-bold text-amber-900 mb-1">
+                          PIN Keamanan Pengurus (6 Digit, Awal: 123456)
+                        </label>
+                        <input
+                          type="password"
+                          inputMode="numeric"
+                          maxLength={6}
+                          value={pendingSyncPin}
+                          onChange={(e) => setPendingSyncPin(e.target.value.replace(/\D/g, ''))}
+                          placeholder="Masukkan 6 digit PIN (contoh: 123456)"
+                          className="w-full rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-xs font-mono text-slate-800"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        disabled={syncAccountBusy}
+                        onClick={() =>
+                          handleSyncAndLoginAdmin(
+                            pendingSyncAdmin,
+                            pendingSyncPin.trim() || undefined
+                          )
+                        }
+                        className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] py-2.5 px-3 text-xs font-bold text-white shadow-xs transition-all cursor-pointer disabled:opacity-60"
+                      >
+                        <CloudUpload size={14} />
+                        <span>
+                          {syncAccountBusy
+                            ? 'Menyinkronkan Akun & Data ke Server...'
+                            : 'Sinkronkan Akun ke Server & Masuk'}
+                        </span>
+                      </button>
+                    </div>
                   )}
 
                   {!pendingSyncAdmin && adminUsername.trim() && adminPassword.trim() && (
@@ -779,36 +816,121 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
           {/* Footer security note & Discreet Server Access */}
           <div className="mt-5 pt-4 border-t border-slate-100 flex flex-col items-center gap-2 text-center">
-            {onRefreshSync && (
-              <button
-                type="button"
-                disabled={isRefreshing}
-                onClick={async () => {
-                  setIsRefreshing(true);
-                  setSyncNotice(null);
-                  try {
+            <button
+              type="button"
+              disabled={isRefreshing}
+              onClick={async () => {
+                setIsRefreshing(true);
+                setSyncNotice(null);
+                try {
+                  const health = await checkServerHealth();
+                  setDiagnosticResult(health);
+                  if (health.connected && onRefreshSync) {
                     await onRefreshSync();
-                    setSyncNotice('Koneksi database server pusat diperbarui.');
-                    setTimeout(() => setSyncNotice(null), 3500);
-                  } finally {
-                    setIsRefreshing(false);
+                    setSyncNotice(
+                      `${health.message} • ${health.totalAdminAccounts ?? 0} Akun Admin • ${health.totalWarga ?? 0} KK`
+                    );
                   }
-                }}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-1.5 text-[11px] font-bold text-[#0B5D3F] hover:bg-emerald-100 transition-colors cursor-pointer disabled:opacity-60"
-              >
-                <RefreshCw size={12} className={isRefreshing ? 'animate-spin' : ''} />
-                <span>
-                  {isRefreshing ? 'Memeriksa koneksi server...' : 'Periksa Koneksi Database Server'}
-                </span>
-              </button>
-            )}
+                } finally {
+                  setIsRefreshing(false);
+                }
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-1.5 text-[11px] font-bold text-[#0B5D3F] hover:bg-emerald-100 transition-colors cursor-pointer disabled:opacity-60"
+            >
+              <RefreshCw size={12} className={isRefreshing ? 'animate-spin' : ''} />
+              <span>
+                {isRefreshing ? 'Memeriksa koneksi server...' : 'Periksa Koneksi Database Server'}
+              </span>
+            </button>
 
             {syncNotice && (
-              <p className="text-[11px] font-bold text-emerald-700 flex items-center gap-1">
-                <Check size={12} />
-                <span>{syncNotice}</span>
-              </p>
+              <div className="w-full rounded-xl bg-emerald-50 border border-emerald-200 p-2.5 text-left text-[11px] text-emerald-800 space-y-0.5">
+                <p className="font-bold flex items-center gap-1 text-emerald-900">
+                  <Check size={12} className="shrink-0" />
+                  <span>{syncNotice}</span>
+                </p>
+                <p className="text-[10px] text-emerald-700 break-all">
+                  API: {diagnosticResult?.endpointUrl || getResolvedEndpointDisplay('/api/health')}
+                </p>
+              </div>
             )}
+
+            {activeDiagnosticError && (
+              <div className="w-full rounded-xl bg-rose-50 border border-rose-200 p-2.5 text-left text-[11px] text-rose-800 space-y-1">
+                <p className="font-bold flex items-start gap-1.5 text-rose-900">
+                  <AlertCircle size={13} className="shrink-0 mt-0.5" />
+                  <span>{activeDiagnosticError}</span>
+                </p>
+                <p className="text-[10px] text-rose-700 break-all">
+                  Endpoint diuji: {diagnosticResult?.endpointUrl || getResolvedEndpointDisplay('/api/health')}
+                </p>
+              </div>
+            )}
+
+            <div className="w-full">
+              <button
+                type="button"
+                onClick={() => setShowUrlConfig((prev) => !prev)}
+                className="text-[10px] font-semibold text-slate-400 hover:text-[#0B5D3F] underline cursor-pointer"
+              >
+                {showUrlConfig
+                  ? 'Tutup Pengaturan URL Server API'
+                  : 'Pengaturan Alamat Server API (Untuk APK / Perangkat Luar)'}
+              </button>
+
+              {showUrlConfig && (
+                <div className="mt-2 rounded-xl bg-slate-50 border border-slate-200 p-2.5 text-left space-y-2">
+                  <label className="block text-[10px] font-bold text-slate-700">
+                    URL Server Backend (kosongkan jika sama dengan domain saat ini):
+                  </label>
+                  <input
+                    type="url"
+                    value={apiUrlInput}
+                    onChange={(e) => setApiUrlInput(e.target.value)}
+                    placeholder="https://nama-server-publik-anda.run.app"
+                    className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-mono text-slate-800"
+                  />
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setApiBaseUrl(apiUrlInput);
+                        setIsRefreshing(true);
+                        setSyncNotice(null);
+                        try {
+                          const health = await checkServerHealth();
+                          setDiagnosticResult(health);
+                          if (health.connected && onRefreshSync) {
+                            await onRefreshSync();
+                            setSyncNotice(
+                              `${health.message} • ${health.totalAdminAccounts ?? 0} Akun Admin • ${health.totalWarga ?? 0} KK`
+                            );
+                          }
+                        } finally {
+                          setIsRefreshing(false);
+                        }
+                      }}
+                      className="flex-1 rounded-lg bg-[#0B5D3F] hover:bg-[#084831] py-1.5 px-2.5 text-[11px] font-bold text-white cursor-pointer"
+                    >
+                      Simpan &amp; Uji Koneksi
+                    </button>
+                    {getApiBaseUrl() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setApiUrlInput('');
+                          setApiBaseUrl('');
+                          setDiagnosticResult(null);
+                        }}
+                        className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                      >
+                        Reset
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
 
             {canClose && onLogout && (
               <button

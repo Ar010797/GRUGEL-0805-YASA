@@ -48,6 +48,119 @@ export interface AppDatabaseSchema {
 
 const LEGACY_LOCAL_STORAGE_KEY = 'kas_rt08_rw05_database_v2';
 const AUTH_TOKEN_KEY = 'kaswarga_auth_token_v1';
+const API_BASE_URL_KEY = 'kaswarga_api_base_url_v1';
+
+export function normalizeBaseUrl(raw?: string | null): string {
+  const val = String(raw || '').trim().replace(/\/+$/, '');
+  if (!val) return '';
+  if (!/^https?:\/\//i.test(val)) {
+    return `https://${val}`;
+  }
+  return val;
+}
+
+export function getApiBaseUrl(): string {
+  try {
+    const override = localStorage.getItem(API_BASE_URL_KEY);
+    if (override && override.trim()) {
+      return normalizeBaseUrl(override);
+    }
+  } catch {
+    // ignore storage errors
+  }
+  const envUrl =
+    (typeof import.meta !== 'undefined' && (import.meta as any)?.env?.VITE_API_BASE_URL) || '';
+  return normalizeBaseUrl(envUrl);
+}
+
+export function setApiBaseUrl(url: string): string {
+  const normalized = normalizeBaseUrl(url);
+  try {
+    if (normalized) {
+      localStorage.setItem(API_BASE_URL_KEY, normalized);
+    } else {
+      localStorage.removeItem(API_BASE_URL_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return normalized;
+}
+
+export function apiUrl(path: string): string {
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const base = getApiBaseUrl();
+  return base ? `${base}${cleanPath}` : cleanPath;
+}
+
+export function getResolvedEndpointDisplay(path: string): string {
+  const target = apiUrl(path);
+  if (/^https?:\/\//i.test(target)) return target;
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return `${window.location.origin}${target}`;
+  }
+  return target;
+}
+
+async function readApiJsonSafely(
+  res: Response,
+  endpointUrl: string
+): Promise<{ json: any | null; errorMessage?: string }> {
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  const rawText = await res.text().catch(() => '');
+  const trimmed = rawText.trim();
+  const looksLikeHtml =
+    contentType.includes('text/html') ||
+    trimmed.startsWith('<!doctype') ||
+    trimmed.startsWith('<html');
+
+  if (looksLikeHtml) {
+    const isAuthRedirect =
+      res.url.includes('__cookie_check') ||
+      res.url.includes('accounts.google.com') ||
+      trimmed.includes('_aistudio-iframe');
+    return {
+      json: null,
+      errorMessage: isAuthRedirect
+        ? `Akses ke ${endpointUrl} dialihkan ke halaman autentikasi AI Studio (HTTP ${res.status}). APK/perangkat luar memerlukan URL Server Publik (Shared/Production URL) yang dapat diakses tanpa login browser AI Studio.`
+        : `Server mengembalikan HTML (HTTP ${res.status}) bukan JSON API pada ${endpointUrl}. Pastikan backend Node.js/Express aktif dan URL Server sudah benar.`,
+    };
+  }
+
+  if (!trimmed) {
+    return {
+      json: null,
+      errorMessage:
+        res.status === 404
+          ? `Endpoint API tidak ditemukan (HTTP 404) pada ${endpointUrl}. Server publik belum di-publish atau URL backend belum sesuai.`
+          : `Server merespons kosong (HTTP ${res.status}) pada ${endpointUrl}.`,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return {
+      json: parsed,
+      errorMessage: parsed?.message,
+    };
+  } catch {
+    return {
+      json: null,
+      errorMessage: `Respons server tidak valid (HTTP ${res.status}, bukan JSON) dari ${endpointUrl}.`,
+    };
+  }
+}
+
+function formatNetworkError(err: any, endpointUrl: string): string {
+  const raw = String(err?.message || '').trim();
+  if (err?.name === 'AbortError') {
+    return `Koneksi ke server (${endpointUrl}) timeout melebihi batas waktu.`;
+  }
+  if (/failed to fetch|networkerror|load failed|network request failed/i.test(raw)) {
+    return `Gagal menjangkau server (${endpointUrl}). Kemungkinan: server belum aktif, CORS/SSL diblokir WebView, atau URL API tidak dapat diakses dari jaringan ini.`;
+  }
+  return `Gagal terhubung ke ${endpointUrl}${raw ? `: ${raw}` : '.'}`;
+}
 
 export function getAuthToken(): string | null {
   try {
@@ -260,28 +373,60 @@ export function formatWaktuSyncID(date: Date = new Date()): string {
   }
 }
 
-export async function checkServerHealth(): Promise<{
+export interface ServerHealthDiagnostic {
   connected: boolean;
+  latencyMs: number;
+  endpointUrl: string;
+  httpStatus?: number;
+  engine?: string;
   revision?: number;
-  message?: string;
-}> {
+  totalWarga?: number;
+  totalAdminAccounts?: number;
+  message: string;
+  errorDetail?: string;
+}
+
+export async function checkServerHealth(): Promise<ServerHealthDiagnostic> {
+  const endpointUrl = getResolvedEndpointDisplay('/api/health');
+  const started = Date.now();
   try {
-    const res = await fetch(`/api/health?t=${Date.now()}`, { cache: 'no-store' });
-    const json = await res.json().catch(() => null);
+    const res = await fetch(apiUrl(`/api/health?t=${Date.now()}`), { cache: 'no-store' });
+    const latencyMs = Date.now() - started;
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
     if (!res.ok || json?.status !== 'ok') {
+      const msg =
+        errorMessage ||
+        `Server merespons HTTP ${res.status} (${json?.database || 'error'}) pada ${endpointUrl}.`;
       return {
         connected: false,
-        message: json?.message || 'Koneksi database server sedang bermasalah.',
+        latencyMs,
+        endpointUrl,
+        httpStatus: res.status,
+        message: msg,
+        errorDetail: msg,
       };
     }
     return {
       connected: true,
+      latencyMs,
+      endpointUrl,
+      httpStatus: res.status,
+      engine: json.engine || 'PostgreSQL (Cloud SQL)',
       revision: Number(json.revision) || 1,
+      totalWarga: typeof json.totalWarga === 'number' ? json.totalWarga : undefined,
+      totalAdminAccounts:
+        typeof json.totalAdminAccounts === 'number' ? json.totalAdminAccounts : undefined,
+      message: `Terhubung ke ${json.engine || 'PostgreSQL (Cloud SQL)'} (${latencyMs} ms)`,
     };
-  } catch {
+  } catch (err: any) {
+    const latencyMs = Date.now() - started;
+    const msg = formatNetworkError(err, endpointUrl);
     return {
       connected: false,
-      message: 'Tidak dapat terhubung ke server pusat. Periksa koneksi internet Anda.',
+      latencyMs,
+      endpointUrl,
+      message: msg,
+      errorDetail: msg,
     };
   }
 }
@@ -292,9 +437,9 @@ export async function fetchPublicBootstrapInfo(): Promise<{
   revision: number;
 } | null> {
   try {
-    const res = await fetch(`/api/public/info?t=${Date.now()}`, { cache: 'no-store' });
+    const res = await fetch(apiUrl(`/api/public/info?t=${Date.now()}`), { cache: 'no-store' });
     if (!res.ok) return null;
-    const json = await res.json();
+    const { json } = await readApiJsonSafely(res, getResolvedEndpointDisplay('/api/public/info'));
     if (!json?.success || !json?.pengaturanKas) return null;
     return {
       pengaturanKas: json.pengaturanKas as PengaturanKas,
@@ -311,18 +456,19 @@ export async function loginWithServer(
   username: string,
   password: string
 ): Promise<{ ok: boolean; status?: number; token?: string; user?: AuthUser; message?: string }> {
+  const endpointUrl = getResolvedEndpointDisplay('/api/auth/login');
   try {
-    const res = await fetch('/api/auth/login', {
+    const res = await fetch(apiUrl('/api/auth/login'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ role, username, password }),
     });
-    const json = await res.json().catch(() => null);
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
     if (!res.ok || !json?.success || !json?.token || !json?.user) {
       return {
         ok: false,
         status: res.status,
-        message: json?.message || 'Login gagal. Periksa kembali kredensial Anda.',
+        message: errorMessage || `Login gagal (HTTP ${res.status}). Periksa kembali kredensial Anda.`,
       };
     }
     setAuthToken(json.token);
@@ -332,10 +478,10 @@ export async function loginWithServer(
       token: json.token,
       user: json.user as AuthUser,
     };
-  } catch {
+  } catch (err: any) {
     return {
       ok: false,
-      message: 'Gagal menghubungi server autentikasi. Periksa koneksi internet Anda.',
+      message: formatNetworkError(err, endpointUrl),
     };
   }
 }
@@ -348,7 +494,7 @@ export async function verifySavedSession(): Promise<{
   const token = getAuthToken();
   if (!token) return { ok: false, unauthorized: true };
   try {
-    const res = await fetch(`/api/auth/me?t=${Date.now()}`, {
+    const res = await fetch(apiUrl(`/api/auth/me?t=${Date.now()}`), {
       method: 'GET',
       headers: authHeaders(),
       cache: 'no-store',
@@ -358,7 +504,7 @@ export async function verifySavedSession(): Promise<{
       return { ok: false, unauthorized: true };
     }
     if (!res.ok) return { ok: false };
-    const json = await res.json().catch(() => null);
+    const { json } = await readApiJsonSafely(res, getResolvedEndpointDisplay('/api/auth/me'));
     if (json?.success && json?.user) {
       return { ok: true, user: json.user as AuthUser };
     }
@@ -371,7 +517,7 @@ export async function verifySavedSession(): Promise<{
 export async function logoutFromServer(): Promise<void> {
   try {
     if (getAuthToken()) {
-      await fetch('/api/auth/logout', {
+      await fetch(apiUrl('/api/auth/logout'), {
         method: 'POST',
         headers: authHeaders(),
       }).catch(() => {});
@@ -387,7 +533,7 @@ export async function checkServerRevision(
   if (!getAuthToken()) return null;
   try {
     const res = await fetch(
-      `/api/sync-check?since=${encodeURIComponent(String(sinceRevision))}&t=${Date.now()}`,
+      apiUrl(`/api/sync-check?since=${encodeURIComponent(String(sinceRevision))}&t=${Date.now()}`),
       {
         method: 'GET',
         headers: authHeaders(),
@@ -395,7 +541,7 @@ export async function checkServerRevision(
       }
     );
     if (!res.ok) return null;
-    const json = await res.json();
+    const { json } = await readApiJsonSafely(res, getResolvedEndpointDisplay('/api/sync-check'));
     if (!json || typeof json.revision !== 'number') return null;
     return {
       changed: Boolean(json.changed),
@@ -416,18 +562,19 @@ export async function fetchServerSnapshotWithStatus(): Promise<{
   if (!getAuthToken()) {
     return { ok: false, status: 401, message: 'Sesi login tidak ditemukan.' };
   }
+  const endpointUrl = getResolvedEndpointDisplay('/api/data');
   try {
-    const res = await fetch(`/api/data?t=${Date.now()}`, {
+    const res = await fetch(apiUrl(`/api/data?t=${Date.now()}`), {
       method: 'GET',
       headers: authHeaders(),
       cache: 'no-store',
     });
-    const json = await res.json().catch(() => null);
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
     if (!res.ok || !json?.data) {
       return {
         ok: false,
         status: res.status,
-        message: json?.message || 'Gagal mengambil data terbaru dari database server.',
+        message: errorMessage || `Gagal mengambil data dari database server (HTTP ${res.status}).`,
       };
     }
     return {
@@ -435,10 +582,10 @@ export async function fetchServerSnapshotWithStatus(): Promise<{
       status: res.status,
       data: json.data as AppDatabaseSchema,
     };
-  } catch {
+  } catch (err: any) {
     return {
       ok: false,
-      message: 'Koneksi ke server pusat terputus saat mengambil data.',
+      message: formatNetworkError(err, endpointUrl),
     };
   }
 }
@@ -466,6 +613,7 @@ export async function saveAppData(
     lastUpdated: new Date().toISOString(),
   };
 
+  const endpointUrl = getResolvedEndpointDisplay('/api/data');
   try {
     const deletedIds: Partial<DeletedIdsMap> = {
       ...(options?.deletedIds || {}),
@@ -481,18 +629,18 @@ export async function saveAppData(
       deletedPengumumanIds: deletedIds.pengumuman || [],
     };
 
-    const res = await fetch('/api/data', {
+    const res = await fetch(apiUrl('/api/data'), {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload),
       keepalive: options?.keepalive ?? false,
     });
-    const json = await res.json().catch(() => null);
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
     if (!res.ok) {
       return {
         ok: false,
         status: res.status,
-        message: json?.message || 'Gagal menyinkronkan data ke database server.',
+        message: errorMessage || `Gagal menyinkronkan data ke database server (HTTP ${res.status}).`,
       };
     }
     return {
@@ -500,10 +648,10 @@ export async function saveAppData(
       status: res.status,
       serverData: json?.data as AppDatabaseSchema | undefined,
     };
-  } catch {
+  } catch (err: any) {
     return {
       ok: false,
-      message: 'Koneksi ke server pusat gagal saat menyimpan data.',
+      message: formatNetworkError(err, endpointUrl),
     };
   }
 }
@@ -512,17 +660,18 @@ export async function migrateLegacyLocalDataToServer(
   localData: Partial<AppDatabaseSchema>
 ): Promise<{ ok: boolean; serverData?: AppDatabaseSchema; message?: string }> {
   if (!getAuthToken()) return { ok: false, message: 'Belum login.' };
+  const endpointUrl = getResolvedEndpointDisplay('/api/sync/migrate-local');
   try {
-    const res = await fetch('/api/sync/migrate-local', {
+    const res = await fetch(apiUrl('/api/sync/migrate-local'), {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ ...localData, isHardReset: false }),
     });
-    const json = await res.json().catch(() => null);
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
     if (!res.ok || !json?.success) {
       return {
         ok: false,
-        message: json?.message || 'Gagal memigrasikan data lokal ke server pusat.',
+        message: errorMessage || `Gagal memigrasikan data lokal ke server pusat (HTTP ${res.status}).`,
       };
     }
     return {
@@ -530,8 +679,8 @@ export async function migrateLegacyLocalDataToServer(
       serverData: json.data as AppDatabaseSchema | undefined,
       message: json.message,
     };
-  } catch {
-    return { ok: false, message: 'Koneksi gagal saat migrasi data ke server.' };
+  } catch (err: any) {
+    return { ok: false, message: formatNetworkError(err, endpointUrl) };
   }
 }
 
@@ -543,13 +692,13 @@ export async function fetchServerAdminAccounts(): Promise<{
 } | null> {
   if (!getAuthToken()) return null;
   try {
-    const res = await fetch(`/api/admin-accounts?t=${Date.now()}`, {
+    const res = await fetch(apiUrl(`/api/admin-accounts?t=${Date.now()}`), {
       method: 'GET',
       headers: authHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return null;
-    const json = await res.json();
+    const { json } = await readApiJsonSafely(res, getResolvedEndpointDisplay('/api/admin-accounts'));
     if (!json || !json.success) return null;
     return {
       adminAccounts: Array.isArray(json.adminAccounts) ? json.adminAccounts : [],
@@ -571,24 +720,27 @@ export async function syncAdminAccountToServer(params: {
 }): Promise<{
   ok: boolean;
   status?: number;
+  code?: string;
   message?: string;
   account?: AdminRTAccount;
   token?: string;
   user?: AuthUser;
   serverData?: AppDatabaseSchema;
 }> {
+  const endpointUrl = getResolvedEndpointDisplay('/api/admin/sync-account');
   try {
-    const res = await fetch('/api/admin/sync-account', {
+    const res = await fetch(apiUrl('/api/admin/sync-account'), {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(params),
     });
-    const json = await res.json().catch(() => null);
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
     if (!res.ok || !json?.success) {
       return {
         ok: false,
         status: res.status,
-        message: json?.message || 'Gagal menyinkronkan akun admin ke server.',
+        code: json?.code,
+        message: errorMessage || `Gagal menyinkronkan akun admin ke server (HTTP ${res.status}).`,
       };
     }
     if (json.token) {
@@ -603,10 +755,10 @@ export async function syncAdminAccountToServer(params: {
       user: json.user as AuthUser | undefined,
       serverData: json.data as AppDatabaseSchema | undefined,
     };
-  } catch {
+  } catch (err: any) {
     return {
       ok: false,
-      message: 'Tidak dapat terhubung ke server. Periksa koneksi internet Anda.',
+      message: formatNetworkError(err, endpointUrl),
     };
   }
 }
@@ -634,7 +786,7 @@ export function flushSaveAppDataKeepalive(
         : fullPayloadStr.length;
 
     if (byteLength <= 60000) {
-      fetch('/api/data', {
+      fetch(apiUrl('/api/data'), {
         method: 'POST',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: fullPayloadStr,
@@ -655,7 +807,7 @@ export function flushSaveAppDataKeepalive(
         : compactPayloadStr.length;
 
     if (compactLength <= 60000) {
-      fetch('/api/data', {
+      fetch(apiUrl('/api/data'), {
         method: 'POST',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: compactPayloadStr,
@@ -692,7 +844,7 @@ export function subscribeServerStream(
       return;
     }
     try {
-      es = new EventSource(`/api/stream?token=${encodeURIComponent(latestToken)}`);
+      es = new EventSource(apiUrl(`/api/stream?token=${encodeURIComponent(latestToken)}`));
       es.onopen = () => {
         onConnectionChange?.(true);
       };
@@ -738,13 +890,13 @@ export async function searchWargaOnServer(q: string, rt = ''): Promise<Warga[] |
     if (q.trim()) params.set('q', q.trim());
     if (rt.trim()) params.set('rt', rt.trim());
     params.set('t', String(Date.now()));
-    const res = await fetch(`/api/warga?${params.toString()}`, {
+    const res = await fetch(apiUrl(`/api/warga?${params.toString()}`), {
       method: 'GET',
       headers: authHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return null;
-    const json = await res.json().catch(() => null);
+    const { json } = await readApiJsonSafely(res, getResolvedEndpointDisplay('/api/warga'));
     if (json?.success && Array.isArray(json.wargaList)) {
       return json.wargaList as Warga[];
     }
@@ -757,8 +909,9 @@ export async function searchWargaOnServer(q: string, rt = ''): Promise<Warga[] |
 export async function saveSingleWargaToServer(
   warga: Warga
 ): Promise<{ ok: boolean; warga?: Warga; message?: string }> {
+  const endpointUrl = getResolvedEndpointDisplay('/api/warga');
   try {
-    const res = await fetch('/api/warga', {
+    const res = await fetch(apiUrl('/api/warga'), {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
@@ -768,16 +921,16 @@ export async function saveSingleWargaToServer(
         },
       }),
     });
-    const json = await res.json().catch(() => null);
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
     if (!res.ok) {
       return {
         ok: false,
-        message: json?.message || 'Gagal menyimpan data warga ke server.',
+        message: errorMessage || `Gagal menyimpan data warga ke server (HTTP ${res.status}).`,
       };
     }
     return { ok: true, warga: json?.warga as Warga | undefined };
-  } catch {
-    return { ok: false, message: 'Koneksi gagal saat menyimpan data warga ke server.' };
+  } catch (err: any) {
+    return { ok: false, message: formatNetworkError(err, endpointUrl) };
   }
 }
 
@@ -787,15 +940,16 @@ export async function bulkImportWargaOnServer(params: {
   mergeExisting: boolean;
   tahunAktif: number;
 }): Promise<{ ok: boolean; addedKK?: number; updatedKK?: number; addedBantuan?: number; message?: string }> {
+  const endpointUrl = getResolvedEndpointDisplay('/api/warga/bulk');
   try {
-    const res = await fetch('/api/warga/bulk', {
+    const res = await fetch(apiUrl('/api/warga/bulk'), {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(params),
     });
-    const json = await res.json().catch(() => null);
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
     if (!res.ok || !json?.success) {
-      return { ok: false, message: json?.message || 'Gagal mengimpor Excel ke server.' };
+      return { ok: false, message: errorMessage || `Gagal mengimpor Excel ke server (HTTP ${res.status}).` };
     }
     return {
       ok: true,
@@ -803,26 +957,28 @@ export async function bulkImportWargaOnServer(params: {
       updatedKK: json.updatedKK,
       addedBantuan: json.addedBantuan,
     };
-  } catch {
-    return { ok: false, message: 'Koneksi gagal saat mengimpor Excel ke server.' };
+  } catch (err: any) {
+    return { ok: false, message: formatNetworkError(err, endpointUrl) };
   }
 }
 
 export async function deleteWargaFromServer(
   id: string
 ): Promise<{ ok: boolean; message?: string }> {
+  const path = `/api/warga/${encodeURIComponent(id)}`;
+  const endpointUrl = getResolvedEndpointDisplay(path);
   try {
-    const res = await fetch(`/api/warga/${encodeURIComponent(id)}`, {
+    const res = await fetch(apiUrl(path), {
       method: 'DELETE',
       headers: authHeaders(),
     });
-    const json = await res.json().catch(() => null);
+    const { errorMessage } = await readApiJsonSafely(res, endpointUrl);
     if (!res.ok) {
-      return { ok: false, message: json?.message || 'Gagal menghapus data warga di server.' };
+      return { ok: false, message: errorMessage || `Gagal menghapus data warga di server (HTTP ${res.status}).` };
     }
     return { ok: true };
-  } catch {
-    return { ok: false, message: 'Koneksi gagal saat menghapus data warga di server.' };
+  } catch (err: any) {
+    return { ok: false, message: formatNetworkError(err, endpointUrl) };
   }
 }
 
@@ -830,48 +986,51 @@ export async function updateWargaSelfOnServer(patch: {
   pin?: string;
   telepon?: string;
 }): Promise<{ ok: boolean; message?: string }> {
+  const endpointUrl = getResolvedEndpointDisplay('/api/warga/self');
   try {
-    const res = await fetch('/api/warga/self', {
+    const res = await fetch(apiUrl('/api/warga/self'), {
       method: 'PATCH',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(patch),
     });
-    const json = await res.json().catch(() => null);
+    const { errorMessage } = await readApiJsonSafely(res, endpointUrl);
     if (!res.ok) {
-      return { ok: false, message: json?.message || 'Gagal memperbarui PIN warga di server.' };
+      return { ok: false, message: errorMessage || `Gagal memperbarui PIN warga di server (HTTP ${res.status}).` };
     }
     return { ok: true };
-  } catch {
-    return { ok: false, message: 'Koneksi gagal saat memperbarui profil ke server.' };
+  } catch (err: any) {
+    return { ok: false, message: formatNetworkError(err, endpointUrl) };
   }
 }
 
 async function postEntity(url: string, body: unknown, errMsg: string): Promise<{ ok: boolean; message?: string }> {
+  const endpointUrl = getResolvedEndpointDisplay(url);
   try {
-    const res = await fetch(url, {
+    const res = await fetch(apiUrl(url), {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) return { ok: false, message: json?.message || errMsg };
+    const { errorMessage } = await readApiJsonSafely(res, endpointUrl);
+    if (!res.ok) return { ok: false, message: errorMessage || `${errMsg} (HTTP ${res.status})` };
     return { ok: true };
-  } catch {
-    return { ok: false, message: `${errMsg} (koneksi gagal)` };
+  } catch (err: any) {
+    return { ok: false, message: formatNetworkError(err, endpointUrl) };
   }
 }
 
 async function deleteEntity(url: string, errMsg: string): Promise<{ ok: boolean; message?: string }> {
+  const endpointUrl = getResolvedEndpointDisplay(url);
   try {
-    const res = await fetch(url, {
+    const res = await fetch(apiUrl(url), {
       method: 'DELETE',
       headers: authHeaders(),
     });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) return { ok: false, message: json?.message || errMsg };
+    const { errorMessage } = await readApiJsonSafely(res, endpointUrl);
+    if (!res.ok) return { ok: false, message: errorMessage || `${errMsg} (HTTP ${res.status})` };
     return { ok: true };
-  } catch {
-    return { ok: false, message: `${errMsg} (koneksi gagal)` };
+  } catch (err: any) {
+    return { ok: false, message: formatNetworkError(err, endpointUrl) };
   }
 }
 
@@ -955,7 +1114,7 @@ export async function clearAppData(preserveAdminAccounts: AdminRTAccount[] = [])
       deletedIds: { ...EMPTY_DELETED_IDS },
     };
 
-    const res = await fetch('/api/data', {
+    const res = await fetch(apiUrl('/api/data'), {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ ...emptyPayload, isHardReset: true }),

@@ -429,6 +429,12 @@ export default function App() {
       setServerConnected(health.connected);
       if (!health.connected && health.message) {
         setCloudError(health.message);
+      } else if (health.connected) {
+        setCloudError((prev) =>
+          prev && (prev.includes('server') || prev.includes('koneksi') || prev.includes('HTML') || prev.includes('HTTP'))
+            ? null
+            : prev
+        );
       }
       if (pub) {
         if (pub.tahunAktif) setTahunAktif(pub.tahunAktif);
@@ -459,8 +465,12 @@ export default function App() {
       setServerConnected(health.connected);
       if (health.connected) {
         setCloudError((prev) =>
-          prev && (prev.includes('server') || prev.includes('koneksi')) ? null : prev
+          prev && (prev.includes('server') || prev.includes('koneksi') || prev.includes('HTML') || prev.includes('HTTP'))
+            ? null
+            : prev
         );
+      } else if (health.message) {
+        setCloudError(health.message);
       }
     }, 15000);
 
@@ -2056,6 +2066,7 @@ export default function App() {
           onSyncAdminAccountToServer={handleSyncAdminAccountToServer}
           sseConnected={sseConnected}
           serverConnected={serverConnected}
+          serverErrorDetail={cloudError}
         />
         <LupaPasswordModal
           isOpen={isLupaPasswordOpen}
@@ -2861,6 +2872,7 @@ export default function App() {
         onSyncAdminAccountToServer={handleSyncAdminAccountToServer}
         sseConnected={sseConnected}
         serverConnected={serverConnected}
+        serverErrorDetail={cloudError}
       />
 
       {/* Lupa Password Modal */}

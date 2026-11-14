@@ -50,9 +50,15 @@ const PORT = 3000;
 // Body parser & CORS
 app.use(express.json({ limit: '25mb' }));
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  res.header('Access-Control-Allow-Origin', origin || '*');
+  if (origin) {
+    res.header('Vary', 'Origin');
+    res.header('Access-Control-Allow-Credentials', 'true');
+  }
   res.header('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('Access-Control-Allow-Private-Network', 'true');
   res.header('Access-Control-Expose-Headers', 'Content-Disposition, Content-Type, Content-Length');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
@@ -118,6 +124,8 @@ app.get('/api/health', async (_req, res) => {
       app: 'Sistem Informasi Kas Warga & Server Desa Kotayasa',
       revision: health.revision,
       lastUpdated: health.lastUpdated,
+      totalWarga: health.totalWarga,
+      totalAdminAccounts: health.totalAdminAccounts,
       time: new Date().toISOString(),
     });
   } catch (err: any) {
@@ -341,8 +349,9 @@ app.post('/api/admin/sync-account', async (req, res) => {
       if (!isDefaultAdmin && !isMatchingExisting && !hasValidSecurityPin) {
         return res.status(403).json({
           success: false,
+          code: 'PIN_REQUIRED',
           message:
-            'PIN Keamanan Pengurus atau autentikasi admin tidak valid untuk mendaftarkan akun baru ke server.',
+            'Untuk mendaftarkan akun Admin baru ke Server Pusat, masukkan PIN Keamanan Pengurus 6 digit (awal: 123456).',
         });
       }
     }
@@ -779,6 +788,14 @@ app.get(
     }
   }
 );
+
+// Ensure unknown /api/* paths return clean JSON 404 instead of SPA index.html
+app.use('/api/*', (req, res) => {
+  return res.status(404).json({
+    success: false,
+    message: `Endpoint API "${req.originalUrl}" tidak ditemukan di server.`,
+  });
+});
 
 // Start Full-Stack Server
 async function start() {

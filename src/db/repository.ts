@@ -831,19 +831,28 @@ export async function checkDatabaseHealthSql(): Promise<{
   connected: boolean;
   revision: number;
   lastUpdated: string;
+  totalWarga: number;
+  totalAdminAccounts: number;
 }> {
   try {
     await db.execute(sql`SELECT 1`);
     await ensureSqlSeeded();
-    const metaRows = await db.select().from(syncMeta).where(eq(syncMeta.id, 'global')).limit(1);
+    const [metaRows, wargaCountRows, adminCountRows] = await Promise.all([
+      db.select().from(syncMeta).where(eq(syncMeta.id, 'global')).limit(1),
+      db.select({ count: sql<number>`count(*)::int` }).from(warga),
+      db.select({ count: sql<number>`count(*)::int` }).from(adminAccounts),
+    ]);
     return {
       connected: true,
       revision: metaRows[0] ? Number(metaRows[0].revision) || 1 : 1,
       lastUpdated: metaRows[0]?.lastUpdated || new Date().toISOString(),
+      totalWarga: Number(wargaCountRows[0]?.count) || 0,
+      totalAdminAccounts: Number(adminCountRows[0]?.count) || 0,
     };
-  } catch (err) {
+  } catch (err: any) {
     console.error('Database health check failed:', err);
-    throw new Error('Koneksi database server sedang bermasalah.', { cause: err });
+    const detail = err?.code ? `${err.code}: ${err.message}` : err?.message;
+    throw new Error(`Koneksi database server bermasalah (${detail || 'SQL error'}).`, { cause: err });
   }
 }
 
