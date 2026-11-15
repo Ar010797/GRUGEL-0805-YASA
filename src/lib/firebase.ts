@@ -8,8 +8,13 @@ import {
 } from 'firebase/auth';
 import {
   getFirestore,
+  initializeFirestore,
+  memoryLocalCache,
+  persistentLocalCache,
+  persistentMultipleTabManager,
   doc,
   getDocFromServer,
+  waitForPendingWrites,
   type Firestore,
 } from 'firebase/firestore';
 import firebaseConfigJson from '../../firebase-applet-config.json';
@@ -65,8 +70,50 @@ const app: FirebaseApp = getApps().some((a) => a.name === PRIMARY_APP_NAME)
       appId: firebaseConfig.appId,
     });
 
-export const db: Firestore = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+let resolvedPersistenceMode: 'indexeddb-multi-tab' | 'memory' = 'memory';
+
+function createFirestoreInstance(firebaseApp: FirebaseApp, databaseId: string): Firestore {
+  if (typeof window !== 'undefined' && typeof indexedDB !== 'undefined') {
+    try {
+      const instance = initializeFirestore(
+        firebaseApp,
+        {
+          localCache: persistentLocalCache({
+            tabManager: persistentMultipleTabManager(),
+          }),
+        },
+        databaseId
+      );
+      resolvedPersistenceMode = 'indexeddb-multi-tab';
+      return instance;
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      if (msg.includes('already been started') || err?.code === 'failed-precondition') {
+        try {
+          resolvedPersistenceMode = 'indexeddb-multi-tab';
+          return getFirestore(firebaseApp, databaseId);
+        } catch {
+          // fall through to memory cache
+        }
+      }
+      console.warn('Firestore persistentLocalCache unavailable, falling back to memoryLocalCache:', err);
+    }
+  }
+
+  try {
+    resolvedPersistenceMode = 'memory';
+    return initializeFirestore(firebaseApp, { localCache: memoryLocalCache() }, databaseId);
+  } catch {
+    resolvedPersistenceMode = 'memory';
+    return getFirestore(firebaseApp, databaseId);
+  }
+}
+
+export const db: Firestore = createFirestoreInstance(app, firebaseConfig.firestoreDatabaseId);
+export const firestorePersistenceMode = resolvedPersistenceMode;
 export const auth: Auth = getAuth(app);
+
+export { waitForPendingWrites };
 
 // Ensure auth sessions persist across reloads, Vercel SPA navigation, and Median WebView restarts
 if (typeof window !== 'undefined') {

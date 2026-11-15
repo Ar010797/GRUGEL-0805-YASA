@@ -2,13 +2,18 @@
 
 ## 1. Data Invariants (RW/RT Isolation & Zero-Trust RBAC)
 1. **Master Source of Truth & Assignment Scoping**:
-   - Roles are stored in `/admins/{uid}` (`role`: `'server'` | `'admin'`, `rw`, `rt`, `status`: `'aktif'` | `'nonaktif'`) and `/wargaProfiles/{uid}` (`role`: `'warga'`, `rw`, `rt`, `noKK`, `wargaId`). Client claims alone are never trusted (only Google-verified `ar01071997@gmail.com` with `email_verified == true` is bootstrapped admin).
-   - **Server RW (`role == 'server'`)** may only read and manage documents matching their assigned `rw`.
-   - **Admin RT (`role == 'admin'`)** may only read, create, update, and delete documents matching BOTH their assigned `rw` AND their assigned `rt`. Admin RT accounts cannot read or mutate records belonging to another RT or RW, and cannot elevate their own `role`, `rw`, `rt`, or `status`.
+   - Roles are stored in `/admins/{uid}` (`role`: `'server'` | `'admin'`, `rw`, `rt`, `rwId`, `rtId`, `status`: `'aktif'` | `'nonaktif'`) and `/wargaProfiles/{uid}` (`role`: `'warga'`, `rw`, `rt`, `rwId`, `rtId`, `noKK`, `wargaId`). Client claims alone are never trusted (only Google-verified `ar01071997@gmail.com` with `email_verified == true` is bootstrapped admin).
+   - **Canonical Hierarchy IDs (`rwId` & `rtId`)**:
+     - Every RW-scoped document enforces `rwId == 'rw_' + data.rw` (e.g., `'rw_05'`).
+     - Every RT-scoped document (plus `'SEMUA'` for RW-wide settings/announcements) enforces `rtId == (data.rt == 'SEMUA' ? 'SEMUA' : 'rt_' + data.rt)` (e.g., `'rt_01'`..`'rt_08'`).
+     - Both `rwId` and `rtId` are mandatory on document creation (`hasRequiredScopeIds`) and validated on updates (`isValidRwRtScope`).
+   - **Server RW (`role == 'server'`)** may read and manage documents across all 8 RTs (`01`..`08`) and RW-wide `'SEMUA'` announcements/settings matching their assigned `rw`.
+   - **Admin RT (`role == 'admin'`)** may only read, create, update, and delete documents matching BOTH their assigned `rw` AND their assigned `rt` (except reading RW-wide `'SEMUA'` announcements/settings). Admin RT accounts cannot read or mutate records belonging to another RT (`01`..`08`) or RW, and cannot elevate their own `role`, `rw`, `rt`, or `status`.
    - **Warga (`wargaProfiles/{uid}`)** may ONLY read their own `/warga/{wargaId}` record (`linkedUid == request.auth.uid`) and read `/rtPublicSummaries/{scopeId}` matching their exact `rw` and `rt`. Warga cannot read `/bantuan`, `/dokumen`, `/adminAccounts`, `/laporanBulanan`, or other families' PII.
-2. **Ownership, Access List & Temporal Integrity**:
+2. **Ownership, Access List, Null-Safe Get & Temporal Integrity**:
    - Every created document enforces `incoming().ownerUid == request.auth.uid`, `createdAt == request.time`, and `updatedAt == request.time`.
    - Every updated document preserves immutable `ownerUid` and `createdAt`, enforces `updatedAt == request.time`, and restricts mutations via `affectedKeys().hasOnly(...)` inside `isValid[Entity](incoming())`-guarded update rules.
+   - Single-document `allow get` checks safely handle `resource == null` for authorized active admins (`(resource == null && isActiveAdmin())`) before evaluating `existing().rw` / `existing().rt` so probing non-existent metadata/config docs never triggers a false NullPointer/permission crash.
 3. **Zero `get()` Inside `allow list` & Bounded Payloads**:
    - Every `allow list` rule evaluates `resource.data` (`ownerUid`, `serverUid`, `rtAdminUid`, `linkedUid`, `accessUids` bounded `<= 15`) without `get()` or `exists()` lookups and without blanket `isSignedIn()`.
    - Every single-document `get`, `create`, `update`, and `delete` enforces `isValidId(id)` (`^[a-zA-Z0-9_-]+$`, `1..128` chars) and strict `.size()` bounds on all strings and lists.
@@ -25,4 +30,4 @@
 9. **ID Poisoning (>128 chars or path traversal)**: `{ auth: adminRT08, op: "create", path: "/transactions/../../bad_id", data: { ... } }`
 10. **Spoofed ownerUid or Client-Backdated createdAt on Create**: `{ auth: adminRT08, op: "create", path: "/transactions/tx1", data: { ..., ownerUid: "other", createdAt: "2020-01-01T00:00:00Z" } }`
 11. **Non-Owner Resident Reading Another Resident PII**: `{ auth: warga1, op: "get", path: "/warga/warga2" }`
-12. **Denial of Wallet Oversized String (>4000 chars in pengumuman.isi)**: `{ auth: adminRT08, op: "create", path: "/pengumuman/p3", data: { ..., isi: "A".repeat(5000) } }`
+12. **Denial of Wallet Oversized String (>4000 chars) or Forged `rwId`/`rtId` Mismatch**: `{ auth: adminRT01, op: "create", path: "/warga/w1", data: { rt: "01", rw: "05", rtId: "rt_08", rwId: "rw_05", ... } }`

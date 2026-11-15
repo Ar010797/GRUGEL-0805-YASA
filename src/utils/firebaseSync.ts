@@ -15,6 +15,7 @@ import {
   getDoc,
   getDocs,
   onSnapshot,
+  onSnapshotsInSync,
   query,
   runTransaction,
   serverTimestamp,
@@ -65,6 +66,17 @@ export const BOOTSTRAPPED_ADMIN_EMAIL = 'ar01071997@gmail.com';
 export const DEFAULT_SECURITY_PIN = '123456';
 export const DEFAULT_RW = '05';
 export const DEFAULT_RT = '08';
+export const RW05_RT_CODES = ['01', '02', '03', '04', '05', '06', '07', '08'] as const;
+
+export function buildScopeIds(rtRaw: string, rwRaw: string): { rwId: string; rtId: string } {
+  const rw = normalizeRWCode(rwRaw, DEFAULT_RW);
+  const rtUpper = String(rtRaw || '').trim().toUpperCase();
+  const rt = rtUpper === 'SEMUA' ? 'SEMUA' : normalizeRTCode(rtRaw) || DEFAULT_RT;
+  return {
+    rwId: `rw_${rw}`,
+    rtId: rt === 'SEMUA' ? 'SEMUA' : `rt_${rt}`,
+  };
+}
 
 type EntityBucket =
   | 'warga'
@@ -76,6 +88,12 @@ type EntityBucket =
   | 'laporanBulanan'
   | 'settings';
 
+export interface FirestoreWriteResult {
+  ok: boolean;
+  pending?: boolean;
+  message?: string;
+}
+
 interface CachedDocMeta {
   ownerUid: string;
   createdAt: any;
@@ -84,10 +102,93 @@ interface CachedDocMeta {
   accessUids?: string[];
   rw?: string;
   rt?: string;
+  rwId?: string;
+  rtId?: string;
   linkedUid?: string;
+  localCreated?: boolean;
 }
 
 const docMetaCache = new Map<string, CachedDocMeta>();
+
+let activePendingWriteCount = 0;
+let latestAsyncWriteError: string | null = null;
+const pendingWriteListeners = new Set<() => void>();
+
+function notifyPendingWriteListeners() {
+  pendingWriteListeners.forEach((cb) => {
+    try {
+      cb();
+    } catch {
+      // ignore listener callback errors
+    }
+  });
+}
+
+export function getPendingServerWriteCount(): number {
+  return activePendingWriteCount;
+}
+
+export function clearLatestAsyncWriteError(): void {
+  latestAsyncWriteError = null;
+  notifyPendingWriteListeners();
+}
+
+function isOnlineBrowser(): boolean {
+  if (typeof navigator === 'undefined') return true;
+  return navigator.onLine !== false;
+}
+
+async function commitTrackedWrite(
+  writePromise: Promise<unknown>,
+  opType: OperationType,
+  path: string,
+  onAcked?: () => Promise<void> | void
+): Promise<FirestoreWriteResult> {
+  activePendingWriteCount++;
+  notifyPendingWriteListeners();
+
+  const ackPromise = writePromise.then(
+    async () => {
+      try {
+        if (onAcked) {
+          await onAcked();
+        }
+      } catch (postErr) {
+        console.warn(`Post-ACK task warning (${path}):`, postErr);
+      } finally {
+        activePendingWriteCount = Math.max(0, activePendingWriteCount - 1);
+        latestAsyncWriteError = null;
+        notifyPendingWriteListeners();
+      }
+      return { ok: true, pending: false } as FirestoreWriteResult;
+    },
+    (err: any) => {
+      activePendingWriteCount = Math.max(0, activePendingWriteCount - 1);
+      const errInfo = reportFirestoreError(err, opType, path);
+      const detail = err?.message || errInfo.error || 'Gagal menulis ke Cloud Firestore.';
+      latestAsyncWriteError = detail;
+      notifyPendingWriteListeners();
+      return { ok: false, pending: false, message: JSON.stringify({ ...errInfo, error: detail }) } as FirestoreWriteResult;
+    }
+  );
+
+  // When offline, do not block UI waiting for server ACK; Firestore persistentLocalCache queues it safely.
+  if (!isOnlineBrowser()) {
+    return { ok: true, pending: true };
+  }
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const raceResult = await Promise.race([
+    ackPromise,
+    new Promise<FirestoreWriteResult>((resolve) => {
+      timer = setTimeout(() => {
+        resolve({ ok: true, pending: true });
+      }, 2500);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return raceResult;
+}
 
 export interface AdminIdentityContext {
   uid: string;
@@ -246,21 +347,25 @@ export function formatFirebaseAuthError(error: any, fallbackMessage: string): st
 
 function recordMeta(path: string, data: any) {
   if (!data || typeof data !== 'object') return;
+  const existing = docMetaCache.get(path);
   docMetaCache.set(path, {
-    ownerUid: String(data.ownerUid || ''),
-    createdAt: data.createdAt,
-    serverUid: typeof data.serverUid === 'string' ? data.serverUid : undefined,
-    rtAdminUid: typeof data.rtAdminUid === 'string' ? data.rtAdminUid : undefined,
-    accessUids: Array.isArray(data.accessUids) ? data.accessUids : undefined,
-    rw: typeof data.rw === 'string' ? data.rw : undefined,
-    rt: typeof data.rt === 'string' ? data.rt : undefined,
-    linkedUid: typeof data.linkedUid === 'string' ? data.linkedUid : undefined,
+    ownerUid: String(data.ownerUid || existing?.ownerUid || ''),
+    createdAt: data.createdAt ?? existing?.createdAt ?? null,
+    serverUid: typeof data.serverUid === 'string' ? data.serverUid : existing?.serverUid,
+    rtAdminUid: typeof data.rtAdminUid === 'string' ? data.rtAdminUid : existing?.rtAdminUid,
+    accessUids: Array.isArray(data.accessUids) ? data.accessUids : existing?.accessUids,
+    rw: typeof data.rw === 'string' ? data.rw : existing?.rw,
+    rt: typeof data.rt === 'string' ? data.rt : existing?.rt,
+    rwId: typeof data.rwId === 'string' ? data.rwId : existing?.rwId,
+    rtId: typeof data.rtId === 'string' ? data.rtId : existing?.rtId,
+    linkedUid: typeof data.linkedUid === 'string' ? data.linkedUid : existing?.linkedUid,
+    localCreated: Boolean(data.localCreated ?? existing?.localCreated),
   });
 }
 
 async function resolveExistingMeta(path: string): Promise<CachedDocMeta | null> {
   const cached = docMetaCache.get(path);
-  if (cached && cached.ownerUid && cached.createdAt) {
+  if (cached && (cached.ownerUid || cached.localCreated)) {
     return cached;
   }
   try {
@@ -269,11 +374,32 @@ async function resolveExistingMeta(path: string): Promise<CachedDocMeta | null> 
     const snap = await getDoc(doc(db, colName, docId));
     if (!snap.exists()) return null;
     const data = snap.data();
-    recordMeta(path, data);
+    recordMeta(path, { ...data, localCreated: true });
     return docMetaCache.get(path) || null;
   } catch {
     return null;
   }
+}
+
+function buildEntityUpdatePatch(
+  colName: EntityBucket,
+  payload: Record<string, any>,
+  ctx: AdminIdentityContext | null
+): Record<string, any> {
+  const omitted = new Set<string>(['id', 'ownerUid', 'rw', 'createdAt']);
+  if (colName === 'adminAccounts' && ctx?.role !== 'server') {
+    ['username', 'passwordHash', 'rt', 'status', 'authUid'].forEach((k) => omitted.add(k));
+  }
+  if (colName === 'laporanBulanan' && ctx?.role !== 'server') {
+    ['rt', 'statusVerifikasi'].forEach((k) => omitted.add(k));
+  }
+  const patch: Record<string, any> = {};
+  for (const [k, v] of Object.entries(payload)) {
+    if (omitted.has(k) || v === undefined) continue;
+    patch[k] = v;
+  }
+  patch.updatedAt = serverTimestamp();
+  return patch;
 }
 
 function computeScopeMetadata(rtRaw: string, rwRaw: string, ctx?: AdminIdentityContext | null) {
@@ -461,6 +587,20 @@ export async function refreshAdminContext(uid: string): Promise<AdminIdentityCon
     // non-fatal if registry hasn't been created yet
   }
 
+  if (!serverUid) {
+    try {
+      const lockSnap = await getDoc(doc(db, 'systemMeta', 'serverLock'));
+      if (lockSnap.exists()) {
+        const lockData = lockSnap.data();
+        if (typeof lockData.serverUid === 'string' && lockData.serverUid) {
+          serverUid = lockData.serverUid;
+        }
+      }
+    } catch {
+      // non-fatal if serverLock doesn't exist yet
+    }
+  }
+
   if (role === 'admin' && rt !== 'SEMUA') {
     const list = Array.isArray(adminsByRt[rt]) ? adminsByRt[rt] : [];
     if (!list.includes(uid)) {
@@ -491,7 +631,8 @@ async function upsertRtRegistry(params: {
   addAdminUid?: string;
 }) {
   const rw = normalizeRWCode(params.rw, DEFAULT_RW);
-  const regId = `rw_${rw}`;
+  const { rwId } = buildScopeIds(DEFAULT_RT, rw);
+  const regId = rwId;
   const regRef = doc(db, 'rtRegistry', regId);
 
   let existingSnapExists = false;
@@ -527,6 +668,7 @@ async function upsertRtRegistry(params: {
   try {
     if (existingSnapExists) {
       const updatePatch = stripUndefinedDeep({
+        rwId,
         serverUid,
         adminsByRt,
         registeredRts: Array.from(rtSet).slice(0, 100),
@@ -537,6 +679,7 @@ async function upsertRtRegistry(params: {
       const createPayload = stripUndefinedDeep({
         id: regId,
         rw,
+        rwId,
         serverUid,
         adminsByRt,
         registeredRts: Array.from(rtSet).slice(0, 100),
@@ -560,7 +703,7 @@ async function appendDocIdsToManifest(
 ) {
   const ctx = activeAdminContext;
   const uid = auth.currentUser?.uid || ctx?.uid;
-  if (!uid) return;
+  if (!uid || !isOnlineBrowser()) return;
 
   const rw = normalizeRWCode(rwRaw, ctx?.rw || DEFAULT_RW);
   const rt =
@@ -570,6 +713,7 @@ async function appendDocIdsToManifest(
         : DEFAULT_RT
       : extractRTFromScope(rtRaw, DEFAULT_RT);
 
+  const { rwId, rtId } = buildScopeIds(rt, rw);
   const scopeId = `rt_${rt}_rw_${rw}`;
   const prevLock = manifestLockMap.get(scopeId) || Promise.resolve();
 
@@ -582,7 +726,7 @@ async function appendDocIdsToManifest(
           const snap = await tx.get(manifestRef);
           const existing = snap.exists() ? snap.data() : null;
           const nextDocIds: Record<string, string[]> = { ...(existing?.docIds || {}) };
-          let changed = !existing;
+          let changed = !existing || existing.rwId !== rwId || existing.rtId !== rtId;
 
           for (const [bucket, ids] of Object.entries(entries)) {
             if (!ids || ids.length === 0) continue;
@@ -598,6 +742,8 @@ async function appendDocIdsToManifest(
 
           if (existing) {
             const updatePatch = stripUndefinedDeep({
+              rwId,
+              rtId,
               docIds: nextDocIds,
               serverUid: ctx?.serverUid || existing.serverUid,
               updatedAt: serverTimestamp(),
@@ -608,6 +754,8 @@ async function appendDocIdsToManifest(
               id: scopeId,
               rw,
               rt,
+              rwId,
+              rtId,
               docIds: nextDocIds,
               ownerUid: uid,
               serverUid: ctx?.serverUid,
@@ -708,6 +856,7 @@ export async function claimAndSyncManifestDocs(): Promise<number> {
       ctx.role === 'server'
         ? Array.from(
             new Set([
+              ...RW05_RT_CODES,
               ...(Array.isArray(regData?.registeredRts) ? regData.registeredRts : []),
               ...Object.keys(effectiveAdminsByRt),
               DEFAULT_RT,
@@ -726,7 +875,7 @@ export async function claimAndSyncManifestDocs(): Promise<number> {
       const docPath = `${colName}/${id}`;
       if (seenPaths.has(docPath)) return;
       seenPaths.add(docPath);
-      recordMeta(docPath, data);
+      recordMeta(docPath, { ...data, localCreated: true });
 
       const docRw = normalizeRWCode(data.rw, ctx.rw);
       const docRt =
@@ -752,6 +901,7 @@ export async function claimAndSyncManifestDocs(): Promise<number> {
         ...assignedRtUids,
       ].filter(Boolean);
 
+      const { rwId: expectedRwId, rtId: expectedRtId } = buildScopeIds(docRt, docRw);
       const currentAccessUids: string[] = Array.isArray(data.accessUids) ? data.accessUids : [];
       const missingUid = desiredUids.some((u) => !currentAccessUids.includes(u));
       const needsServerUid = Boolean(effectiveServerUid && data.serverUid !== effectiveServerUid);
@@ -760,8 +910,9 @@ export async function claimAndSyncManifestDocs(): Promise<number> {
         colName !== 'adminAccounts' &&
         colName !== 'settings' &&
         data.rtAdminUid !== ctx.uid;
+      const needsScopeIds = data.rwId !== expectedRwId || data.rtId !== expectedRtId;
 
-      if (missingUid || needsServerUid || needsRtUid) {
+      if (missingUid || needsServerUid || needsRtUid || needsScopeIds) {
         const nextUids = Array.from(
           new Set([
             ...desiredUids,
@@ -773,6 +924,8 @@ export async function claimAndSyncManifestDocs(): Promise<number> {
           .slice(0, 15);
 
         const patch: Record<string, any> = {
+          rwId: expectedRwId,
+          rtId: expectedRtId,
           accessUids: nextUids,
           updatedAt: serverTimestamp(),
         };
@@ -888,9 +1041,6 @@ async function reconcileLoadedDocsWithManifestAndAcls(
       byRt.set(rt, list);
     }
 
-    if (reconciledPathsThisSession.has(docPath)) continue;
-    reconciledPathsThisSession.add(docPath);
-
     if (ctx.role === 'admin') {
       if (colName === 'settings' && rt === 'SEMUA') continue;
       if (colName === 'adminAccounts' && data.authUid !== ctx.uid) continue;
@@ -909,11 +1059,17 @@ async function reconcileLoadedDocsWithManifestAndAcls(
       ...assignedRtUids,
     ].filter(Boolean);
 
+    const { rwId: expectedRwId, rtId: expectedRtId } = buildScopeIds(rt, rw);
+    const reconcileKey = `${docPath}:${desiredUids.join(',')}:${data.rwId || ''}:${data.rtId || ''}:${data.serverUid || ''}`;
+    if (reconciledPathsThisSession.has(reconcileKey)) continue;
+    reconciledPathsThisSession.add(reconcileKey);
+
     const existingUids: string[] = Array.isArray(data.accessUids) ? data.accessUids : [];
     const missing = desiredUids.some((u) => !existingUids.includes(u));
     const needsServer = Boolean(ctx.serverUid && data.serverUid !== ctx.serverUid);
+    const needsScopeIds = data.rwId !== expectedRwId || data.rtId !== expectedRtId;
 
-    if (missing || needsServer) {
+    if (missing || needsServer || needsScopeIds) {
       const nextUids = Array.from(
         new Set([
           ...desiredUids,
@@ -924,6 +1080,8 @@ async function reconcileLoadedDocsWithManifestAndAcls(
         .filter(Boolean)
         .slice(0, 15);
       const patch: Record<string, any> = {
+        rwId: expectedRwId,
+        rtId: expectedRtId,
         accessUids: nextUids,
         updatedAt: serverTimestamp(),
       };
@@ -966,6 +1124,7 @@ export async function loginWithGoogleServer(): Promise<{
 
     if (!existingSnap || !existingSnap.exists()) {
       if (email === BOOTSTRAPPED_ADMIN_EMAIL && fbUser.emailVerified) {
+        const { rwId, rtId } = buildScopeIds('SEMUA', DEFAULT_RW);
         await setDoc(adminRef, {
           uid: fbUser.uid,
           email,
@@ -974,6 +1133,8 @@ export async function loginWithGoogleServer(): Promise<{
           role: 'server',
           rt: 'SEMUA',
           rw: DEFAULT_RW,
+          rtId,
+          rwId,
           rtScope: 'Semua RT se-RW 05 Glempang',
           status: 'aktif',
           ownerUid: fbUser.uid,
@@ -1087,11 +1248,13 @@ export async function loginWithFirebase(params: {
 
         if (!lockSnap || !lockSnap.exists()) {
           const digest = await sha256Hex(SERVER_BOOTSTRAP_SEED);
+          const { rwId, rtId } = buildScopeIds('SEMUA', DEFAULT_RW);
           const batch = writeBatch(db);
           batch.set(lockRef, {
             id: 'serverLock',
             serverUid: fbUser.uid,
             rw: DEFAULT_RW,
+            rwId,
             bootstrapDigest: digest,
             ownerUid: fbUser.uid,
             createdAt: serverTimestamp(),
@@ -1105,6 +1268,8 @@ export async function loginWithFirebase(params: {
             role: 'server',
             rt: 'SEMUA',
             rw: DEFAULT_RW,
+            rtId,
+            rwId,
             rtScope: 'Semua RT se-RW 05 Glempang',
             status: 'aktif',
             ownerUid: fbUser.uid,
@@ -1114,6 +1279,7 @@ export async function loginWithFirebase(params: {
           batch.set(doc(db, 'rtRegistry', `rw_${DEFAULT_RW}`), {
             id: `rw_${DEFAULT_RW}`,
             rw: DEFAULT_RW,
+            rwId,
             serverUid: fbUser.uid,
             adminsByRt: {},
             registeredRts: [DEFAULT_RT],
@@ -1124,6 +1290,7 @@ export async function loginWithFirebase(params: {
           await batch.commit();
         } else {
           // Server lock exists under another uid -> bootstrapped admin email only
+          const { rwId, rtId } = buildScopeIds('SEMUA', DEFAULT_RW);
           await setDoc(adminRef, {
             uid: fbUser.uid,
             email: fbUser.email || email,
@@ -1132,6 +1299,8 @@ export async function loginWithFirebase(params: {
             role: 'server',
             rt: 'SEMUA',
             rw: DEFAULT_RW,
+            rtId,
+            rwId,
             rtScope: 'Semua RT se-RW 05 Glempang',
             status: 'aktif',
             ownerUid: fbUser.uid,
@@ -1204,6 +1373,7 @@ export async function loginWithFirebase(params: {
       if (!adminSnap || !adminSnap.exists()) {
         if (isDefaultAdminCreds) {
           const pinDigest = await sha256Hex(DEFAULT_SECURITY_PIN);
+          const { rwId, rtId } = buildScopeIds(DEFAULT_RT, DEFAULT_RW);
           await setDoc(adminRef, {
             uid: fbUser.uid,
             email: fbUser.email || email,
@@ -1212,6 +1382,8 @@ export async function loginWithFirebase(params: {
             role: 'admin',
             rt: DEFAULT_RT,
             rw: DEFAULT_RW,
+            rtId,
+            rwId,
             rtScope: `RT ${DEFAULT_RT} RW ${DEFAULT_RW}`,
             status: 'aktif',
             pinDigest,
@@ -1421,6 +1593,7 @@ export async function registerAndSyncAdminWithFirebase(params: {
     const existingAdminSnap = await getDoc(adminRef).catch(() => null);
     if (!existingAdminSnap || !existingAdminSnap.exists()) {
       const pinDigest = await sha256Hex(pin);
+      const { rwId, rtId } = buildScopeIds(rt, rw);
       await setDoc(adminRef, {
         uid: fbUser.uid,
         email: fbUser.email || email,
@@ -1429,6 +1602,8 @@ export async function registerAndSyncAdminWithFirebase(params: {
         role: 'admin',
         rt,
         rw,
+        rtId,
+        rwId,
         rtScope: `RT ${rt} RW ${rw}`,
         status: 'aktif',
         pinDigest,
@@ -1564,7 +1739,13 @@ export async function resolveCurrentFirebaseUser(
 }
 
 export async function logoutFromFirebase(): Promise<void> {
+  if (activeSubscriptionCleanup) {
+    activeSubscriptionCleanup();
+    activeSubscriptionCleanup = null;
+  }
   activeAdminContext = null;
+  activePendingWriteCount = 0;
+  latestAsyncWriteError = null;
   docMetaCache.clear();
   reconciledPathsThisSession.clear();
   try {
@@ -1626,32 +1807,42 @@ export async function provisionAdminAuthAccount(
     if (targetUid) {
       const adminRef = doc(db, 'admins', targetUid);
       const existingSnap = await getDoc(adminRef).catch(() => null);
-      if (existingSnap && existingSnap.exists()) {
-        await updateDoc(adminRef, {
-          email,
-          displayName: account.nama,
-          username,
-          role: 'admin',
-          rt,
-          rtScope: `RT ${rt} RW ${rw}`,
-          status: account.status === 'nonaktif' ? 'nonaktif' : 'aktif',
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
-      } else {
-        await setDoc(adminRef, {
-          uid: targetUid,
-          email,
-          displayName: account.nama,
-          username,
-          role: 'admin',
-          rt,
-          rw,
-          rtScope: `RT ${rt} RW ${rw}`,
-          status: account.status === 'nonaktif' ? 'nonaktif' : 'aktif',
-          ownerUid: ctx.uid,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
+      const { rwId, rtId } = buildScopeIds(rt, rw);
+      try {
+        if (existingSnap && existingSnap.exists()) {
+          await updateDoc(adminRef, {
+            email,
+            displayName: account.nama,
+            username,
+            role: 'admin',
+            rt,
+            rtId,
+            rwId,
+            rtScope: `RT ${rt} RW ${rw}`,
+            status: account.status === 'nonaktif' ? 'nonaktif' : 'aktif',
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          await setDoc(adminRef, {
+            uid: targetUid,
+            email,
+            displayName: account.nama,
+            username,
+            role: 'admin',
+            rt,
+            rw,
+            rtId,
+            rwId,
+            rtScope: `RT ${rt} RW ${rw}`,
+            status: account.status === 'nonaktif' ? 'nonaktif' : 'aktif',
+            ownerUid: ctx.uid,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch (writeErr: any) {
+        reportFirestoreError(writeErr, OperationType.WRITE, `admins/${targetUid}`);
+        return { error: formatFirebaseAuthError(writeErr, 'Gagal menyimpan otorisasi admin RT di Firestore.') };
       }
 
       await upsertRtRegistry({
@@ -1725,6 +1916,7 @@ export async function provisionWargaAuthAccounts(
 
       const rt = normalizeRTCode(w.rt) || DEFAULT_RT;
       const rw = normalizeRWCode(w.rw, ctx.rw || DEFAULT_RW);
+      const { rwId, rtId } = buildScopeIds(rt, rw);
       const wargaId = toValidDocId(w.id, 'w');
 
       batch.set(doc(db, 'wargaProfiles', wargaUid), {
@@ -1734,6 +1926,8 @@ export async function provisionWargaAuthAccounts(
         nama: w.nama,
         rt,
         rw,
+        rtId,
+        rwId,
         ownerUid: ctx.uid,
         ...(ctx.serverUid ? { serverUid: ctx.serverUid } : {}),
         createdAt: serverTimestamp(),
@@ -1775,6 +1969,7 @@ export function buildWargaFirestorePayload(
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
   const id = toValidDocId(w.id, 'w');
   const { rt, rw } = resolveScopedRtRw(w.rt, w.rw, null, ctx, false);
+  const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
@@ -1801,6 +1996,8 @@ export function buildWargaFirestorePayload(
     noRumah: String(w.noRumah || '-').slice(0, 32),
     rt,
     rw,
+    rtId,
+    rwId,
     alamat: w.alamat ? String(w.alamat).slice(0, 300) : undefined,
     kodePos: w.kodePos ? String(w.kodePos).slice(0, 12) : undefined,
     tanggalDikeluarkan: w.tanggalDikeluarkan ? String(w.tanggalDikeluarkan).slice(0, 32) : undefined,
@@ -1835,6 +2032,7 @@ export function buildTransactionFirestorePayload(
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
   const id = toValidDocId(tx.id, 'tx');
   const { rt, rw } = resolveScopedRtRw(null, null, tx.rtScope, ctx, false);
+  const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
@@ -1852,6 +2050,8 @@ export function buildTransactionFirestorePayload(
     tahun: toFiniteNumberOrUndefined(tx.tahun),
     rt,
     rw,
+    rtId,
+    rwId,
     rtScope: String(tx.rtScope || `RT ${rt} RW ${rw}`).slice(0, 64),
     ...meta,
   });
@@ -1865,6 +2065,7 @@ export function buildBantuanFirestorePayload(
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
   const id = toValidDocId(b.id, 'b');
   const { rt, rw } = resolveScopedRtRw(null, null, b.rtScope, ctx, false);
+  const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
@@ -1889,6 +2090,8 @@ export function buildBantuanFirestorePayload(
     keterangan: b.keterangan ? String(b.keterangan).slice(0, 400) : undefined,
     rt,
     rw,
+    rtId,
+    rwId,
     rtScope: String(b.rtScope || `RT ${rt} RW ${rw}`).slice(0, 64),
     ...meta,
   });
@@ -1908,6 +2111,7 @@ export function buildPengumumanFirestorePayload(
     ctx,
     ctx?.role === 'server'
   );
+  const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
@@ -1940,7 +2144,9 @@ export function buildPengumumanFirestorePayload(
       : undefined,
     rt,
     rw,
-    rtScope: String(p.rtScope || `RT ${rt} RW ${rw}`).slice(0, 64),
+    rtId,
+    rwId,
+    rtScope: String(p.rtScope || (rt === 'SEMUA' ? 'Semua RT' : `RT ${rt} RW ${rw}`)).slice(0, 64),
     ...meta,
   });
 }
@@ -1953,6 +2159,7 @@ export function buildDokumenFirestorePayload(
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
   const id = toValidDocId(d.id, 'doc');
   const { rt, rw } = resolveScopedRtRw(null, null, d.rtScope, ctx, false);
+  const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
@@ -1967,6 +2174,8 @@ export function buildDokumenFirestorePayload(
     dataBase64: d.dataBase64 ? String(d.dataBase64).slice(0, 850000) : undefined,
     rt,
     rw,
+    rtId,
+    rwId,
     rtScope: String(d.rtScope || `RT ${rt} RW ${rw}`).slice(0, 64),
     ...meta,
   });
@@ -1985,10 +2194,12 @@ export function buildAdminAccountFirestorePayload(
       ? ctx.rt
       : extractRTFromScope(acc.rt, DEFAULT_RT);
   const rw = normalizeRWCode(acc.rw, ctx?.rw || DEFAULT_RW);
+  const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
-  const resolvedAuthUid = acc.authUid || fallbackAuthUid;
+  const resolvedAuthUid =
+    acc.authUid || fallbackAuthUid || (ctx?.role === 'admin' ? auth.currentUser?.uid || ctx.uid : undefined);
   if (resolvedAuthUid && !meta.accessUids.includes(resolvedAuthUid)) {
     meta.accessUids = [resolvedAuthUid, ...meta.accessUids].slice(0, 15);
   }
@@ -2000,6 +2211,8 @@ export function buildAdminAccountFirestorePayload(
     nama: String(acc.nama || `Admin RT ${rt}`).slice(0, 160) || `Admin RT ${rt}`,
     rt,
     rw,
+    rtId,
+    rwId,
     kontak: acc.kontak ? String(acc.kontak).slice(0, 40) : undefined,
     jabatan: acc.jabatan ? String(acc.jabatan).slice(0, 120) : undefined,
     status: acc.status === 'nonaktif' ? 'nonaktif' : 'aktif',
@@ -2020,6 +2233,7 @@ export function buildLaporanFirestorePayload(
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
   const id = toValidDocId(lap.id, 'lap');
   const { rt, rw } = resolveScopedRtRw(lap.rt, lap.rw, null, ctx, false);
+  const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
@@ -2034,6 +2248,8 @@ export function buildLaporanFirestorePayload(
     id,
     rt,
     rw,
+    rtId,
+    rwId,
     namaAdminPengirim: lap.namaAdminPengirim ? String(lap.namaAdminPengirim).slice(0, 160) : undefined,
     tanggalKirim: lap.tanggalKirim ? String(lap.tanggalKirim).slice(0, 32) : undefined,
     bulanTahun: String(lap.bulanTahun || '-').slice(0, 64) || '-',
@@ -2063,6 +2279,7 @@ export function buildSettingsFirestorePayload(
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
+  const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
@@ -2071,6 +2288,8 @@ export function buildSettingsFirestorePayload(
     id: settingId,
     rw,
     rt,
+    rtId,
+    rwId,
     tahunAktif: toFiniteNumberOrDefault(tahunAktif, toFiniteNumberOrDefault(pengaturanKas.tahunAktif, 2026)),
     nominalJimpitanTahunan: toFiniteNumberOrUndefined(cleanSettings.nominalJimpitanTahunan),
     nominalJimpitanBulanan: toFiniteNumberOrUndefined(cleanSettings.nominalJimpitanBulanan),
@@ -2096,51 +2315,66 @@ export function buildSettingsFirestorePayload(
 // 5. DIRECT FIRESTORE CRUD & PUBLIC SUMMARY SYNC
 // ==========================================
 
-export async function saveWargaDoc(w: Warga): Promise<{ ok: boolean; message?: string }> {
+async function saveScopedEntityDoc(
+  colName: EntityBucket,
+  id: string,
+  payload: Record<string, any>,
+  existing: CachedDocMeta | null,
+  onAcked?: () => Promise<void> | void
+): Promise<FirestoreWriteResult> {
+  const path = `${colName}/${id}`;
+  const docRef = doc(db, colName, id);
+  const isUpdate = Boolean(existing && (existing.ownerUid || existing.localCreated));
+
+  // Optimistically cache metadata so offline follow-up edits update cleanly instead of re-creating
+  recordMeta(path, { ...payload, localCreated: true });
+
+  const writePromise = isUpdate
+    ? updateDoc(docRef, buildEntityUpdatePatch(colName, payload, activeAdminContext))
+    : setDoc(docRef, payload);
+
+  return commitTrackedWrite(
+    writePromise,
+    isUpdate ? OperationType.UPDATE : OperationType.CREATE,
+    path,
+    onAcked
+  );
+}
+
+export async function saveWargaDoc(w: Warga): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(w.id, 'w');
   const path = `warga/${id}`;
-  try {
-    const existing = await resolveExistingMeta(path);
-    const payload = buildWargaFirestorePayload({ ...w, id }, existing, activeAdminContext);
-    await setDoc(doc(db, 'warga', id), payload);
+  const existing = await resolveExistingMeta(path);
+  const payload = buildWargaFirestorePayload({ ...w, id }, existing, activeAdminContext);
+
+  return saveScopedEntityDoc('warga', id, payload, existing, async () => {
     await appendDocIdsToManifest(payload.rw, payload.rt, { warga: [id] });
     await upsertRtRegistry({ rw: payload.rw, ownerUid: payload.ownerUid, addRt: payload.rt });
-
     if (!payload.linkedUid) {
       provisionWargaAuthAccounts([{ ...w, id }]).catch(() => {});
     }
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
-    }
-  }
+  });
 }
 
-export async function deleteWargaDoc(idRaw: string): Promise<{ ok: boolean; message?: string }> {
+export async function deleteWargaDoc(idRaw: string): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(idRaw, 'w');
   const path = `warga/${id}`;
-  try {
-    await deleteDoc(doc(db, 'warga', id));
-    docMetaCache.delete(path);
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.DELETE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
+  return commitTrackedWrite(
+    deleteDoc(doc(db, 'warga', id)),
+    OperationType.DELETE,
+    path,
+    () => {
+      docMetaCache.delete(path);
     }
-  }
+  );
 }
 
 export async function updateWargaSelfDoc(
   wargaId: string,
   patch: { pin?: string; telepon?: string }
-): Promise<{ ok: boolean; message?: string }> {
+): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(wargaId, 'w');
   const path = `warga/${id}`;
@@ -2151,32 +2385,35 @@ export async function updateWargaSelfDoc(
   if (typeof patch.telepon === 'string') {
     updateBody.telepon = patch.telepon.trim().slice(0, 32);
   }
-  try {
-    await updateDoc(doc(db, 'warga', id), updateBody);
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
-    }
-  }
+  return commitTrackedWrite(
+    updateDoc(doc(db, 'warga', id), updateBody),
+    OperationType.UPDATE,
+    path
+  );
 }
 
 export async function bulkSaveWargaAndBantuanDocs(
   wargaList: Warga[],
   bantuanList: BantuanPemerintah[]
-): Promise<{ ok: boolean; message?: string }> {
+): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   try {
-    let batch = writeBatch(db);
-    let ops = 0;
+    // Resolve any existing metadata for items not yet in docMetaCache so updates use batch.update
+    await Promise.all([
+      ...wargaList.map((w) => resolveExistingMeta(`warga/${toValidDocId(w.id, 'w')}`)),
+      ...bantuanList.map((b) => resolveExistingMeta(`bantuan/${toValidDocId(b.id, 'b')}`)),
+    ]);
+
     const manifestBucketsByRt = new Map<string, { warga: string[]; bantuan: string[] }>();
     const rw = activeAdminContext?.rw || DEFAULT_RW;
+    const commitPromises: Promise<unknown>[] = [];
 
-    const flush = async () => {
+    let batch = writeBatch(db);
+    let ops = 0;
+
+    const queueBatchFlush = () => {
       if (ops > 0) {
-        await batch.commit();
+        commitPromises.push(batch.commit());
         batch = writeBatch(db);
         ops = 0;
       }
@@ -2187,14 +2424,20 @@ export async function bulkSaveWargaAndBantuanDocs(
       const path = `warga/${id}`;
       const existing = docMetaCache.get(path) || null;
       const payload = buildWargaFirestorePayload({ ...w, id }, existing, activeAdminContext);
-      batch.set(doc(db, 'warga', id), payload);
+      const ref = doc(db, 'warga', id);
+      if (existing && (existing.ownerUid || existing.localCreated)) {
+        batch.update(ref, buildEntityUpdatePatch('warga', payload, activeAdminContext));
+      } else {
+        batch.set(ref, payload);
+      }
+      recordMeta(path, { ...payload, localCreated: true });
       ops++;
 
       const entry = manifestBucketsByRt.get(payload.rt) || { warga: [], bantuan: [] };
       entry.warga.push(id);
       manifestBucketsByRt.set(payload.rt, entry);
 
-      if (ops >= 350) await flush();
+      if (ops >= 350) queueBatchFlush();
     }
 
     for (const b of bantuanList) {
@@ -2202,30 +2445,42 @@ export async function bulkSaveWargaAndBantuanDocs(
       const path = `bantuan/${id}`;
       const existing = docMetaCache.get(path) || null;
       const payload = buildBantuanFirestorePayload({ ...b, id }, existing, activeAdminContext);
-      batch.set(doc(db, 'bantuan', id), payload);
+      const ref = doc(db, 'bantuan', id);
+      if (existing && (existing.ownerUid || existing.localCreated)) {
+        batch.update(ref, buildEntityUpdatePatch('bantuan', payload, activeAdminContext));
+      } else {
+        batch.set(ref, payload);
+      }
+      recordMeta(path, { ...payload, localCreated: true });
       ops++;
 
       const entry = manifestBucketsByRt.get(payload.rt) || { warga: [], bantuan: [] };
       entry.bantuan.push(id);
       manifestBucketsByRt.set(payload.rt, entry);
 
-      if (ops >= 350) await flush();
+      if (ops >= 350) queueBatchFlush();
     }
 
-    await flush();
+    queueBatchFlush();
+    if (commitPromises.length === 0) return { ok: true, pending: false };
 
-    for (const [rtCode, bucket] of manifestBucketsByRt.entries()) {
-      await appendDocIdsToManifest(rw, rtCode, bucket);
-      await upsertRtRegistry({
-        rw,
-        ownerUid: auth.currentUser.uid,
-        serverUid: activeAdminContext?.serverUid,
-        addRt: rtCode,
-      });
-    }
-
-    provisionWargaAuthAccounts(wargaList).catch(() => {});
-    return { ok: true };
+    return await commitTrackedWrite(
+      Promise.all(commitPromises),
+      OperationType.WRITE,
+      'warga',
+      async () => {
+        for (const [rtCode, bucket] of manifestBucketsByRt.entries()) {
+          await appendDocIdsToManifest(rw, rtCode, bucket);
+          await upsertRtRegistry({
+            rw,
+            ownerUid: auth.currentUser?.uid || activeAdminContext?.uid || 'system',
+            serverUid: activeAdminContext?.serverUid,
+            addRt: rtCode,
+          });
+        }
+        provisionWargaAuthAccounts(wargaList).catch(() => {});
+      }
+    );
   } catch (err: any) {
     try {
       handleFirestoreError(err, OperationType.WRITE, 'warga');
@@ -2235,115 +2490,87 @@ export async function bulkSaveWargaAndBantuanDocs(
   }
 }
 
-export async function saveTransactionDoc(tx: Transaction): Promise<{ ok: boolean; message?: string }> {
+export async function saveTransactionDoc(tx: Transaction): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(tx.id, 'tx');
   const path = `transactions/${id}`;
-  try {
-    const existing = await resolveExistingMeta(path);
-    const payload = buildTransactionFirestorePayload({ ...tx, id }, existing, activeAdminContext);
-    await setDoc(doc(db, 'transactions', id), payload);
+  const existing = await resolveExistingMeta(path);
+  const payload = buildTransactionFirestorePayload({ ...tx, id }, existing, activeAdminContext);
+
+  return saveScopedEntityDoc('transactions', id, payload, existing, async () => {
     await appendDocIdsToManifest(payload.rw, payload.rt, { transactions: [id] });
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
-    }
-  }
+  });
 }
 
-export async function deleteTransactionDoc(idRaw: string): Promise<{ ok: boolean; message?: string }> {
+export async function deleteTransactionDoc(idRaw: string): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(idRaw, 'tx');
   const path = `transactions/${id}`;
-  try {
-    await deleteDoc(doc(db, 'transactions', id));
-    docMetaCache.delete(path);
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.DELETE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
+  return commitTrackedWrite(
+    deleteDoc(doc(db, 'transactions', id)),
+    OperationType.DELETE,
+    path,
+    () => {
+      docMetaCache.delete(path);
     }
-  }
+  );
 }
 
-export async function saveBantuanDoc(b: BantuanPemerintah): Promise<{ ok: boolean; message?: string }> {
+export async function saveBantuanDoc(b: BantuanPemerintah): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(b.id, 'b');
   const path = `bantuan/${id}`;
-  try {
-    const existing = await resolveExistingMeta(path);
-    const payload = buildBantuanFirestorePayload({ ...b, id }, existing, activeAdminContext);
-    await setDoc(doc(db, 'bantuan', id), payload);
+  const existing = await resolveExistingMeta(path);
+  const payload = buildBantuanFirestorePayload({ ...b, id }, existing, activeAdminContext);
+
+  return saveScopedEntityDoc('bantuan', id, payload, existing, async () => {
     await appendDocIdsToManifest(payload.rw, payload.rt, { bantuan: [id] });
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
-    }
-  }
+  });
 }
 
-export async function deleteBantuanDoc(idRaw: string): Promise<{ ok: boolean; message?: string }> {
+export async function deleteBantuanDoc(idRaw: string): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(idRaw, 'b');
   const path = `bantuan/${id}`;
-  try {
-    await deleteDoc(doc(db, 'bantuan', id));
-    docMetaCache.delete(path);
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.DELETE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
+  return commitTrackedWrite(
+    deleteDoc(doc(db, 'bantuan', id)),
+    OperationType.DELETE,
+    path,
+    () => {
+      docMetaCache.delete(path);
     }
-  }
+  );
 }
 
-export async function savePengumumanDoc(p: PengumumanRT): Promise<{ ok: boolean; message?: string }> {
+export async function savePengumumanDoc(p: PengumumanRT): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(p.id, 'p');
   const path = `pengumuman/${id}`;
-  try {
-    const existing = await resolveExistingMeta(path);
-    const payload = buildPengumumanFirestorePayload({ ...p, id }, existing, activeAdminContext);
-    await setDoc(doc(db, 'pengumuman', id), payload);
-    await appendDocIdsToManifest(payload.rw, payload.rt, { pengumuman: [id] });
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
+  const existing = await resolveExistingMeta(path);
+  const payload = buildPengumumanFirestorePayload({ ...p, id }, existing, activeAdminContext);
+
+  return saveScopedEntityDoc('pengumuman', id, payload, existing, async () => {
+    if (payload.rt !== 'SEMUA') {
+      await appendDocIdsToManifest(payload.rw, payload.rt, { pengumuman: [id] });
     }
-  }
+  });
 }
 
-export async function deletePengumumanDoc(idRaw: string): Promise<{ ok: boolean; message?: string }> {
+export async function deletePengumumanDoc(idRaw: string): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(idRaw, 'p');
   const path = `pengumuman/${id}`;
-  try {
-    await deleteDoc(doc(db, 'pengumuman', id));
-    docMetaCache.delete(path);
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.DELETE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
+  return commitTrackedWrite(
+    deleteDoc(doc(db, 'pengumuman', id)),
+    OperationType.DELETE,
+    path,
+    () => {
+      docMetaCache.delete(path);
     }
-  }
+  );
 }
 
-export async function saveDokumenDoc(d: DokumenPdfWarga): Promise<{ ok: boolean; message?: string }> {
+export async function saveDokumenDoc(d: DokumenPdfWarga): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(d.id, 'doc');
   const path = `dokumen/${id}`;
@@ -2353,54 +2580,44 @@ export async function saveDokumenDoc(d: DokumenPdfWarga): Promise<{ ok: boolean;
       message: 'Ukuran file PDF melebihi batas dokumen Firestore (~850 KB). Kompres file PDF terlebih dahulu.',
     };
   }
-  try {
-    const existing = await resolveExistingMeta(path);
-    const payload = buildDokumenFirestorePayload({ ...d, id }, existing, activeAdminContext);
-    await setDoc(doc(db, 'dokumen', id), payload);
+  const existing = await resolveExistingMeta(path);
+  const payload = buildDokumenFirestorePayload({ ...d, id }, existing, activeAdminContext);
+
+  return saveScopedEntityDoc('dokumen', id, payload, existing, async () => {
     await appendDocIdsToManifest(payload.rw, payload.rt, { dokumen: [id] });
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
-    }
-  }
+  });
 }
 
-export async function deleteDokumenDoc(idRaw: string): Promise<{ ok: boolean; message?: string }> {
+export async function deleteDokumenDoc(idRaw: string): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(idRaw, 'doc');
   const path = `dokumen/${id}`;
-  try {
-    await deleteDoc(doc(db, 'dokumen', id));
-    docMetaCache.delete(path);
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.DELETE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
+  return commitTrackedWrite(
+    deleteDoc(doc(db, 'dokumen', id)),
+    OperationType.DELETE,
+    path,
+    () => {
+      docMetaCache.delete(path);
     }
-  }
+  );
 }
 
 export async function saveAdminAccountDoc(
   acc: AdminRTAccount,
   authUidOverride?: string
-): Promise<{ ok: boolean; message?: string }> {
+): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(acc.id, 'adm');
   const path = `adminAccounts/${id}`;
-  try {
-    const existing = await resolveExistingMeta(path);
-    const payload = buildAdminAccountFirestorePayload(
-      { ...acc, id },
-      existing,
-      activeAdminContext,
-      authUidOverride
-    );
-    await setDoc(doc(db, 'adminAccounts', id), payload);
+  const existing = await resolveExistingMeta(path);
+  const payload = buildAdminAccountFirestorePayload(
+    { ...acc, id },
+    existing,
+    activeAdminContext,
+    authUidOverride
+  );
+
+  return saveScopedEntityDoc('adminAccounts', id, payload, existing, async () => {
     await appendDocIdsToManifest(payload.rw, payload.rt, { adminAccounts: [id] });
     await upsertRtRegistry({
       rw: payload.rw,
@@ -2409,58 +2626,41 @@ export async function saveAdminAccountDoc(
       addRt: payload.rt,
       addAdminUid: payload.authUid,
     });
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
-    }
-  }
+  });
 }
 
-export async function deleteAdminAccountDoc(idRaw: string): Promise<{ ok: boolean; message?: string }> {
+export async function deleteAdminAccountDoc(idRaw: string): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(idRaw, 'adm');
   const path = `adminAccounts/${id}`;
-  try {
-    await deleteDoc(doc(db, 'adminAccounts', id));
-    docMetaCache.delete(path);
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.DELETE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
+  return commitTrackedWrite(
+    deleteDoc(doc(db, 'adminAccounts', id)),
+    OperationType.DELETE,
+    path,
+    () => {
+      docMetaCache.delete(path);
     }
-  }
+  );
 }
 
 export async function saveLaporanDoc(
   lap: PembaruanBulananRT
-): Promise<{ ok: boolean; message?: string }> {
+): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
   const id = toValidDocId(lap.id, 'lap');
   const path = `laporanBulanan/${id}`;
-  try {
-    const existing = await resolveExistingMeta(path);
-    const payload = buildLaporanFirestorePayload({ ...lap, id }, existing, activeAdminContext);
-    await setDoc(doc(db, 'laporanBulanan', id), payload);
+  const existing = await resolveExistingMeta(path);
+  const payload = buildLaporanFirestorePayload({ ...lap, id }, existing, activeAdminContext);
+
+  return saveScopedEntityDoc('laporanBulanan', id, payload, existing, async () => {
     await appendDocIdsToManifest(payload.rw, payload.rt, { laporanBulanan: [id] });
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
-    }
-  }
+  });
 }
 
 export async function saveSettingsDoc(
   pengaturanKas: PengaturanKas,
   tahunAktif: number
-): Promise<{ ok: boolean; message?: string }> {
+): Promise<FirestoreWriteResult> {
   if (!auth.currentUser || !activeAdminContext) {
     return { ok: false, message: 'Belum login ke Firebase.' };
   }
@@ -2478,29 +2678,22 @@ export async function saveSettingsDoc(
   const settingId = ctx.role === 'server' ? `rw_${rw}` : `rw_${rw}_rt_${rt}`;
   const path = `settings/${settingId}`;
 
-  try {
-    const existing = await resolveExistingMeta(path);
-    const payload = buildSettingsFirestorePayload(
-      pengaturanKas,
-      tahunAktif,
-      settingId,
-      rt,
-      rw,
-      existing,
-      ctx
-    );
-    await setDoc(doc(db, 'settings', settingId), payload);
+  const existing = await resolveExistingMeta(path);
+  const payload = buildSettingsFirestorePayload(
+    pengaturanKas,
+    tahunAktif,
+    settingId,
+    rt,
+    rw,
+    existing,
+    ctx
+  );
+
+  return saveScopedEntityDoc('settings', settingId, payload, existing, async () => {
     if (rt !== 'SEMUA') {
       await appendDocIdsToManifest(rw, rt, { settings: [settingId] });
     }
-    return { ok: true };
-  } catch (err: any) {
-    try {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    } catch (jsonErr: any) {
-      return { ok: false, message: jsonErr?.message || err?.message };
-    }
-  }
+  });
 }
 
 export async function syncRtPublicSummary(params: {
@@ -2522,6 +2715,7 @@ export async function syncRtPublicSummary(params: {
     ctx.role === 'admin' ? ctx.rw || DEFAULT_RW : normalizeRWCode(params.rw, ctx.rw || DEFAULT_RW);
   if (rt === 'SEMUA') return;
 
+  const { rwId, rtId } = buildScopeIds(rt, rw);
   const scopeId = `rt_${rt}_rw_${rw}`;
   const path = `rtPublicSummaries/${scopeId}`;
   const existing = await resolveExistingMeta(path);
@@ -2546,6 +2740,8 @@ export async function syncRtPublicSummary(params: {
     id: scopeId,
     rw,
     rt,
+    rtId,
+    rwId,
     tahunAktif: toFiniteNumberOrDefault(params.tahunAktif, 2026),
     pengaturanKas: stripUndefinedDeep({
       ...params.pengaturanKas,
@@ -2560,7 +2756,23 @@ export async function syncRtPublicSummary(params: {
   });
 
   try {
-    await setDoc(doc(db, 'rtPublicSummaries', scopeId), payload);
+    const ref = doc(db, 'rtPublicSummaries', scopeId);
+    const isUpdate = Boolean(existing && (existing.ownerUid || existing.localCreated));
+    recordMeta(path, { ...payload, localCreated: true });
+    if (isUpdate) {
+      await updateDoc(ref, stripUndefinedDeep({
+        rwId,
+        rtId,
+        tahunAktif: payload.tahunAktif,
+        pengaturanKas: payload.pengaturanKas,
+        transactions: payload.transactions,
+        pengumuman: payload.pengumuman,
+        serverUid: payload.serverUid,
+        updatedAt: serverTimestamp(),
+      }));
+    } else {
+      await setDoc(ref, payload);
+    }
   } catch (err) {
     console.warn('syncRtPublicSummary warning:', err);
   }
@@ -2585,6 +2797,7 @@ interface PendingBatchWrite {
   id: string;
   payload: Record<string, any>;
   rt: string;
+  isUpdate?: boolean;
 }
 
 async function executeResilientWrites(
@@ -2599,17 +2812,30 @@ async function executeResilientWrites(
     try {
       const batch = writeBatch(db);
       for (const w of chunk) {
-        batch.set(doc(db, w.colName, w.id), w.payload);
+        const ref = doc(db, w.colName, w.id);
+        if (w.isUpdate) {
+          batch.update(ref, buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext));
+        } else {
+          batch.set(ref, w.payload);
+        }
       }
       await batch.commit();
+      chunk.forEach((w) => recordMeta(`${w.colName}/${w.id}`, { ...w.payload, localCreated: true }));
       succeeded.push(...chunk);
     } catch {
       const settled = await Promise.allSettled(
-        chunk.map((w) => setDoc(doc(db, w.colName, w.id), w.payload))
+        chunk.map((w) => {
+          const ref = doc(db, w.colName, w.id);
+          return w.isUpdate
+            ? updateDoc(ref, buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext))
+            : setDoc(ref, w.payload);
+        })
       );
       settled.forEach((res, idx) => {
         if (res.status === 'fulfilled') {
-          succeeded.push(chunk[idx]);
+          const w = chunk[idx];
+          recordMeta(`${w.colName}/${w.id}`, { ...w.payload, localCreated: true });
+          succeeded.push(w);
         } else {
           const msg = res.reason?.message || String(res.reason || 'Unknown write error');
           failed.push({ item: chunk[idx], error: msg });
@@ -2799,30 +3025,54 @@ async function writeSnapshotToFirestoreInternal(
 
   for (const w of missing.wargaList) {
     const id = toValidDocId(w.id, 'w');
-    const existing = docMetaCache.get(`warga/${id}`) || null;
+    const existing = await resolveExistingMeta(`warga/${id}`);
     const payload = buildWargaFirestorePayload({ ...w, id }, existing, ctx);
-    standardWrites.push({ colName: 'warga', id, payload, rt: payload.rt });
+    standardWrites.push({
+      colName: 'warga',
+      id,
+      payload,
+      rt: payload.rt,
+      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+    });
   }
 
   for (const t of missing.transactions) {
     const id = toValidDocId(t.id, 'tx');
-    const existing = docMetaCache.get(`transactions/${id}`) || null;
+    const existing = await resolveExistingMeta(`transactions/${id}`);
     const payload = buildTransactionFirestorePayload({ ...t, id }, existing, ctx);
-    standardWrites.push({ colName: 'transactions', id, payload, rt: payload.rt });
+    standardWrites.push({
+      colName: 'transactions',
+      id,
+      payload,
+      rt: payload.rt,
+      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+    });
   }
 
   for (const b of missing.bantuanList) {
     const id = toValidDocId(b.id, 'b');
-    const existing = docMetaCache.get(`bantuan/${id}`) || null;
+    const existing = await resolveExistingMeta(`bantuan/${id}`);
     const payload = buildBantuanFirestorePayload({ ...b, id }, existing, ctx);
-    standardWrites.push({ colName: 'bantuan', id, payload, rt: payload.rt });
+    standardWrites.push({
+      colName: 'bantuan',
+      id,
+      payload,
+      rt: payload.rt,
+      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+    });
   }
 
   for (const p of missing.pengumumanList) {
     const id = toValidDocId(p.id, 'p');
-    const existing = docMetaCache.get(`pengumuman/${id}`) || null;
+    const existing = await resolveExistingMeta(`pengumuman/${id}`);
     const payload = buildPengumumanFirestorePayload({ ...p, id }, existing, ctx);
-    standardWrites.push({ colName: 'pengumuman', id, payload, rt: payload.rt });
+    standardWrites.push({
+      colName: 'pengumuman',
+      id,
+      payload,
+      rt: payload.rt,
+      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+    });
   }
 
   for (const d of missing.dokumenList) {
@@ -2831,16 +3081,28 @@ async function writeSnapshotToFirestoreInternal(
       continue;
     }
     const id = toValidDocId(d.id, 'doc');
-    const existing = docMetaCache.get(`dokumen/${id}`) || null;
+    const existing = await resolveExistingMeta(`dokumen/${id}`);
     const payload = buildDokumenFirestorePayload({ ...d, id }, existing, ctx);
-    dokumenWrites.push({ colName: 'dokumen', id, payload, rt: payload.rt });
+    dokumenWrites.push({
+      colName: 'dokumen',
+      id,
+      payload,
+      rt: payload.rt,
+      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+    });
   }
 
   for (const lap of missing.laporanBulananRT) {
     const id = toValidDocId(lap.id, 'lap');
-    const existing = docMetaCache.get(`laporanBulanan/${id}`) || null;
+    const existing = await resolveExistingMeta(`laporanBulanan/${id}`);
     const payload = buildLaporanFirestorePayload({ ...lap, id }, existing, ctx);
-    standardWrites.push({ colName: 'laporanBulanan', id, payload, rt: payload.rt });
+    standardWrites.push({
+      colName: 'laporanBulanan',
+      id,
+      payload,
+      rt: payload.rt,
+      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+    });
   }
 
   const stdResult = await executeResilientWrites(standardWrites, 30);
@@ -3027,15 +3289,23 @@ export interface FirestoreRealtimeSnapshot {
   tahunAktif?: number;
 }
 
+let activeSubscriptionCleanup: (() => void) | null = null;
+
 export function subscribeFirestoreState(
   user: AuthUser,
   onUpdate: (partial: Partial<FirestoreRealtimeSnapshot>, isFirstReady: boolean) => void,
   onStatusChange?: (
     connected: boolean,
     errMsg?: string | null,
-    phase?: 'connecting' | 'synced' | 'error'
+    phase?: 'connecting' | 'pending' | 'synced' | 'error'
   ) => void
 ): () => void {
+  // Prevent duplicate listeners on rapid re-renders / auth refreshes / multi-device reconnects
+  if (activeSubscriptionCleanup) {
+    activeSubscriptionCleanup();
+    activeSubscriptionCleanup = null;
+  }
+
   const fbUser = auth.currentUser;
   if (!fbUser) {
     onStatusChange?.(false, 'Sesi Firebase belum aktif.', 'error');
@@ -3045,10 +3315,11 @@ export function subscribeFirestoreState(
   const unsubs: Unsubscribe[] = [];
   let disposed = false;
   let initialClaimDone = user.role === 'warga';
-
-  onStatusChange?.(true, null, 'connecting');
+  let firstReadyEmitted = false;
+  let lastListenerError: string | null = null;
 
   const readyFlags = new Set<string>();
+  const pendingSnapshotsByKey = new Map<string, boolean>();
   const expectedKeys =
     user.role === 'warga'
       ? ['warga', 'rtPublicSummary']
@@ -3063,21 +3334,104 @@ export function subscribeFirestoreState(
           'settings',
         ];
 
-  let latestPartialAccumulator: Partial<FirestoreRealtimeSnapshot> = {};
-
-  const markReady = (key: string, partial: Partial<FirestoreRealtimeSnapshot>) => {
+  const computeAndNotifyStatus = () => {
     if (disposed) return;
-    readyFlags.add(key);
-    latestPartialAccumulator = { ...latestPartialAccumulator, ...partial };
+    const online = isOnlineBrowser();
     const allListenersReady = expectedKeys.every((k) => readyFlags.has(k));
-    const isFirstReady = allListenersReady && initialClaimDone;
-    if (isFirstReady) {
+    const hasPendingSnap = Array.from(pendingSnapshotsByKey.values()).some(Boolean);
+    const hasPendingWrites = hasPendingSnap || activePendingWriteCount > 0;
+    const err = latestAsyncWriteError || lastListenerError;
+
+    if (err) {
+      onStatusChange?.(online, err, 'error');
+      return;
+    }
+    if (!online) {
+      onStatusChange?.(
+        false,
+        hasPendingWrites
+          ? 'Perangkat offline. Perubahan tersimpan lokal & akan tersinkronisasi otomatis saat kembali online.'
+          : 'Perangkat sedang offline. Menampilkan data cache lokal.',
+        hasPendingWrites ? 'pending' : 'error'
+      );
+      return;
+    }
+    if (hasPendingWrites) {
+      onStatusChange?.(true, null, 'pending');
+      return;
+    }
+    if (allListenersReady && initialClaimDone) {
       onStatusChange?.(true, null, 'synced');
     } else {
       onStatusChange?.(true, null, 'connecting');
     }
-    onUpdate(partial, isFirstReady);
   };
+
+  computeAndNotifyStatus();
+
+  const onPendingWriteUpdate = () => computeAndNotifyStatus();
+  pendingWriteListeners.add(onPendingWriteUpdate);
+
+  const handleOnline = () => {
+    lastListenerError = null;
+    computeAndNotifyStatus();
+    if (user.role !== 'warga') {
+      claimAndSyncManifestDocs().catch(() => {});
+    }
+  };
+  const handleOffline = () => computeAndNotifyStatus();
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+  }
+
+  // Track Firestore local-cache <-> server catchup in realtime
+  unsubs.push(
+    onSnapshotsInSync(db, () => {
+      computeAndNotifyStatus();
+    })
+  );
+
+  const markReady = (
+    key: string,
+    hasPendingWrites: boolean,
+    partial: Partial<FirestoreRealtimeSnapshot>,
+    emitDataUpdate = true
+  ) => {
+    if (disposed) return;
+    readyFlags.add(key);
+    pendingSnapshotsByKey.set(key, hasPendingWrites);
+    const allListenersReady = expectedKeys.every((k) => readyFlags.has(k));
+    const isFirstReady = allListenersReady && initialClaimDone && !firstReadyEmitted;
+    if (isFirstReady) {
+      firstReadyEmitted = true;
+    }
+    computeAndNotifyStatus();
+    if (emitDataUpdate || isFirstReady) {
+      onUpdate(partial, isFirstReady);
+    }
+  };
+
+  const cleanup = () => {
+    disposed = true;
+    pendingWriteListeners.delete(onPendingWriteUpdate);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    }
+    unsubs.forEach((u) => {
+      try {
+        u();
+      } catch {
+        // ignore unsubscribe error
+      }
+    });
+    if (activeSubscriptionCleanup === cleanup) {
+      activeSubscriptionCleanup = null;
+    }
+  };
+  activeSubscriptionCleanup = cleanup;
 
   if (user.role === 'warga') {
     const qWarga = query(collection(db, 'warga'), where('linkedUid', '==', fbUser.uid));
@@ -3087,7 +3441,11 @@ export function subscribeFirestoreState(
     unsubs.push(
       onSnapshot(
         qWarga,
+        { includeMetadataChanges: true },
         (snap) => {
+          lastListenerError = null;
+          const alreadyReady = readyFlags.has('warga');
+          const hasChanges = !alreadyReady || snap.docChanges().length > 0;
           const list: Warga[] = [];
           snap.forEach((docSnap) => {
             const d = docSnap.data();
@@ -3098,7 +3456,7 @@ export function subscribeFirestoreState(
               updatedAt: tsToIso(d.updatedAt),
             });
           });
-          markReady('warga', { wargaList: list });
+          markReady('warga', snap.metadata.hasPendingWrites, { wargaList: list }, hasChanges);
 
           const first = list[0];
           const rt = first ? getWargaRTCode(first, DEFAULT_RT) : extractRTFromScope(user.rtScope);
@@ -3110,39 +3468,42 @@ export function subscribeFirestoreState(
             if (summaryUnsub) summaryUnsub();
             summaryUnsub = onSnapshot(
               doc(db, 'rtPublicSummaries', scopeId),
+              { includeMetadataChanges: true },
               (sumSnap) => {
+                lastListenerError = null;
                 if (sumSnap.exists()) {
                   const s = sumSnap.data();
-                  markReady('rtPublicSummary', {
+                  markReady('rtPublicSummary', sumSnap.metadata.hasPendingWrites, {
                     tahunAktif: Number(s.tahunAktif) || 2026,
                     pengaturanKas: s.pengaturanKas as PengaturanKas | undefined,
                     transactions: Array.isArray(s.transactions) ? s.transactions : [],
                     pengumumanList: Array.isArray(s.pengumuman) ? s.pengumuman : [],
                   });
                 } else {
-                  markReady('rtPublicSummary', {});
+                  markReady('rtPublicSummary', sumSnap.metadata.hasPendingWrites, {});
                 }
               },
               (err) => {
                 reportFirestoreError(err, OperationType.GET, `rtPublicSummaries/${scopeId}`);
-                onStatusChange?.(false, err.message, 'error');
-                markReady('rtPublicSummary', {});
+                lastListenerError = err.message;
+                readyFlags.add('rtPublicSummary');
+                computeAndNotifyStatus();
               }
             );
           }
         },
         (err) => {
           reportFirestoreError(err, OperationType.GET, 'warga');
-          onStatusChange?.(false, err.message, 'error');
+          lastListenerError = err.message;
+          computeAndNotifyStatus();
         }
       )
     );
 
-    return () => {
-      disposed = true;
-      unsubs.forEach((u) => u());
+    unsubs.push(() => {
       if (summaryUnsub) summaryUnsub();
-    };
+    });
+    return cleanup;
   }
 
   // ADMIN RT or SERVER PUSAT: Ensure activeAdminContext & initial manifest claim before declaring firstReady
@@ -3158,10 +3519,12 @@ export function subscribeFirestoreState(
       if (!disposed) {
         initialClaimDone = true;
         const allListenersReady = expectedKeys.every((k) => readyFlags.has(k));
-        if (allListenersReady) {
-          onStatusChange?.(true, null, 'synced');
+        const isFirstReady = allListenersReady && !firstReadyEmitted;
+        if (isFirstReady) {
+          firstReadyEmitted = true;
           onUpdate({}, true);
         }
+        computeAndNotifyStatus();
       }
     }
   })();
@@ -3189,7 +3552,11 @@ export function subscribeFirestoreState(
     unsubs.push(
       onSnapshot(
         qCol,
+        { includeMetadataChanges: true },
         (snap) => {
+          lastListenerError = null;
+          const alreadyReady = readyFlags.has(colName);
+          const hasChanges = !alreadyReady || snap.docChanges().length > 0;
           const items: T[] = [];
           const rawForReconcile: Array<{ id: string; data: Record<string, any> }> = [];
           snap.forEach((docSnap) => {
@@ -3204,7 +3571,7 @@ export function subscribeFirestoreState(
             });
           });
           const deduped = dedupeEntityList(items, [], altMatch);
-          markReady(colName, { [key]: deduped } as any);
+          markReady(colName, snap.metadata.hasPendingWrites, { [key]: deduped } as any, hasChanges);
 
           if (rawForReconcile.length > 0) {
             reconcileLoadedDocsWithManifestAndAcls(colName, rawForReconcile).catch(() => {});
@@ -3212,12 +3579,9 @@ export function subscribeFirestoreState(
         },
         (err) => {
           reportFirestoreError(err, OperationType.GET, colName);
-          onStatusChange?.(
-            false,
-            `Gagal menyinkronkan ${colName}: ${err.message}`,
-            'error'
-          );
+          lastListenerError = `Gagal menyinkronkan ${colName}: ${err.message}`;
           readyFlags.add(colName);
+          computeAndNotifyStatus();
         }
       )
     );
@@ -3239,7 +3603,9 @@ export function subscribeFirestoreState(
   unsubs.push(
     onSnapshot(
       query(collection(db, 'settings'), where('accessUids', 'array-contains', fbUser.uid)),
+      { includeMetadataChanges: true },
       async (snap) => {
+        lastListenerError = null;
         const docs = snap.docs.map((d) => {
           const data = d.data();
           recordMeta(`settings/${d.id}`, data);
@@ -3283,9 +3649,11 @@ export function subscribeFirestoreState(
             id: _id,
             rt: _rt,
             rw: _rw,
+            rtId: _rtId,
+            rwId: _rwId,
             ...rest
           } = chosen;
-          markReady('settings', {
+          markReady('settings', snap.metadata.hasPendingWrites, {
             tahunAktif: Number(chosen.tahunAktif) || 2026,
             pengaturanKas: {
               ...(rest as PengaturanKas),
@@ -3293,18 +3661,19 @@ export function subscribeFirestoreState(
             },
           });
         } else {
-          markReady('settings', {});
+          markReady('settings', snap.metadata.hasPendingWrites, {});
         }
       },
       (err) => {
         reportFirestoreError(err, OperationType.GET, 'settings');
-        onStatusChange?.(false, `Gagal menyinkronkan settings: ${err.message}`, 'error');
+        lastListenerError = `Gagal menyinkronkan settings: ${err.message}`;
         readyFlags.add('settings');
+        computeAndNotifyStatus();
       }
     )
   );
 
-  // Watch rtRegistry changes -> re-claim manifest docs whenever new RT admins or server appear
+  // Watch rtRegistry & systemMeta/serverLock changes -> propagate serverUid & new RT admin UIDs immediately
   const rw = activeAdminContext?.rw || DEFAULT_RW;
   unsubs.push(
     onSnapshot(
@@ -3331,10 +3700,28 @@ export function subscribeFirestoreState(
     )
   );
 
-  return () => {
-    disposed = true;
-    unsubs.forEach((u) => u());
-  };
+  unsubs.push(
+    onSnapshot(
+      doc(db, 'systemMeta', 'serverLock'),
+      async (lockSnap) => {
+        if (!lockSnap.exists()) return;
+        const lock = lockSnap.data();
+        if (activeAdminContext && typeof lock.serverUid === 'string' && lock.serverUid && activeAdminContext.serverUid !== lock.serverUid) {
+          activeAdminContext = {
+            ...activeAdminContext,
+            serverUid: lock.serverUid,
+          };
+          reconciledPathsThisSession.clear();
+          await claimAndSyncManifestDocs();
+        }
+      },
+      () => {
+        // ignore if serverLock doesn't exist yet
+      }
+    )
+  );
+
+  return cleanup;
 }
 
 export { testFirestoreConnection };
