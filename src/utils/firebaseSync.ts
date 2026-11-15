@@ -16,6 +16,7 @@ import {
   getDocs,
   onSnapshot,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   Timestamp,
@@ -31,6 +32,7 @@ import {
   getSecondaryAuth,
   handleFirestoreError,
   OperationType,
+  reportFirestoreError,
   testFirestoreConnection,
 } from '../lib/firebase';
 import type {
@@ -120,25 +122,49 @@ function isPlainObject(val: unknown): val is Record<string, any> {
   return proto === Object.prototype || proto === null;
 }
 
-function stripUndefinedDeep<T>(input: T): T {
+export function stripUndefinedDeep<T>(input: T): T {
   if (input instanceof FieldValue || input instanceof Timestamp) {
     return input;
   }
+  if (typeof input === 'number') {
+    return (Number.isFinite(input) ? input : undefined) as unknown as T;
+  }
   if (Array.isArray(input)) {
     return input
-      .filter((item) => item !== undefined)
+      .filter((item) => {
+        if (item === undefined || item === null) return false;
+        if (typeof item === 'number' && !Number.isFinite(item)) return false;
+        return true;
+      })
       .map((item) => stripUndefinedDeep(item)) as unknown as T;
   }
   if (isPlainObject(input)) {
     const out: Record<string, any> = {};
     for (const [k, v] of Object.entries(input)) {
-      if (v !== undefined) {
-        out[k] = stripUndefinedDeep(v);
-      }
+      if (v === undefined || v === null) continue;
+      if (typeof v === 'number' && !Number.isFinite(v)) continue;
+      out[k] = stripUndefinedDeep(v);
     }
     return out as T;
   }
   return input;
+}
+
+export const sanitizeFirestoreData = stripUndefinedDeep;
+
+function toFiniteNumberOrUndefined(val: unknown): number | undefined {
+  if (val === undefined || val === null || val === '') return undefined;
+  const num = typeof val === 'number' ? val : Number(val);
+  return Number.isFinite(num) ? num : undefined;
+}
+
+function toFiniteNumberOrDefault(val: unknown, fallback: number): number {
+  return toFiniteNumberOrUndefined(val) ?? fallback;
+}
+
+function toPlainMapOrUndefined(val: unknown): Record<string, any> | undefined {
+  if (!isPlainObject(val)) return undefined;
+  return stripUndefinedDeep({ ...val });
 }
 
 function tsToIso(val: unknown): string {
@@ -301,12 +327,13 @@ function mergeScopedOwnership(
   scope: ReturnType<typeof computeScopeMetadata>,
   fallbackOwnerUid: string
 ) {
+  // Prioritize active/assigned UIDs first so 15-entry cap never evicts active devices
   const mergedUids = Array.from(
     new Set([
-      ...(existing?.accessUids || []),
       ...scope.accessUids,
       existing?.ownerUid || '',
       fallbackOwnerUid,
+      ...(existing?.accessUids || []),
     ])
   )
     .filter(Boolean)
@@ -322,9 +349,50 @@ function mergeScopedOwnership(
   };
 }
 
-function extractRTFromScope(scope?: string, fallbackRT = DEFAULT_RT): string {
-  const code = normalizeRTCode(scope);
-  return code || fallbackRT;
+function extractRTFromScope(
+  scope?: string,
+  fallbackRT = DEFAULT_RT,
+  allowSemua = false
+): string {
+  if (!scope || typeof scope !== 'string') return fallbackRT;
+  const cleaned = scope.trim();
+  if (!cleaned) return fallbackRT;
+  if (allowSemua && /^semua(\s+rt)?$/i.test(cleaned)) {
+    return 'SEMUA';
+  }
+  const rtMatch = cleaned.match(/RT\s*0*([0-9]+)/i);
+  if (rtMatch) {
+    return rtMatch[1].padStart(2, '0').slice(0, 10);
+  }
+  const numMatch = cleaned.match(/^0*([0-9]+)$/);
+  if (numMatch) {
+    return numMatch[1].padStart(2, '0').slice(0, 10);
+  }
+  return fallbackRT;
+}
+
+function resolveScopedRtRw(
+  rawRt?: string | null,
+  rawRw?: string | null,
+  rtScopeStr?: string | null,
+  ctx?: AdminIdentityContext | null,
+  allowSemua = false
+): { rt: string; rw: string } {
+  if (ctx?.role === 'admin' && ctx.rt && ctx.rt !== 'SEMUA') {
+    return {
+      rt: normalizeRTCode(ctx.rt) || DEFAULT_RT,
+      rw: normalizeRWCode(ctx.rw, DEFAULT_RW),
+    };
+  }
+  const rw = normalizeRWCode(rawRw, ctx?.rw || DEFAULT_RW);
+  const fromRt = rawRt ? extractRTFromScope(rawRt, '', allowSemua) : '';
+  const fromScope = rtScopeStr ? extractRTFromScope(rtScopeStr, '', allowSemua) : '';
+  const fallback =
+    ctx?.rt && (ctx.rt !== 'SEMUA' || allowSemua) ? normalizeRTCode(ctx.rt) : DEFAULT_RT;
+  return {
+    rt: fromRt || fromScope || fallback || DEFAULT_RT,
+    rw,
+  };
 }
 
 // ==========================================
@@ -426,10 +494,12 @@ async function upsertRtRegistry(params: {
   const regId = `rw_${rw}`;
   const regRef = doc(db, 'rtRegistry', regId);
 
+  let existingSnapExists = false;
   let existing: any = null;
   try {
     const snap = await getDoc(regRef);
-    if (snap.exists()) existing = snap.data();
+    existingSnapExists = snap.exists();
+    if (existingSnapExists) existing = snap.data();
   } catch (err) {
     console.warn('upsertRtRegistry read warning:', err);
   }
@@ -440,7 +510,7 @@ async function upsertRtRegistry(params: {
   );
 
   if (params.addRt && params.addRt !== 'SEMUA') {
-    const normRt = normalizeRTCode(params.addRt);
+    const normRt = extractRTFromScope(params.addRt, '');
     if (normRt) {
       rtSet.add(normRt);
       if (params.addAdminUid) {
@@ -454,23 +524,34 @@ async function upsertRtRegistry(params: {
 
   const serverUid = params.serverUid || existing?.serverUid;
 
-  const payload = stripUndefinedDeep({
-    id: regId,
-    rw,
-    serverUid,
-    adminsByRt,
-    registeredRts: Array.from(rtSet).slice(0, 100),
-    ownerUid: existing?.ownerUid || params.ownerUid,
-    createdAt: existing?.createdAt || serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-
   try {
-    await setDoc(regRef, payload);
+    if (existingSnapExists) {
+      const updatePatch = stripUndefinedDeep({
+        serverUid,
+        adminsByRt,
+        registeredRts: Array.from(rtSet).slice(0, 100),
+        updatedAt: serverTimestamp(),
+      });
+      await updateDoc(regRef, updatePatch);
+    } else {
+      const createPayload = stripUndefinedDeep({
+        id: regId,
+        rw,
+        serverUid,
+        adminsByRt,
+        registeredRts: Array.from(rtSet).slice(0, 100),
+        ownerUid: params.ownerUid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      await setDoc(regRef, createPayload);
+    }
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `rtRegistry/${regId}`);
+    reportFirestoreError(error, OperationType.WRITE, `rtRegistry/${regId}`);
   }
 }
+
+const manifestLockMap = new Map<string, Promise<void>>();
 
 async function appendDocIdsToManifest(
   rwRaw: string,
@@ -487,91 +568,223 @@ async function appendDocIdsToManifest(
       ? ctx?.rt && ctx.rt !== 'SEMUA'
         ? ctx.rt
         : DEFAULT_RT
-      : normalizeRTCode(rtRaw) || DEFAULT_RT;
+      : extractRTFromScope(rtRaw, DEFAULT_RT);
 
   const scopeId = `rt_${rt}_rw_${rw}`;
-  const manifestRef = doc(db, 'rtManifest', scopeId);
+  const prevLock = manifestLockMap.get(scopeId) || Promise.resolve();
 
-  let existing: any = null;
-  try {
-    const snap = await getDoc(manifestRef);
-    if (snap.exists()) existing = snap.data();
-  } catch {
-    // ignore read error before create
-  }
+  const nextLock = prevLock
+    .catch(() => {})
+    .then(async () => {
+      const manifestRef = doc(db, 'rtManifest', scopeId);
+      try {
+        await runTransaction(db, async (tx) => {
+          const snap = await tx.get(manifestRef);
+          const existing = snap.exists() ? snap.data() : null;
+          const nextDocIds: Record<string, string[]> = { ...(existing?.docIds || {}) };
+          let changed = !existing;
 
-  const nextDocIds: Record<string, string[]> = { ...(existing?.docIds || {}) };
-  let changed = !existing;
+          for (const [bucket, ids] of Object.entries(entries)) {
+            if (!ids || ids.length === 0) continue;
+            const prevList = Array.isArray(nextDocIds[bucket]) ? nextDocIds[bucket] : [];
+            const merged = Array.from(new Set([...prevList, ...ids]));
+            if (merged.length !== prevList.length) {
+              nextDocIds[bucket] = merged;
+              changed = true;
+            }
+          }
 
-  for (const [bucket, ids] of Object.entries(entries)) {
-    if (!ids || ids.length === 0) continue;
-    const prevList = Array.isArray(nextDocIds[bucket]) ? nextDocIds[bucket] : [];
-    const merged = Array.from(new Set([...prevList, ...ids]));
-    if (merged.length !== prevList.length) {
-      nextDocIds[bucket] = merged;
-      changed = true;
+          if (!changed) return;
+
+          if (existing) {
+            const updatePatch = stripUndefinedDeep({
+              docIds: nextDocIds,
+              serverUid: ctx?.serverUid || existing.serverUid,
+              updatedAt: serverTimestamp(),
+            });
+            tx.update(manifestRef, updatePatch);
+          } else {
+            const createPayload = stripUndefinedDeep({
+              id: scopeId,
+              rw,
+              rt,
+              docIds: nextDocIds,
+              ownerUid: uid,
+              serverUid: ctx?.serverUid,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+            tx.set(manifestRef, createPayload);
+          }
+        });
+      } catch (err) {
+        console.warn('appendDocIdsToManifest warning:', err);
+      }
+    });
+
+  manifestLockMap.set(scopeId, nextLock);
+  await nextLock;
+}
+
+async function commitDocAccessPatches(
+  updates: Array<{ ref: ReturnType<typeof doc>; path: string; patch: Record<string, any> }>
+): Promise<number> {
+  if (updates.length === 0) return 0;
+  let applied = 0;
+
+  for (let i = 0; i < updates.length; i += 35) {
+    const chunk = updates.slice(i, i + 35);
+    try {
+      const batch = writeBatch(db);
+      for (const item of chunk) {
+        batch.update(item.ref, item.patch);
+      }
+      await batch.commit();
+      applied += chunk.length;
+    } catch {
+      // Isolate per-doc failures so 1 invalid/locked document never blocks the rest
+      const results = await Promise.allSettled(
+        chunk.map((item) => updateDoc(item.ref, item.patch))
+      );
+      results.forEach((r, idx) => {
+        if (r.status === 'fulfilled') {
+          applied++;
+        } else {
+          console.warn(`ACL patch skipped (${chunk[idx].path}):`, r.reason);
+        }
+      });
     }
   }
 
-  if (!changed) return;
-
-  const payload = stripUndefinedDeep({
-    id: scopeId,
-    rw,
-    rt,
-    docIds: nextDocIds,
-    ownerUid: existing?.ownerUid || uid,
-    serverUid: ctx?.serverUid || existing?.serverUid,
-    createdAt: existing?.createdAt || serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-
-  try {
-    await setDoc(manifestRef, payload);
-  } catch (err) {
-    console.warn('appendDocIdsToManifest warning:', err);
-  }
+  return applied;
 }
+
+const CLAIM_ABLE_COLLECTIONS: EntityBucket[] = [
+  'warga',
+  'transactions',
+  'bantuan',
+  'pengumuman',
+  'dokumen',
+  'adminAccounts',
+  'laporanBulanan',
+  'settings',
+];
 
 export async function claimAndSyncManifestDocs(): Promise<number> {
   const ctx = activeAdminContext;
-  if (!ctx) return 0;
+  if (!ctx || !auth.currentUser) return 0;
 
   let updatedCount = 0;
   try {
     const regRef = doc(db, 'rtRegistry', `rw_${ctx.rw}`);
-    const regSnap = await getDoc(regRef);
-    const regData = regSnap.exists() ? regSnap.data() : null;
+    const regSnap = await getDoc(regRef).catch(() => null);
+    const regData = regSnap && regSnap.exists() ? regSnap.data() : null;
 
     if (ctx.role === 'server' && regData && regData.serverUid !== ctx.uid) {
       await updateDoc(regRef, {
         serverUid: ctx.uid,
         updatedAt: serverTimestamp(),
       }).catch(() => {});
+    } else if (ctx.role === 'admin' && ctx.rt !== 'SEMUA') {
+      const regAdmins = regData?.adminsByRt?.[ctx.rt];
+      if (!regData || !Array.isArray(regAdmins) || !regAdmins.includes(ctx.uid)) {
+        await upsertRtRegistry({
+          rw: ctx.rw,
+          ownerUid: ctx.uid,
+          serverUid: ctx.serverUid,
+          addRt: ctx.rt,
+          addAdminUid: ctx.uid,
+        });
+      }
     }
+
+    const effectiveAdminsByRt: Record<string, string[]> = {
+      ...(regData?.adminsByRt || ctx.adminsByRt || {}),
+    };
+    const effectiveServerUid =
+      (typeof regData?.serverUid === 'string' && regData.serverUid) || ctx.serverUid;
 
     const rtsToCheck: string[] =
       ctx.role === 'server'
         ? Array.from(
             new Set([
               ...(Array.isArray(regData?.registeredRts) ? regData.registeredRts : []),
-              ...Object.keys(regData?.adminsByRt || {}),
+              ...Object.keys(effectiveAdminsByRt),
               DEFAULT_RT,
             ])
           )
         : [ctx.rt];
 
-    let batch = writeBatch(db);
-    let batchOps = 0;
+    const updates: Array<{
+      ref: ReturnType<typeof doc>;
+      path: string;
+      patch: Record<string, any>;
+    }> = [];
+    const seenPaths = new Set<string>();
 
-    const commitBatch = async () => {
-      if (batchOps > 0) {
-        await batch.commit();
-        batch = writeBatch(db);
-        batchOps = 0;
+    const evaluateDocForClaim = (colName: EntityBucket, id: string, data: any) => {
+      const docPath = `${colName}/${id}`;
+      if (seenPaths.has(docPath)) return;
+      seenPaths.add(docPath);
+      recordMeta(docPath, data);
+
+      const docRw = normalizeRWCode(data.rw, ctx.rw);
+      const docRt =
+        data.rt === 'SEMUA' ? 'SEMUA' : extractRTFromScope(data.rt, DEFAULT_RT, true);
+
+      if (docRw !== ctx.rw) return;
+      if (ctx.role === 'admin') {
+        if (docRt === 'SEMUA' && colName === 'settings') return;
+        if (docRt !== ctx.rt && docRt !== 'SEMUA') return;
+        if (colName === 'adminAccounts' && data.authUid !== ctx.uid) return;
+      }
+
+      const assignedRtUids =
+        docRt === 'SEMUA'
+          ? Object.values(effectiveAdminsByRt).flat()
+          : Array.isArray(effectiveAdminsByRt[docRt])
+          ? effectiveAdminsByRt[docRt]
+          : [];
+
+      const desiredUids = [
+        ctx.uid,
+        ...(effectiveServerUid ? [effectiveServerUid] : []),
+        ...assignedRtUids,
+      ].filter(Boolean);
+
+      const currentAccessUids: string[] = Array.isArray(data.accessUids) ? data.accessUids : [];
+      const missingUid = desiredUids.some((u) => !currentAccessUids.includes(u));
+      const needsServerUid = Boolean(effectiveServerUid && data.serverUid !== effectiveServerUid);
+      const needsRtUid =
+        ctx.role === 'admin' &&
+        colName !== 'adminAccounts' &&
+        colName !== 'settings' &&
+        data.rtAdminUid !== ctx.uid;
+
+      if (missingUid || needsServerUid || needsRtUid) {
+        const nextUids = Array.from(
+          new Set([
+            ...desiredUids,
+            ...(typeof data.ownerUid === 'string' ? [data.ownerUid] : []),
+            ...currentAccessUids,
+          ])
+        )
+          .filter(Boolean)
+          .slice(0, 15);
+
+        const patch: Record<string, any> = {
+          accessUids: nextUids,
+          updatedAt: serverTimestamp(),
+        };
+        if (effectiveServerUid) patch.serverUid = effectiveServerUid;
+        if (ctx.role === 'admin' && colName !== 'adminAccounts') {
+          patch.rtAdminUid = ctx.uid;
+        }
+        updates.push({ ref: doc(db, colName, id), path: docPath, patch });
       }
     };
 
+    // 1. Read every doc listed in rtManifest for the assigned RW/RT scope
     for (const rtCode of rtsToCheck) {
       if (!rtCode || rtCode === 'SEMUA') continue;
       const scopeId = `rt_${rtCode}_rw_${ctx.rw}`;
@@ -579,51 +792,157 @@ export async function claimAndSyncManifestDocs(): Promise<number> {
       if (!manifestSnap || !manifestSnap.exists()) continue;
 
       const docIdsMap: Record<string, string[]> = manifestSnap.data().docIds || {};
-      for (const [colName, ids] of Object.entries(docIdsMap)) {
-        if (!Array.isArray(ids) || colName === 'rtManifest') continue;
+      const fetches: Promise<void>[] = [];
+
+      for (const [colNameRaw, ids] of Object.entries(docIdsMap)) {
+        const colName = colNameRaw as EntityBucket;
+        if (!Array.isArray(ids) || !CLAIM_ABLE_COLLECTIONS.includes(colName)) continue;
         for (const id of ids) {
           if (!id) continue;
-          const ref = doc(db, colName, id);
-          const snap = await getDoc(ref).catch(() => null);
-          if (!snap || !snap.exists()) continue;
-          const data = snap.data();
-          recordMeta(`${colName}/${id}`, data);
-
-          const accessUids: string[] = Array.isArray(data.accessUids) ? data.accessUids : [];
-          const needsAccess = !accessUids.includes(ctx.uid);
-          const needsServerUid = ctx.role === 'server' && data.serverUid !== ctx.uid;
-          const needsRtUid =
-            ctx.role === 'admin' &&
-            colName !== 'adminAccounts' &&
-            data.rtAdminUid !== ctx.uid;
-
-          if (needsAccess || needsServerUid || needsRtUid) {
-            // Admin RT cannot update other adminAccounts rows unless authUid matches
-            if (colName === 'adminAccounts' && ctx.role === 'admin' && data.authUid !== ctx.uid) {
-              continue;
-            }
-            const nextUids = Array.from(new Set([...accessUids, ctx.uid])).slice(0, 15);
-            const patch: Record<string, any> = {
-              accessUids: nextUids,
-              updatedAt: serverTimestamp(),
-            };
-            if (ctx.role === 'server') patch.serverUid = ctx.uid;
-            if (ctx.role === 'admin' && colName !== 'adminAccounts') patch.rtAdminUid = ctx.uid;
-
-            batch.update(ref, patch);
-            batchOps++;
-            updatedCount++;
-            if (batchOps >= 350) await commitBatch();
-          }
+          fetches.push(
+            getDoc(doc(db, colName, id))
+              .then((snap) => {
+                if (snap.exists()) evaluateDocForClaim(colName, id, snap.data());
+              })
+              .catch(() => {})
+          );
         }
       }
+      await Promise.all(fetches);
     }
 
-    await commitBatch();
+    // 2. Orphan repair: catch docs owned/managed by this UID that may have missed rtManifest or accessUids
+    const orphanEntries = new Map<string, Partial<Record<EntityBucket, string[]>>>();
+    const recordOrphanManifest = (rtCode: string, colName: EntityBucket, id: string) => {
+      if (!rtCode || rtCode === 'SEMUA') return;
+      const bucket = orphanEntries.get(rtCode) || {};
+      const list = bucket[colName] || [];
+      if (!list.includes(id)) list.push(id);
+      bucket[colName] = list;
+      orphanEntries.set(rtCode, bucket);
+    };
+
+    const ownerField = ctx.role === 'server' ? 'serverUid' : 'rtAdminUid';
+    await Promise.all(
+      CLAIM_ABLE_COLLECTIONS.map(async (colName) => {
+        const queries = [
+          query(collection(db, colName), where('ownerUid', '==', ctx.uid)),
+          query(collection(db, colName), where(ownerField, '==', ctx.uid)),
+        ];
+        for (const qRef of queries) {
+          try {
+            const snap = await getDocs(qRef);
+            snap.forEach((docSnap) => {
+              const d = docSnap.data();
+              evaluateDocForClaim(colName, docSnap.id, d);
+              const dRw = normalizeRWCode(d.rw, ctx.rw);
+              const dRt = extractRTFromScope(d.rt, '', true);
+              if (dRw === ctx.rw && dRt && dRt !== 'SEMUA') {
+                recordOrphanManifest(dRt, colName, docSnap.id);
+              }
+            });
+          } catch {
+            // non-fatal per collection
+          }
+        }
+      })
+    );
+
+    updatedCount = await commitDocAccessPatches(updates);
+
+    for (const [rtCode, bucket] of orphanEntries.entries()) {
+      await appendDocIdsToManifest(ctx.rw, rtCode, bucket);
+    }
   } catch (err) {
     console.warn('claimAndSyncManifestDocs warning:', err);
   }
   return updatedCount;
+}
+
+const reconciledPathsThisSession = new Set<string>();
+
+async function reconcileLoadedDocsWithManifestAndAcls(
+  colName: EntityBucket,
+  rawDocs: Array<{ id: string; data: Record<string, any> }>
+) {
+  const ctx = activeAdminContext;
+  if (!ctx || !auth.currentUser || rawDocs.length === 0) return;
+
+  const byRt = new Map<string, string[]>();
+  const aclPatches: Array<{
+    ref: ReturnType<typeof doc>;
+    path: string;
+    patch: Record<string, any>;
+  }> = [];
+
+  for (const item of rawDocs) {
+    const { id, data } = item;
+    const docPath = `${colName}/${id}`;
+    const rw = normalizeRWCode(data.rw, ctx.rw);
+    if (rw !== ctx.rw) continue;
+
+    const rt = data.rt === 'SEMUA' ? 'SEMUA' : extractRTFromScope(data.rt, DEFAULT_RT, true);
+    if (rt && rt !== 'SEMUA') {
+      const list = byRt.get(rt) || [];
+      list.push(id);
+      byRt.set(rt, list);
+    }
+
+    if (reconciledPathsThisSession.has(docPath)) continue;
+    reconciledPathsThisSession.add(docPath);
+
+    if (ctx.role === 'admin') {
+      if (colName === 'settings' && rt === 'SEMUA') continue;
+      if (colName === 'adminAccounts' && data.authUid !== ctx.uid) continue;
+      if (rt !== ctx.rt && rt !== 'SEMUA') continue;
+    }
+
+    const assignedRtUids =
+      rt === 'SEMUA'
+        ? Object.values(ctx.adminsByRt || {}).flat()
+        : Array.isArray(ctx.adminsByRt?.[rt])
+        ? ctx.adminsByRt[rt]
+        : [];
+    const desiredUids = [
+      ctx.uid,
+      ...(ctx.serverUid ? [ctx.serverUid] : []),
+      ...assignedRtUids,
+    ].filter(Boolean);
+
+    const existingUids: string[] = Array.isArray(data.accessUids) ? data.accessUids : [];
+    const missing = desiredUids.some((u) => !existingUids.includes(u));
+    const needsServer = Boolean(ctx.serverUid && data.serverUid !== ctx.serverUid);
+
+    if (missing || needsServer) {
+      const nextUids = Array.from(
+        new Set([
+          ...desiredUids,
+          ...(typeof data.ownerUid === 'string' ? [data.ownerUid] : []),
+          ...existingUids,
+        ])
+      )
+        .filter(Boolean)
+        .slice(0, 15);
+      const patch: Record<string, any> = {
+        accessUids: nextUids,
+        updatedAt: serverTimestamp(),
+      };
+      if (ctx.serverUid) patch.serverUid = ctx.serverUid;
+      aclPatches.push({ ref: doc(db, colName, id), path: docPath, patch });
+    }
+  }
+
+  for (const [rtCode, ids] of byRt.entries()) {
+    const manifestKey = `manifest:${colName}:${rtCode}:${ids.length}:${ids[0] || ''}`;
+    if (!reconciledPathsThisSession.has(manifestKey)) {
+      reconciledPathsThisSession.add(manifestKey);
+      await appendDocIdsToManifest(ctx.rw, rtCode, { [colName]: ids });
+    }
+  }
+
+  if (aclPatches.length > 0) {
+    await commitDocAccessPatches(aclPatches);
+  }
 }
 
 // ==========================================
@@ -1055,6 +1374,7 @@ export async function registerAndSyncAdminWithFirebase(params: {
 }): Promise<{
   ok: boolean;
   message?: string;
+  migrationOk?: boolean;
   account?: AdminRTAccount;
   user?: AuthUser;
 }> {
@@ -1143,14 +1463,26 @@ export async function registerAndSyncAdminWithFirebase(params: {
 
     await saveAdminAccountDoc(savedAccount, fbUser.uid);
 
-    if (legacyData && (legacyData.wargaList?.length || legacyData.transactions?.length)) {
-      await migrateSnapshotToFirestore(legacyData);
+    let migrationOk = true;
+    const hasLegacyRecords = Boolean(
+      legacyData &&
+        ((legacyData.wargaList?.length || 0) > 0 ||
+          (legacyData.transactions?.length || 0) > 0 ||
+          (legacyData.bantuanList?.length || 0) > 0 ||
+          (legacyData.pengumumanList?.length || 0) > 0 ||
+          (legacyData.dokumenList?.length || 0) > 0 ||
+          (legacyData.laporanBulananRT?.length || 0) > 0)
+    );
+    if (legacyData && hasLegacyRecords) {
+      const migRes = await migrateMissingSnapshotToFirestore(legacyData, null, false);
+      migrationOk = migRes.ok;
     }
 
     await claimAndSyncManifestDocs();
 
     return {
       ok: true,
+      migrationOk,
       account: savedAccount,
       user: {
         role: 'admin',
@@ -1182,6 +1514,8 @@ export async function resolveCurrentFirebaseUser(
   // 1. Check /admins/{uid}
   const ctx = await refreshAdminContext(fbUser.uid);
   if (ctx) {
+    // Ensure session recovery claims all RT/RW docs for this device immediately
+    await claimAndSyncManifestDocs().catch(() => {});
     return {
       role: ctx.role,
       username: ctx.username,
@@ -1232,6 +1566,7 @@ export async function resolveCurrentFirebaseUser(
 export async function logoutFromFirebase(): Promise<void> {
   activeAdminContext = null;
   docMetaCache.clear();
+  reconciledPathsThisSession.clear();
   try {
     await signOut(auth);
   } catch {
@@ -1432,31 +1767,36 @@ export async function provisionWargaAuthAccounts(
 // 4. SANITIZED FIRESTORE PAYLOAD BUILDERS
 // ==========================================
 
-function buildWargaFirestorePayload(
+export function buildWargaFirestorePayload(
   w: Warga & { linkedUid?: string },
   existing: CachedDocMeta | null,
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
   const id = toValidDocId(w.id, 'w');
-  const rt = normalizeRTCode(w.rt) || (ctx?.rt && ctx.rt !== 'SEMUA' ? ctx.rt : DEFAULT_RT);
-  const rw = normalizeRWCode(w.rw, ctx?.rw || DEFAULT_RW);
+  const { rt, rw } = resolveScopedRtRw(w.rt, w.rw, null, ctx, false);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
   const anggotaKeluarga = Array.isArray(w.anggotaKeluarga)
-    ? w.anggotaKeluarga.slice(0, 30).map((a) => stripUndefinedDeep({ ...a }))
+    ? w.anggotaKeluarga
+        .filter((a) => isPlainObject(a))
+        .slice(0, 30)
+        .map((a) => stripUndefinedDeep({ ...a }))
     : undefined;
 
   const riwayatPerubahanKK = Array.isArray(w.riwayatPerubahanKK)
-    ? w.riwayatPerubahanKK.slice(0, 50).map((r) => stripUndefinedDeep({ ...r }))
+    ? w.riwayatPerubahanKK
+        .filter((r) => isPlainObject(r))
+        .slice(0, 50)
+        .map((r) => stripUndefinedDeep({ ...r }))
     : undefined;
 
   return stripUndefinedDeep({
     id,
-    no: typeof w.no === 'number' ? w.no : undefined,
-    nama: String(w.nama || 'Warga').slice(0, 160),
-    noKK: String(w.noKK || '').slice(0, 32),
+    no: toFiniteNumberOrUndefined(w.no),
+    nama: String(w.nama || 'Warga').trim().slice(0, 160) || 'Warga',
+    noKK: w.noKK ? String(w.noKK).slice(0, 32) : undefined,
     nik: w.nik ? String(w.nik).slice(0, 32) : undefined,
     noRumah: String(w.noRumah || '-').slice(0, 32),
     rt,
@@ -1465,21 +1805,20 @@ function buildWargaFirestorePayload(
     kodePos: w.kodePos ? String(w.kodePos).slice(0, 12) : undefined,
     tanggalDikeluarkan: w.tanggalDikeluarkan ? String(w.tanggalDikeluarkan).slice(0, 32) : undefined,
     jenisKelamin: w.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki',
-    jumlahJiwa: typeof w.jumlahJiwa === 'number' ? w.jumlahJiwa : anggotaKeluarga?.length || 1,
+    jumlahJiwa: toFiniteNumberOrDefault(w.jumlahJiwa, anggotaKeluarga?.length || 1),
     statusIuran: w.statusIuran === 'Sudah' ? 'Sudah' : 'Belum',
     anggotaKeluarga,
     telepon: w.telepon ? String(w.telepon).slice(0, 32) : undefined,
     pin: w.pin ? String(w.pin).slice(0, 12) : undefined,
-    pinAttempts: typeof w.pinAttempts === 'number' ? w.pinAttempts : undefined,
-    pinLockedUntil: typeof w.pinLockedUntil === 'number' ? w.pinLockedUntil : undefined,
-    riwayatIuran: w.riwayatIuran,
-    riwayatKematian: w.riwayatKematian,
-    statusIuranPerTahun: w.statusIuranPerTahun,
-    riwayatIuranPerTahun: w.riwayatIuranPerTahun,
-    riwayatKematianPerTahun: w.riwayatKematianPerTahun,
-    iuranUmumTerbayar: typeof w.iuranUmumTerbayar === 'number' ? w.iuranUmumTerbayar : undefined,
-    iuranKematianTerbayar:
-      typeof w.iuranKematianTerbayar === 'number' ? w.iuranKematianTerbayar : undefined,
+    pinAttempts: toFiniteNumberOrUndefined(w.pinAttempts),
+    pinLockedUntil: toFiniteNumberOrUndefined(w.pinLockedUntil),
+    riwayatIuran: toPlainMapOrUndefined(w.riwayatIuran),
+    riwayatKematian: toPlainMapOrUndefined(w.riwayatKematian),
+    statusIuranPerTahun: toPlainMapOrUndefined(w.statusIuranPerTahun),
+    riwayatIuranPerTahun: toPlainMapOrUndefined(w.riwayatIuranPerTahun),
+    riwayatKematianPerTahun: toPlainMapOrUndefined(w.riwayatKematianPerTahun),
+    iuranUmumTerbayar: toFiniteNumberOrUndefined(w.iuranUmumTerbayar),
+    iuranKematianTerbayar: toFiniteNumberOrUndefined(w.iuranKematianTerbayar),
     pilihanSkema:
       w.pilihanSkema === 'bulanan' || w.pilihanSkema === 'tahunan' ? w.pilihanSkema : undefined,
     riwayatPerubahanKK,
@@ -1488,30 +1827,29 @@ function buildWargaFirestorePayload(
   });
 }
 
-function buildTransactionFirestorePayload(
+export function buildTransactionFirestorePayload(
   tx: Transaction,
   existing: CachedDocMeta | null,
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
   const id = toValidDocId(tx.id, 'tx');
-  const rt = extractRTFromScope(tx.rtScope, ctx?.rt && ctx.rt !== 'SEMUA' ? ctx.rt : DEFAULT_RT);
-  const rw = ctx?.rw || DEFAULT_RW;
+  const { rt, rw } = resolveScopedRtRw(null, null, tx.rtScope, ctx, false);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
   return stripUndefinedDeep({
     id,
-    tanggal: String(tx.tanggal || new Date().toISOString().split('T')[0]).slice(0, 32),
-    kategori: String(tx.kategori || 'Kas Umum').slice(0, 120),
+    tanggal: String(tx.tanggal || new Date().toISOString().split('T')[0]).slice(0, 32) || new Date().toISOString().split('T')[0],
+    kategori: String(tx.kategori || 'Kas Umum').slice(0, 120) || 'Kas Umum',
     keterangan: String(tx.keterangan || '-').slice(0, 500),
-    nominal: Number(tx.nominal) || 0,
+    nominal: toFiniteNumberOrDefault(tx.nominal, 0),
     tipe: tx.tipe === 'keluar' || tx.tipe === 'kematian' ? tx.tipe : 'masuk',
     namaWarga: tx.namaWarga ? String(tx.namaWarga).slice(0, 160) : undefined,
     nomorRumah: tx.nomorRumah ? String(tx.nomorRumah).slice(0, 32) : undefined,
     noKK: tx.noKK ? String(tx.noKK).slice(0, 32) : undefined,
     isSaldoAwal: typeof tx.isSaldoAwal === 'boolean' ? tx.isSaldoAwal : undefined,
-    tahun: typeof tx.tahun === 'number' ? tx.tahun : undefined,
+    tahun: toFiniteNumberOrUndefined(tx.tahun),
     rt,
     rw,
     rtScope: String(tx.rtScope || `RT ${rt} RW ${rw}`).slice(0, 64),
@@ -1519,15 +1857,14 @@ function buildTransactionFirestorePayload(
   });
 }
 
-function buildBantuanFirestorePayload(
+export function buildBantuanFirestorePayload(
   b: BantuanPemerintah,
   existing: CachedDocMeta | null,
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
   const id = toValidDocId(b.id, 'b');
-  const rt = extractRTFromScope(b.rtScope, ctx?.rt && ctx.rt !== 'SEMUA' ? ctx.rt : DEFAULT_RT);
-  const rw = ctx?.rw || DEFAULT_RW;
+  const { rt, rw } = resolveScopedRtRw(null, null, b.rtScope, ctx, false);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
@@ -1541,8 +1878,8 @@ function buildBantuanFirestorePayload(
 
   return stripUndefinedDeep({
     id,
-    jenisBantuan: String(b.jenisBantuan || 'Bantuan Sosial').slice(0, 160),
-    namaPenerima: String(b.namaPenerima || 'Warga').slice(0, 160),
+    jenisBantuan: String(b.jenisBantuan || 'Bantuan Sosial').slice(0, 160) || 'Bantuan Sosial',
+    namaPenerima: String(b.namaPenerima || 'Warga').slice(0, 160) || 'Warga',
     noKK: b.noKK ? String(b.noKK).slice(0, 32) : undefined,
     nik: b.nik ? String(b.nik).slice(0, 32) : undefined,
     nominalAtauBarang: b.nominalAtauBarang ? String(b.nominalAtauBarang).slice(0, 200) : undefined,
@@ -1557,15 +1894,20 @@ function buildBantuanFirestorePayload(
   });
 }
 
-function buildPengumumanFirestorePayload(
+export function buildPengumumanFirestorePayload(
   p: PengumumanRT,
   existing: CachedDocMeta | null,
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
   const id = toValidDocId(p.id, 'p');
-  const rt = extractRTFromScope(p.rtScope, ctx?.rt && ctx.rt !== 'SEMUA' ? ctx.rt : DEFAULT_RT);
-  const rw = ctx?.rw || DEFAULT_RW;
+  const { rt, rw } = resolveScopedRtRw(
+    null,
+    null,
+    p.rtScope,
+    ctx,
+    ctx?.role === 'server'
+  );
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
@@ -1580,10 +1922,10 @@ function buildPengumumanFirestorePayload(
 
   return stripUndefinedDeep({
     id,
-    judul: String(p.judul || 'Pengumuman RT').slice(0, 200),
-    isi: String(p.isi || '-').slice(0, 4000),
+    judul: String(p.judul || 'Pengumuman RT').slice(0, 200) || 'Pengumuman RT',
+    isi: String(p.isi || '-').slice(0, 4000) || '-',
     kategori: validKategori,
-    tanggal: String(p.tanggal || new Date().toISOString().split('T')[0]).slice(0, 32),
+    tanggal: String(p.tanggal || new Date().toISOString().split('T')[0]).slice(0, 32) || new Date().toISOString().split('T')[0],
     tanggalBerakhir: p.tanggalBerakhir ? String(p.tanggalBerakhir).slice(0, 32) : undefined,
     penulis: p.penulis ? String(p.penulis).slice(0, 120) : undefined,
     namaPengurus: p.namaPengurus ? String(p.namaPengurus).slice(0, 120) : undefined,
@@ -1603,25 +1945,24 @@ function buildPengumumanFirestorePayload(
   });
 }
 
-function buildDokumenFirestorePayload(
+export function buildDokumenFirestorePayload(
   d: DokumenPdfWarga,
   existing: CachedDocMeta | null,
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
   const id = toValidDocId(d.id, 'doc');
-  const rt = extractRTFromScope(d.rtScope, ctx?.rt && ctx.rt !== 'SEMUA' ? ctx.rt : DEFAULT_RT);
-  const rw = ctx?.rw || DEFAULT_RW;
+  const { rt, rw } = resolveScopedRtRw(null, null, d.rtScope, ctx, false);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
   return stripUndefinedDeep({
     id,
-    judul: String(d.judul || 'Dokumen RT').slice(0, 200),
-    namaFile: String(d.namaFile || 'dokumen.pdf').slice(0, 200),
-    ukuranKb: typeof d.ukuranKb === 'number' ? d.ukuranKb : undefined,
+    judul: String(d.judul || 'Dokumen RT').slice(0, 200) || 'Dokumen RT',
+    namaFile: String(d.namaFile || 'dokumen.pdf').slice(0, 200) || 'dokumen.pdf',
+    ukuranKb: toFiniteNumberOrUndefined(d.ukuranKb),
     tanggalUpload: d.tanggalUpload ? String(d.tanggalUpload).slice(0, 32) : undefined,
-    kategori: String(d.kategori || 'Arsip RT').slice(0, 80),
+    kategori: String(d.kategori || 'Arsip RT').slice(0, 80) || 'Arsip RT',
     keterangan: d.keterangan ? String(d.keterangan).slice(0, 300) : undefined,
     dataBase64: d.dataBase64 ? String(d.dataBase64).slice(0, 850000) : undefined,
     rt,
@@ -1631,7 +1972,7 @@ function buildDokumenFirestorePayload(
   });
 }
 
-function buildAdminAccountFirestorePayload(
+export function buildAdminAccountFirestorePayload(
   acc: AdminRTAccount & { authUid?: string },
   existing: CachedDocMeta | null,
   ctx: AdminIdentityContext | null,
@@ -1639,21 +1980,24 @@ function buildAdminAccountFirestorePayload(
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || fallbackAuthUid || 'system';
   const id = toValidDocId(acc.id, 'adm');
-  const rt = normalizeRTCode(acc.rt) || DEFAULT_RT;
+  const rt =
+    ctx?.role === 'admin' && ctx.rt !== 'SEMUA'
+      ? ctx.rt
+      : extractRTFromScope(acc.rt, DEFAULT_RT);
   const rw = normalizeRWCode(acc.rw, ctx?.rw || DEFAULT_RW);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
   const resolvedAuthUid = acc.authUid || fallbackAuthUid;
   if (resolvedAuthUid && !meta.accessUids.includes(resolvedAuthUid)) {
-    meta.accessUids = [...meta.accessUids, resolvedAuthUid].slice(0, 15);
+    meta.accessUids = [resolvedAuthUid, ...meta.accessUids].slice(0, 15);
   }
 
   return stripUndefinedDeep({
     id,
-    username: String(acc.username || 'Admin').slice(0, 80),
-    passwordHash: String(acc.passwordHash || 'rt08rw05').slice(0, 128),
-    nama: String(acc.nama || `Admin RT ${rt}`).slice(0, 160),
+    username: String(acc.username || 'Admin').slice(0, 80) || 'Admin',
+    passwordHash: String(acc.passwordHash || 'rt08rw05').slice(0, 128) || 'rt08rw05',
+    nama: String(acc.nama || `Admin RT ${rt}`).slice(0, 160) || `Admin RT ${rt}`,
     rt,
     rw,
     kontak: acc.kontak ? String(acc.kontak).slice(0, 40) : undefined,
@@ -1668,15 +2012,14 @@ function buildAdminAccountFirestorePayload(
   });
 }
 
-function buildLaporanFirestorePayload(
+export function buildLaporanFirestorePayload(
   lap: PembaruanBulananRT,
   existing: CachedDocMeta | null,
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
   const id = toValidDocId(lap.id, 'lap');
-  const rt = normalizeRTCode(lap.rt) || DEFAULT_RT;
-  const rw = normalizeRWCode(lap.rw, ctx?.rw || DEFAULT_RW);
+  const { rt, rw } = resolveScopedRtRw(lap.rt, lap.rw, null, ctx, false);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
 
@@ -1693,29 +2036,24 @@ function buildLaporanFirestorePayload(
     rw,
     namaAdminPengirim: lap.namaAdminPengirim ? String(lap.namaAdminPengirim).slice(0, 160) : undefined,
     tanggalKirim: lap.tanggalKirim ? String(lap.tanggalKirim).slice(0, 32) : undefined,
-    bulanTahun: String(lap.bulanTahun || '-').slice(0, 64),
-    tahun: typeof lap.tahun === 'number' ? lap.tahun : undefined,
-    totalKK: typeof lap.totalKK === 'number' ? lap.totalKK : undefined,
-    totalJiwa: typeof lap.totalJiwa === 'number' ? lap.totalJiwa : undefined,
-    totalLunasIuran: typeof lap.totalLunasIuran === 'number' ? lap.totalLunasIuran : undefined,
-    totalBelumLunas: typeof lap.totalBelumLunas === 'number' ? lap.totalBelumLunas : undefined,
-    totalKasMasukBulanIni:
-      typeof lap.totalKasMasukBulanIni === 'number' ? lap.totalKasMasukBulanIni : undefined,
-    totalKasKeluarBulanIni:
-      typeof lap.totalKasKeluarBulanIni === 'number' ? lap.totalKasKeluarBulanIni : undefined,
-    saldoKasUmumBerjalan:
-      typeof lap.saldoKasUmumBerjalan === 'number' ? lap.saldoKasUmumBerjalan : undefined,
-    saldoKasKematianBerjalan:
-      typeof lap.saldoKasKematianBerjalan === 'number' ? lap.saldoKasKematianBerjalan : undefined,
-    totalPenerimaBansos:
-      typeof lap.totalPenerimaBansos === 'number' ? lap.totalPenerimaBansos : undefined,
+    bulanTahun: String(lap.bulanTahun || '-').slice(0, 64) || '-',
+    tahun: toFiniteNumberOrUndefined(lap.tahun),
+    totalKK: toFiniteNumberOrUndefined(lap.totalKK),
+    totalJiwa: toFiniteNumberOrUndefined(lap.totalJiwa),
+    totalLunasIuran: toFiniteNumberOrUndefined(lap.totalLunasIuran),
+    totalBelumLunas: toFiniteNumberOrUndefined(lap.totalBelumLunas),
+    totalKasMasukBulanIni: toFiniteNumberOrUndefined(lap.totalKasMasukBulanIni),
+    totalKasKeluarBulanIni: toFiniteNumberOrUndefined(lap.totalKasKeluarBulanIni),
+    saldoKasUmumBerjalan: toFiniteNumberOrUndefined(lap.saldoKasUmumBerjalan),
+    saldoKasKematianBerjalan: toFiniteNumberOrUndefined(lap.saldoKasKematianBerjalan),
+    totalPenerimaBansos: toFiniteNumberOrUndefined(lap.totalPenerimaBansos),
     catatanKhusus: lap.catatanKhusus ? String(lap.catatanKhusus).slice(0, 500) : undefined,
     statusVerifikasi: validStatus,
     ...meta,
   });
 }
 
-function buildSettingsFirestorePayload(
+export function buildSettingsFirestorePayload(
   pengaturanKas: PengaturanKas,
   tahunAktif: number,
   settingId: string,
@@ -1733,19 +2071,23 @@ function buildSettingsFirestorePayload(
     id: settingId,
     rw,
     rt,
-    tahunAktif: Number(tahunAktif) || pengaturanKas.tahunAktif || 2026,
-    nominalJimpitanTahunan: cleanSettings.nominalJimpitanTahunan,
-    nominalJimpitanBulanan: cleanSettings.nominalJimpitanBulanan,
-    nominalKematianTahunan: cleanSettings.nominalKematianTahunan,
-    nominalKematianBulanan: cleanSettings.nominalKematianBulanan,
-    saldoAwalKasUmum: cleanSettings.saldoAwalKasUmum,
-    saldoAwalKasKematian: cleanSettings.saldoAwalKasKematian,
-    keteranganSaldoAwal: String(cleanSettings.keteranganSaldoAwal || '').slice(0, 300),
-    tanggalSaldoAwal: String(cleanSettings.tanggalSaldoAwal || '').slice(0, 32),
-    kontakKetuaRT: cleanSettings.kontakKetuaRT,
-    kontakBendahara: cleanSettings.kontakBendahara,
-    saldoBerlanjutPerTahun: cleanSettings.saldoBerlanjutPerTahun,
-    profilRT: cleanSettings.profilRT,
+    tahunAktif: toFiniteNumberOrDefault(tahunAktif, toFiniteNumberOrDefault(pengaturanKas.tahunAktif, 2026)),
+    nominalJimpitanTahunan: toFiniteNumberOrUndefined(cleanSettings.nominalJimpitanTahunan),
+    nominalJimpitanBulanan: toFiniteNumberOrUndefined(cleanSettings.nominalJimpitanBulanan),
+    nominalKematianTahunan: toFiniteNumberOrUndefined(cleanSettings.nominalKematianTahunan),
+    nominalKematianBulanan: toFiniteNumberOrUndefined(cleanSettings.nominalKematianBulanan),
+    saldoAwalKasUmum: toFiniteNumberOrUndefined(cleanSettings.saldoAwalKasUmum),
+    saldoAwalKasKematian: toFiniteNumberOrUndefined(cleanSettings.saldoAwalKasKematian),
+    keteranganSaldoAwal: cleanSettings.keteranganSaldoAwal
+      ? String(cleanSettings.keteranganSaldoAwal).slice(0, 300)
+      : undefined,
+    tanggalSaldoAwal: cleanSettings.tanggalSaldoAwal
+      ? String(cleanSettings.tanggalSaldoAwal).slice(0, 32)
+      : undefined,
+    kontakKetuaRT: toPlainMapOrUndefined(cleanSettings.kontakKetuaRT),
+    kontakBendahara: toPlainMapOrUndefined(cleanSettings.kontakBendahara),
+    saldoBerlanjutPerTahun: toPlainMapOrUndefined(cleanSettings.saldoBerlanjutPerTahun),
+    profilRT: toPlainMapOrUndefined(cleanSettings.profilRT),
     ...meta,
   });
 }
@@ -2123,11 +2465,16 @@ export async function saveSettingsDoc(
     return { ok: false, message: 'Belum login ke Firebase.' };
   }
   const ctx = activeAdminContext;
-  const rw = normalizeRWCode(pengaturanKas.profilRT?.namaRW, ctx.rw || DEFAULT_RW);
+  const rw =
+    ctx.role === 'admin'
+      ? ctx.rw || DEFAULT_RW
+      : normalizeRWCode(pengaturanKas.profilRT?.namaRW, ctx.rw || DEFAULT_RW);
   const rt =
     ctx.role === 'server'
       ? 'SEMUA'
-      : normalizeRTCode(pengaturanKas.profilRT?.namaRT) || ctx.rt || DEFAULT_RT;
+      : ctx.rt && ctx.rt !== 'SEMUA'
+      ? ctx.rt
+      : extractRTFromScope(pengaturanKas.profilRT?.namaRT, DEFAULT_RT);
   const settingId = ctx.role === 'server' ? `rw_${rw}` : `rw_${rw}_rt_${rt}`;
   const path = `settings/${settingId}`;
 
@@ -2167,8 +2514,12 @@ export async function syncRtPublicSummary(params: {
 }): Promise<void> {
   const ctx = activeAdminContext;
   if (!ctx || !auth.currentUser) return;
-  const rt = normalizeRTCode(params.rt) || DEFAULT_RT;
-  const rw = normalizeRWCode(params.rw, ctx.rw || DEFAULT_RW);
+  const rt =
+    ctx.role === 'admin' && ctx.rt !== 'SEMUA'
+      ? ctx.rt
+      : extractRTFromScope(params.rt, DEFAULT_RT);
+  const rw =
+    ctx.role === 'admin' ? ctx.rw || DEFAULT_RW : normalizeRWCode(params.rw, ctx.rw || DEFAULT_RW);
   if (rt === 'SEMUA') return;
 
   const scopeId = `rt_${rt}_rw_${rw}`;
@@ -2185,8 +2536,8 @@ export async function syncRtPublicSummary(params: {
 
   const rtPengumuman = params.pengumumanList
     .filter((p) => {
-      const pRt = normalizeRTCode(p.rtScope);
-      return !pRt || pRt === rt || String(p.rtScope || '').toUpperCase().includes('SEMUA');
+      const pRt = extractRTFromScope(p.rtScope, '', true);
+      return !pRt || pRt === rt || pRt === 'SEMUA';
     })
     .slice(0, 200)
     .map((p) => stripUndefinedDeep(p));
@@ -2195,7 +2546,7 @@ export async function syncRtPublicSummary(params: {
     id: scopeId,
     rw,
     rt,
-    tahunAktif: Number(params.tahunAktif) || 2026,
+    tahunAktif: toFiniteNumberOrDefault(params.tahunAktif, 2026),
     pengaturanKas: stripUndefinedDeep({
       ...params.pengaturanKas,
       updatedAt: new Date().toISOString(),
@@ -2219,160 +2570,380 @@ export async function syncRtPublicSummary(params: {
 // 6. MIGRATION (CLOUD SQL 50 KK & LEGACY JSON -> FIRESTORE)
 // ==========================================
 
-export async function migrateSnapshotToFirestore(
-  snapshot: Partial<AppDatabaseSchema>
-): Promise<{ ok: boolean; migratedWarga: number; migratedTx: number; message?: string }> {
-  const ctx = activeAdminContext;
-  if (!ctx || !auth.currentUser) {
-    return { ok: false, migratedWarga: 0, migratedTx: 0, message: 'Harus login Admin/Server.' };
-  }
+export interface MigrationResult {
+  ok: boolean;
+  migratedWarga: number;
+  migratedTx: number;
+  migratedOther: number;
+  skippedOversized: number;
+  failedCount: number;
+  message?: string;
+}
 
-  const wargaArr = Array.isArray(snapshot.wargaList) ? snapshot.wargaList : [];
-  const txArr = Array.isArray(snapshot.transactions) ? snapshot.transactions : [];
-  const bantuanArr = Array.isArray(snapshot.bantuanList) ? snapshot.bantuanList : [];
-  const pengumumanArr = Array.isArray(snapshot.pengumumanList) ? snapshot.pengumumanList : [];
-  const dokumenArr = Array.isArray(snapshot.dokumenList) ? snapshot.dokumenList : [];
-  const adminArr = Array.isArray(snapshot.adminAccounts) ? snapshot.adminAccounts : [];
-  const laporanArr = Array.isArray(snapshot.laporanBulananRT) ? snapshot.laporanBulananRT : [];
-  const tahunAktif = Number(snapshot.tahunAktif) || snapshot.pengaturanKas?.tahunAktif || 2026;
+interface PendingBatchWrite {
+  colName: EntityBucket;
+  id: string;
+  payload: Record<string, any>;
+  rt: string;
+}
 
-  try {
-    let batch = writeBatch(db);
-    let ops = 0;
-    const manifestByRt = new Map<string, Partial<Record<EntityBucket, string[]>>>();
+async function executeResilientWrites(
+  writes: PendingBatchWrite[],
+  chunkSize = 25
+): Promise<{ succeeded: PendingBatchWrite[]; failed: Array<{ item: PendingBatchWrite; error: string }> }> {
+  const succeeded: PendingBatchWrite[] = [];
+  const failed: Array<{ item: PendingBatchWrite; error: string }> = [];
 
-    const addManifestId = (rt: string, bucket: EntityBucket, id: string) => {
-      const m = manifestByRt.get(rt) || {};
-      const list = m[bucket] || [];
-      list.push(id);
-      m[bucket] = list;
-      manifestByRt.set(rt, m);
-    };
-
-    const flush = async () => {
-      if (ops > 0) {
-        await batch.commit();
-        batch = writeBatch(db);
-        ops = 0;
+  for (let i = 0; i < writes.length; i += chunkSize) {
+    const chunk = writes.slice(i, i + chunkSize);
+    try {
+      const batch = writeBatch(db);
+      for (const w of chunk) {
+        batch.set(doc(db, w.colName, w.id), w.payload);
       }
-    };
-
-    for (const w of wargaArr) {
-      const id = toValidDocId(w.id, 'w');
-      const existing = docMetaCache.get(`warga/${id}`) || null;
-      const payload = buildWargaFirestorePayload({ ...w, id }, existing, ctx);
-      batch.set(doc(db, 'warga', id), payload);
-      addManifestId(payload.rt, 'warga', id);
-      ops++;
-      if (ops >= 350) await flush();
-    }
-
-    for (const t of txArr) {
-      const id = toValidDocId(t.id, 'tx');
-      const existing = docMetaCache.get(`transactions/${id}`) || null;
-      const payload = buildTransactionFirestorePayload({ ...t, id }, existing, ctx);
-      batch.set(doc(db, 'transactions', id), payload);
-      addManifestId(payload.rt, 'transactions', id);
-      ops++;
-      if (ops >= 350) await flush();
-    }
-
-    for (const b of bantuanArr) {
-      const id = toValidDocId(b.id, 'b');
-      const existing = docMetaCache.get(`bantuan/${id}`) || null;
-      const payload = buildBantuanFirestorePayload({ ...b, id }, existing, ctx);
-      batch.set(doc(db, 'bantuan', id), payload);
-      addManifestId(payload.rt, 'bantuan', id);
-      ops++;
-      if (ops >= 350) await flush();
-    }
-
-    for (const p of pengumumanArr) {
-      const id = toValidDocId(p.id, 'p');
-      const existing = docMetaCache.get(`pengumuman/${id}`) || null;
-      const payload = buildPengumumanFirestorePayload({ ...p, id }, existing, ctx);
-      batch.set(doc(db, 'pengumuman', id), payload);
-      addManifestId(payload.rt, 'pengumuman', id);
-      ops++;
-      if (ops >= 350) await flush();
-    }
-
-    for (const d of dokumenArr) {
-      if (d.dataBase64 && d.dataBase64.length > 850000) continue;
-      const id = toValidDocId(d.id, 'doc');
-      const existing = docMetaCache.get(`dokumen/${id}`) || null;
-      const payload = buildDokumenFirestorePayload({ ...d, id }, existing, ctx);
-      batch.set(doc(db, 'dokumen', id), payload);
-      addManifestId(payload.rt, 'dokumen', id);
-      ops++;
-      if (ops >= 350) await flush();
-    }
-
-    for (const lap of laporanArr) {
-      const id = toValidDocId(lap.id, 'lap');
-      const existing = docMetaCache.get(`laporanBulanan/${id}`) || null;
-      const payload = buildLaporanFirestorePayload({ ...lap, id }, existing, ctx);
-      batch.set(doc(db, 'laporanBulanan', id), payload);
-      addManifestId(payload.rt, 'laporanBulanan', id);
-      ops++;
-      if (ops >= 350) await flush();
-    }
-
-    await flush();
-
-    if (snapshot.pengaturanKas) {
-      await saveSettingsDoc(snapshot.pengaturanKas, tahunAktif);
-    }
-
-    for (const acc of adminArr) {
-      if (ctx.role === 'server') {
-        const prov = await provisionAdminAuthAccount(acc).catch(() => ({ authUid: undefined }));
-        await saveAdminAccountDoc(acc, prov.authUid);
-      } else if (acc.username.trim().toLowerCase() === ctx.username.trim().toLowerCase()) {
-        await saveAdminAccountDoc(acc, ctx.uid);
-      }
-    }
-
-    for (const [rtCode, bucket] of manifestByRt.entries()) {
-      await appendDocIdsToManifest(ctx.rw, rtCode, bucket);
-      await upsertRtRegistry({
-        rw: ctx.rw,
-        ownerUid: ctx.uid,
-        serverUid: ctx.serverUid,
-        addRt: rtCode,
+      await batch.commit();
+      succeeded.push(...chunk);
+    } catch {
+      const settled = await Promise.allSettled(
+        chunk.map((w) => setDoc(doc(db, w.colName, w.id), w.payload))
+      );
+      settled.forEach((res, idx) => {
+        if (res.status === 'fulfilled') {
+          succeeded.push(chunk[idx]);
+        } else {
+          const msg = res.reason?.message || String(res.reason || 'Unknown write error');
+          failed.push({ item: chunk[idx], error: msg });
+        }
       });
     }
+  }
 
-    if (snapshot.pengaturanKas) {
-      const rts = Array.from(manifestByRt.keys());
-      for (const rtCode of rts.length > 0 ? rts : [ctx.rt === 'SEMUA' ? DEFAULT_RT : ctx.rt]) {
-        await syncRtPublicSummary({
-          rt: rtCode,
-          rw: ctx.rw,
-          tahunAktif,
-          pengaturanKas: snapshot.pengaturanKas,
-          transactions: txArr,
-          pengumumanList: pengumumanArr,
-          wargaList: wargaArr,
-        });
-      }
-    }
+  return { succeeded, failed };
+}
 
-    provisionWargaAuthAccounts(wargaArr).catch(() => {});
+function normKeyStr(v?: string | null): string {
+  return String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
 
-    return {
-      ok: true,
-      migratedWarga: wargaArr.length,
-      migratedTx: txArr.length,
-    };
-  } catch (err: any) {
+function normDigits(v?: string | null): string {
+  return String(v || '').replace(/\D/g, '');
+}
+
+function txFingerprint(t: Transaction): string {
+  return [
+    String(t.tanggal || '').trim(),
+    String(t.tipe || '').trim(),
+    Number(t.nominal) || 0,
+    normKeyStr(t.kategori),
+    normDigits(t.noKK) || normKeyStr(t.namaWarga),
+    normKeyStr(t.keterangan),
+  ].join('|');
+}
+
+function bantuanFingerprint(b: BantuanPemerintah): string {
+  return [
+    normKeyStr(b.jenisBantuan),
+    normKeyStr(b.namaPenerima),
+    normDigits(b.noKK),
+    String(b.tanggal || '').trim(),
+  ].join('|');
+}
+
+function pengumumanFingerprint(p: PengumumanRT): string {
+  return [normKeyStr(p.judul), String(p.tanggal || '').trim(), normKeyStr(p.isi).slice(0, 80)].join(
+    '|'
+  );
+}
+
+function dokumenFingerprint(d: DokumenPdfWarga): string {
+  return [normKeyStr(d.judul), normKeyStr(d.namaFile), Number(d.ukuranKb) || 0].join('|');
+}
+
+function laporanFingerprint(l: PembaruanBulananRT): string {
+  return [
+    normalizeRTCode(l.rt),
+    normalizeRWCode(l.rw, DEFAULT_RW),
+    normKeyStr(l.bulanTahun),
+    Number(l.tahun) || 0,
+  ].join('|');
+}
+
+export function computeMissingMigrationItems(
+  snapshot: Partial<AppDatabaseSchema>,
+  existing?: Partial<AppDatabaseSchema> | null
+) {
+  const exWarga = existing?.wargaList || [];
+  const exTx = existing?.transactions || [];
+  const exBantuan = existing?.bantuanList || [];
+  const exPengumuman = existing?.pengumumanList || [];
+  const exDokumen = existing?.dokumenList || [];
+  const exLaporan = existing?.laporanBulananRT || [];
+  const exAdmins = existing?.adminAccounts || [];
+
+  const exWargaIds = new Set(exWarga.map((w) => toValidDocId(w.id, 'w')));
+  const exWargaKKs = new Set(exWarga.map((w) => normDigits(w.noKK)).filter((k) => k.length >= 6));
+  const exWargaNames = new Set(
+    exWarga.map((w) => `${normKeyStr(w.nama)}|${normKeyStr(w.noRumah)}|${normalizeRTCode(w.rt)}`)
+  );
+
+  const exTxIds = new Set(exTx.map((t) => toValidDocId(t.id, 'tx')));
+  const exTxFingerprints = new Set(exTx.map(txFingerprint));
+
+  const exBantuanIds = new Set(exBantuan.map((b) => toValidDocId(b.id, 'b')));
+  const exBantuanFingerprints = new Set(exBantuan.map(bantuanFingerprint));
+
+  const exPengumumanIds = new Set(exPengumuman.map((p) => toValidDocId(p.id, 'p')));
+  const exPengumumanFingerprints = new Set(exPengumuman.map(pengumumanFingerprint));
+
+  const exDokumenIds = new Set(exDokumen.map((d) => toValidDocId(d.id, 'doc')));
+  const exDokumenFingerprints = new Set(exDokumen.map(dokumenFingerprint));
+
+  const exLaporanIds = new Set(exLaporan.map((l) => toValidDocId(l.id, 'lap')));
+  const exLaporanFingerprints = new Set(exLaporan.map(laporanFingerprint));
+
+  const exAdminIds = new Set(exAdmins.map((a) => toValidDocId(a.id, 'adm')));
+  const exAdminUsers = new Set(exAdmins.map((a) => normKeyStr(a.username)));
+
+  const wargaList = (Array.isArray(snapshot.wargaList) ? snapshot.wargaList : []).filter((w) => {
+    const id = toValidDocId(w.id, 'w');
+    const kk = normDigits(w.noKK);
+    const nameKey = `${normKeyStr(w.nama)}|${normKeyStr(w.noRumah)}|${normalizeRTCode(w.rt)}`;
+    return !exWargaIds.has(id) && (!kk || !exWargaKKs.has(kk)) && !exWargaNames.has(nameKey);
+  });
+
+  const transactions = (Array.isArray(snapshot.transactions) ? snapshot.transactions : []).filter(
+    (t) => !exTxIds.has(toValidDocId(t.id, 'tx')) && !exTxFingerprints.has(txFingerprint(t))
+  );
+
+  const bantuanList = (Array.isArray(snapshot.bantuanList) ? snapshot.bantuanList : []).filter(
+    (b) =>
+      !exBantuanIds.has(toValidDocId(b.id, 'b')) && !exBantuanFingerprints.has(bantuanFingerprint(b))
+  );
+
+  const pengumumanList = (
+    Array.isArray(snapshot.pengumumanList) ? snapshot.pengumumanList : []
+  ).filter(
+    (p) =>
+      !exPengumumanIds.has(toValidDocId(p.id, 'p')) &&
+      !exPengumumanFingerprints.has(pengumumanFingerprint(p))
+  );
+
+  const dokumenList = (Array.isArray(snapshot.dokumenList) ? snapshot.dokumenList : []).filter(
+    (d) =>
+      !exDokumenIds.has(toValidDocId(d.id, 'doc')) && !exDokumenFingerprints.has(dokumenFingerprint(d))
+  );
+
+  const laporanBulananRT = (
+    Array.isArray(snapshot.laporanBulananRT) ? snapshot.laporanBulananRT : []
+  ).filter(
+    (l) =>
+      !exLaporanIds.has(toValidDocId(l.id, 'lap')) &&
+      !exLaporanFingerprints.has(laporanFingerprint(l))
+  );
+
+  const adminAccounts = (Array.isArray(snapshot.adminAccounts) ? snapshot.adminAccounts : []).filter(
+    (a) => !exAdminIds.has(toValidDocId(a.id, 'adm')) && !exAdminUsers.has(normKeyStr(a.username))
+  );
+
+  return {
+    wargaList,
+    transactions,
+    bantuanList,
+    pengumumanList,
+    dokumenList,
+    laporanBulananRT,
+    adminAccounts,
+  };
+}
+
+async function writeSnapshotToFirestoreInternal(
+  snapshot: Partial<AppDatabaseSchema>,
+  options: {
+    skipExisting?: Partial<AppDatabaseSchema> | null;
+    overwriteSettings?: boolean;
+  }
+): Promise<MigrationResult> {
+  const ctx = activeAdminContext;
+  if (!ctx || !auth.currentUser) {
     return {
       ok: false,
       migratedWarga: 0,
       migratedTx: 0,
-      message: err?.message || 'Gagal memigrasikan data ke Firestore.',
+      migratedOther: 0,
+      skippedOversized: 0,
+      failedCount: 0,
+      message: 'Harus login Admin/Server.',
     };
   }
+
+  const missing = options.skipExisting
+    ? computeMissingMigrationItems(snapshot, options.skipExisting)
+    : {
+        wargaList: Array.isArray(snapshot.wargaList) ? snapshot.wargaList : [],
+        transactions: Array.isArray(snapshot.transactions) ? snapshot.transactions : [],
+        bantuanList: Array.isArray(snapshot.bantuanList) ? snapshot.bantuanList : [],
+        pengumumanList: Array.isArray(snapshot.pengumumanList) ? snapshot.pengumumanList : [],
+        dokumenList: Array.isArray(snapshot.dokumenList) ? snapshot.dokumenList : [],
+        laporanBulananRT: Array.isArray(snapshot.laporanBulananRT) ? snapshot.laporanBulananRT : [],
+        adminAccounts: Array.isArray(snapshot.adminAccounts) ? snapshot.adminAccounts : [],
+      };
+
+  const tahunAktif = toFiniteNumberOrDefault(
+    snapshot.tahunAktif,
+    toFiniteNumberOrDefault(snapshot.pengaturanKas?.tahunAktif, 2026)
+  );
+
+  const standardWrites: PendingBatchWrite[] = [];
+  const dokumenWrites: PendingBatchWrite[] = [];
+  let skippedOversized = 0;
+
+  for (const w of missing.wargaList) {
+    const id = toValidDocId(w.id, 'w');
+    const existing = docMetaCache.get(`warga/${id}`) || null;
+    const payload = buildWargaFirestorePayload({ ...w, id }, existing, ctx);
+    standardWrites.push({ colName: 'warga', id, payload, rt: payload.rt });
+  }
+
+  for (const t of missing.transactions) {
+    const id = toValidDocId(t.id, 'tx');
+    const existing = docMetaCache.get(`transactions/${id}`) || null;
+    const payload = buildTransactionFirestorePayload({ ...t, id }, existing, ctx);
+    standardWrites.push({ colName: 'transactions', id, payload, rt: payload.rt });
+  }
+
+  for (const b of missing.bantuanList) {
+    const id = toValidDocId(b.id, 'b');
+    const existing = docMetaCache.get(`bantuan/${id}`) || null;
+    const payload = buildBantuanFirestorePayload({ ...b, id }, existing, ctx);
+    standardWrites.push({ colName: 'bantuan', id, payload, rt: payload.rt });
+  }
+
+  for (const p of missing.pengumumanList) {
+    const id = toValidDocId(p.id, 'p');
+    const existing = docMetaCache.get(`pengumuman/${id}`) || null;
+    const payload = buildPengumumanFirestorePayload({ ...p, id }, existing, ctx);
+    standardWrites.push({ colName: 'pengumuman', id, payload, rt: payload.rt });
+  }
+
+  for (const d of missing.dokumenList) {
+    if (d.dataBase64 && d.dataBase64.length > 850000) {
+      skippedOversized++;
+      continue;
+    }
+    const id = toValidDocId(d.id, 'doc');
+    const existing = docMetaCache.get(`dokumen/${id}`) || null;
+    const payload = buildDokumenFirestorePayload({ ...d, id }, existing, ctx);
+    dokumenWrites.push({ colName: 'dokumen', id, payload, rt: payload.rt });
+  }
+
+  for (const lap of missing.laporanBulananRT) {
+    const id = toValidDocId(lap.id, 'lap');
+    const existing = docMetaCache.get(`laporanBulanan/${id}`) || null;
+    const payload = buildLaporanFirestorePayload({ ...lap, id }, existing, ctx);
+    standardWrites.push({ colName: 'laporanBulanan', id, payload, rt: payload.rt });
+  }
+
+  const stdResult = await executeResilientWrites(standardWrites, 30);
+  // Write PDFs 1-by-1 so payload size never approaches Firestore 10MB batch limit
+  const docResult = await executeResilientWrites(dokumenWrites, 1);
+
+  const allSucceeded = [...stdResult.succeeded, ...docResult.succeeded];
+  const allFailed = [...stdResult.failed, ...docResult.failed];
+
+  let settingsFailedMsg = '';
+  if (snapshot.pengaturanKas && options.overwriteSettings) {
+    const setRes = await saveSettingsDoc(snapshot.pengaturanKas, tahunAktif);
+    if (!setRes.ok) {
+      settingsFailedMsg = setRes.message || 'Gagal menyimpan pengaturan kas.';
+    }
+  }
+
+  for (const acc of missing.adminAccounts) {
+    if (ctx.role === 'server') {
+      const prov = await provisionAdminAuthAccount(acc).catch(() => ({ authUid: undefined }));
+      await saveAdminAccountDoc(acc, prov.authUid);
+    } else if (acc.username.trim().toLowerCase() === ctx.username.trim().toLowerCase()) {
+      await saveAdminAccountDoc(acc, ctx.uid);
+    }
+  }
+
+  const manifestByRt = new Map<string, Partial<Record<EntityBucket, string[]>>>();
+  for (const w of allSucceeded) {
+    if (w.rt === 'SEMUA') continue;
+    const bucket = manifestByRt.get(w.rt) || {};
+    const list = bucket[w.colName] || [];
+    list.push(w.id);
+    bucket[w.colName] = list;
+    manifestByRt.set(w.rt, bucket);
+  }
+
+  for (const [rtCode, bucket] of manifestByRt.entries()) {
+    await appendDocIdsToManifest(ctx.rw, rtCode, bucket);
+    await upsertRtRegistry({
+      rw: ctx.rw,
+      ownerUid: ctx.uid,
+      serverUid: ctx.serverUid,
+      addRt: rtCode,
+      addAdminUid: ctx.role === 'admin' ? ctx.uid : undefined,
+    });
+  }
+
+  if (snapshot.pengaturanKas && (options.overwriteSettings || allSucceeded.length > 0)) {
+    const rts = Array.from(manifestByRt.keys());
+    for (const rtCode of rts.length > 0 ? rts : [ctx.rt === 'SEMUA' ? DEFAULT_RT : ctx.rt]) {
+      await syncRtPublicSummary({
+        rt: rtCode,
+        rw: ctx.rw,
+        tahunAktif,
+        pengaturanKas: snapshot.pengaturanKas,
+        transactions: Array.isArray(snapshot.transactions) ? snapshot.transactions : [],
+        pengumumanList: Array.isArray(snapshot.pengumumanList) ? snapshot.pengumumanList : [],
+        wargaList: Array.isArray(snapshot.wargaList) ? snapshot.wargaList : [],
+      });
+    }
+  }
+
+  if (missing.wargaList.length > 0) {
+    provisionWargaAuthAccounts(missing.wargaList).catch(() => {});
+  }
+
+  const migratedWarga = allSucceeded.filter((s) => s.colName === 'warga').length;
+  const migratedTx = allSucceeded.filter((s) => s.colName === 'transactions').length;
+  const migratedOther = allSucceeded.length - migratedWarga - migratedTx;
+  const failedCount = allFailed.length + (settingsFailedMsg ? 1 : 0);
+
+  return {
+    ok: failedCount === 0,
+    migratedWarga,
+    migratedTx,
+    migratedOther,
+    skippedOversized,
+    failedCount,
+    message:
+      failedCount > 0
+        ? settingsFailedMsg || `${failedCount} data gagal dimigrasikan (${allFailed[0]?.error || ''})`
+        : undefined,
+  };
+}
+
+export async function migrateMissingSnapshotToFirestore(
+  snapshot: Partial<AppDatabaseSchema>,
+  existingState?: Partial<AppDatabaseSchema> | null,
+  hasExistingRemoteSettings = true
+): Promise<MigrationResult> {
+  return writeSnapshotToFirestoreInternal(snapshot, {
+    skipExisting: existingState || undefined,
+    overwriteSettings: !hasExistingRemoteSettings,
+  });
+}
+
+export async function migrateSnapshotToFirestore(
+  snapshot: Partial<AppDatabaseSchema>
+): Promise<MigrationResult> {
+  return writeSnapshotToFirestoreInternal(snapshot, {
+    skipExisting: null,
+    overwriteSettings: true,
+  });
 }
 
 export async function fetchCloudSqlMigrationSnapshot(): Promise<AppDatabaseSchema | null> {
@@ -2459,16 +3030,23 @@ export interface FirestoreRealtimeSnapshot {
 export function subscribeFirestoreState(
   user: AuthUser,
   onUpdate: (partial: Partial<FirestoreRealtimeSnapshot>, isFirstReady: boolean) => void,
-  onStatusChange?: (connected: boolean, errMsg?: string | null) => void
+  onStatusChange?: (
+    connected: boolean,
+    errMsg?: string | null,
+    phase?: 'connecting' | 'synced' | 'error'
+  ) => void
 ): () => void {
   const fbUser = auth.currentUser;
   if (!fbUser) {
-    onStatusChange?.(false, 'Sesi Firebase belum aktif.');
+    onStatusChange?.(false, 'Sesi Firebase belum aktif.', 'error');
     return () => {};
   }
 
   const unsubs: Unsubscribe[] = [];
   let disposed = false;
+  let initialClaimDone = user.role === 'warga';
+
+  onStatusChange?.(true, null, 'connecting');
 
   const readyFlags = new Set<string>();
   const expectedKeys =
@@ -2485,12 +3063,20 @@ export function subscribeFirestoreState(
           'settings',
         ];
 
+  let latestPartialAccumulator: Partial<FirestoreRealtimeSnapshot> = {};
+
   const markReady = (key: string, partial: Partial<FirestoreRealtimeSnapshot>) => {
     if (disposed) return;
     readyFlags.add(key);
-    onStatusChange?.(true, null);
-    const allReady = expectedKeys.every((k) => readyFlags.has(k));
-    onUpdate(partial, allReady);
+    latestPartialAccumulator = { ...latestPartialAccumulator, ...partial };
+    const allListenersReady = expectedKeys.every((k) => readyFlags.has(k));
+    const isFirstReady = allListenersReady && initialClaimDone;
+    if (isFirstReady) {
+      onStatusChange?.(true, null, 'synced');
+    } else {
+      onStatusChange?.(true, null, 'connecting');
+    }
+    onUpdate(partial, isFirstReady);
   };
 
   if (user.role === 'warga') {
@@ -2538,15 +3124,16 @@ export function subscribeFirestoreState(
                 }
               },
               (err) => {
-                onStatusChange?.(false, err.message);
+                reportFirestoreError(err, OperationType.GET, `rtPublicSummaries/${scopeId}`);
+                onStatusChange?.(false, err.message, 'error');
                 markReady('rtPublicSummary', {});
               }
             );
           }
         },
         (err) => {
-          onStatusChange?.(false, err.message);
-          handleFirestoreError(err, OperationType.GET, 'warga');
+          reportFirestoreError(err, OperationType.GET, 'warga');
+          onStatusChange?.(false, err.message, 'error');
         }
       )
     );
@@ -2558,7 +3145,38 @@ export function subscribeFirestoreState(
     };
   }
 
-  // ADMIN RT or SERVER PUSAT
+  // ADMIN RT or SERVER PUSAT: Ensure activeAdminContext & initial manifest claim before declaring firstReady
+  (async () => {
+    try {
+      if (!activeAdminContext || activeAdminContext.uid !== fbUser.uid) {
+        await refreshAdminContext(fbUser.uid);
+      }
+      await claimAndSyncManifestDocs();
+    } catch {
+      // non-fatal, listeners stay active
+    } finally {
+      if (!disposed) {
+        initialClaimDone = true;
+        const allListenersReady = expectedKeys.every((k) => readyFlags.has(k));
+        if (allListenersReady) {
+          onStatusChange?.(true, null, 'synced');
+          onUpdate({}, true);
+        }
+      }
+    }
+  })();
+
+  const isDocInScope = (colName: EntityBucket, d: Record<string, any>): boolean => {
+    const ctx = activeAdminContext;
+    if (!ctx) return true;
+    const dRw = normalizeRWCode(d.rw, ctx.rw);
+    if (dRw !== ctx.rw) return false;
+    if (ctx.role === 'server' || ctx.rt === 'SEMUA') return true;
+    const dRt = d.rt === 'SEMUA' ? 'SEMUA' : extractRTFromScope(d.rt, DEFAULT_RT, true);
+    if (colName === 'pengumuman' && dRt === 'SEMUA') return true;
+    return dRt === ctx.rt;
+  };
+
   const setupScopedListener = <T extends { id: string; updatedAt?: string }>(
     colName: EntityBucket,
     key: keyof FirestoreRealtimeSnapshot,
@@ -2573,9 +3191,12 @@ export function subscribeFirestoreState(
         qCol,
         (snap) => {
           const items: T[] = [];
+          const rawForReconcile: Array<{ id: string; data: Record<string, any> }> = [];
           snap.forEach((docSnap) => {
             const d = docSnap.data();
             recordMeta(`${colName}/${docSnap.id}`, d);
+            if (!isDocInScope(colName, d)) return;
+            rawForReconcile.push({ id: docSnap.id, data: d });
             items.push({
               ...(d as unknown as T),
               id: docSnap.id,
@@ -2584,10 +3205,19 @@ export function subscribeFirestoreState(
           });
           const deduped = dedupeEntityList(items, [], altMatch);
           markReady(colName, { [key]: deduped } as any);
+
+          if (rawForReconcile.length > 0) {
+            reconcileLoadedDocsWithManifestAndAcls(colName, rawForReconcile).catch(() => {});
+          }
         },
         (err) => {
-          onStatusChange?.(false, err.message);
-          handleFirestoreError(err, OperationType.GET, colName);
+          reportFirestoreError(err, OperationType.GET, colName);
+          onStatusChange?.(
+            false,
+            `Gagal menyinkronkan ${colName}: ${err.message}`,
+            'error'
+          );
+          readyFlags.add(colName);
         }
       )
     );
@@ -2605,7 +3235,7 @@ export function subscribeFirestoreState(
   );
   setupScopedListener<PembaruanBulananRT>('laporanBulanan', 'laporanBulananRT');
 
-  // Settings listener (array-contains + direct fallback getDoc for rw_05 global settings)
+  // Settings listener (array-contains + direct fallback getDoc for rt/rw settings)
   unsubs.push(
     onSnapshot(
       query(collection(db, 'settings'), where('accessUids', 'array-contains', fbUser.uid)),
@@ -2620,8 +3250,18 @@ export function subscribeFirestoreState(
           docs.find((d) =>
             activeAdminContext?.role === 'server'
               ? d.id === `rw_${activeAdminContext.rw}`
-              : d.rt === activeAdminContext?.rt
+              : d.rt === activeAdminContext?.rt && d.rw === activeAdminContext?.rw
           ) || docs[0];
+
+        if (!chosen && activeAdminContext && activeAdminContext.rt !== 'SEMUA') {
+          const rtSettingSnap = await getDoc(
+            doc(db, 'settings', `rw_${activeAdminContext.rw}_rt_${activeAdminContext.rt}`)
+          ).catch(() => null);
+          if (rtSettingSnap && rtSettingSnap.exists()) {
+            chosen = rtSettingSnap.data();
+            recordMeta(`settings/${rtSettingSnap.id}`, chosen);
+          }
+        }
 
         if (!chosen && activeAdminContext) {
           const globalSnap = await getDoc(doc(db, 'settings', `rw_${activeAdminContext.rw}`)).catch(
@@ -2657,8 +3297,9 @@ export function subscribeFirestoreState(
         }
       },
       (err) => {
-        onStatusChange?.(false, err.message);
-        handleFirestoreError(err, OperationType.GET, 'settings');
+        reportFirestoreError(err, OperationType.GET, 'settings');
+        onStatusChange?.(false, `Gagal menyinkronkan settings: ${err.message}`, 'error');
+        readyFlags.add('settings');
       }
     )
   );
@@ -2680,6 +3321,7 @@ export function subscribeFirestoreState(
                 ? reg.adminsByRt
                 : activeAdminContext.adminsByRt,
           };
+          reconciledPathsThisSession.clear();
           await claimAndSyncManifestDocs();
         }
       },

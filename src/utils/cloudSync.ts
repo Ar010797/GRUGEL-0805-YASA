@@ -206,13 +206,23 @@ export function authHeaders(extra?: Record<string, string>): Record<string, stri
  * Reads any legacy pre-migration HP Admin cache so it can be migrated once to Central SQL Database.
  * Never used as the active database store.
  */
+const LEGACY_LOCAL_STORAGE_FALLBACK_KEYS = [
+  LEGACY_LOCAL_STORAGE_KEY,
+  'kas_rt08_rw05_database_v1',
+  'kaswarga_database_v1',
+];
+
 export function readLegacyLocalCacheForMigration(): AppDatabaseSchema | null {
   try {
-    const cached = localStorage.getItem(LEGACY_LOCAL_STORAGE_KEY);
-    if (!cached) return null;
-    const parsed = JSON.parse(cached) as AppDatabaseSchema;
-    if (!parsed || typeof parsed !== 'object') return null;
-    return parsed;
+    for (const key of LEGACY_LOCAL_STORAGE_FALLBACK_KEYS) {
+      const cached = localStorage.getItem(key);
+      if (!cached) continue;
+      const parsed = JSON.parse(cached) as AppDatabaseSchema;
+      if (parsed && typeof parsed === 'object') {
+        return parsed;
+      }
+    }
+    return null;
   } catch {
     return null;
   }
@@ -220,7 +230,9 @@ export function readLegacyLocalCacheForMigration(): AppDatabaseSchema | null {
 
 export function clearLegacyLocalCache() {
   try {
-    localStorage.removeItem(LEGACY_LOCAL_STORAGE_KEY);
+    for (const key of LEGACY_LOCAL_STORAGE_FALLBACK_KEYS) {
+      localStorage.removeItem(key);
+    }
   } catch {
     // ignore
   }

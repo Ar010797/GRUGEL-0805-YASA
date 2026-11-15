@@ -182,7 +182,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         return;
       }
 
-      if (legacyCache) {
+      if (legacyCache && res.migrationOk !== false) {
         clearLegacyLocalCache();
       }
       setPendingSyncAdmin(null);
@@ -334,10 +334,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   <Wifi size={9} />
                   <span>
                     {sseConnected
-                      ? 'Firebase Cloud Live'
+                      ? 'Tersinkronisasi'
                       : effectiveServerConnected
-                      ? 'Firebase Cloud Online'
-                      : 'Koneksi Terputus'}
+                      ? 'Menghubungkan...'
+                      : 'Gagal Sinkronisasi'}
                   </span>
                 </span>
               </span>

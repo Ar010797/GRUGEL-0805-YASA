@@ -29,6 +29,9 @@ export function normalizeRTCode(value?: string | null): string {
   if (!value) return '';
   const cleaned = value.trim();
   if (!cleaned) return '';
+  if (/^semua(\s+rt)?$/i.test(cleaned)) {
+    return 'SEMUA';
+  }
   const rtMatch = cleaned.match(/RT\s*0*([0-9]+)/i);
   if (rtMatch) {
     return rtMatch[1].padStart(2, '0');

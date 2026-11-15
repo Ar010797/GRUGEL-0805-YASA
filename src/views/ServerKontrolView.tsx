@@ -749,11 +749,13 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
               >
                 <Wifi size={12} />
                 <span>
-                  {sseConnected
-                    ? 'Cloud Firestore Live'
-                    : serverConnected
-                    ? 'Firebase Cloud Online'
-                    : 'Koneksi Terputus'}
+                  {cloudSyncBusy
+                    ? 'Menghubungkan...'
+                    : !serverConnected
+                    ? 'Gagal Sinkronisasi'
+                    : sseConnected
+                    ? 'Tersinkronisasi'
+                    : 'Menghubungkan...'}
                 </span>
               </span>
             </div>
@@ -771,17 +773,23 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                       }`}
                     >
                       {serverConnected
-                        ? 'Terhubung ke Cloud Firestore Pusat (laughing-azimuth-807pf)'
-                        : 'Gagal terhubung ke Cloud Firestore'}
+                        ? 'Tersinkronisasi ke Cloud Firestore Pusat (laughing-azimuth-807pf)'
+                        : 'Gagal Sinkronisasi ke Cloud Firestore'}
                     </span>
                     <span
                       className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                        sseConnected
+                        !serverConnected
+                          ? 'bg-rose-100 text-rose-800'
+                          : sseConnected && !cloudSyncBusy
                           ? 'bg-emerald-100 text-emerald-800'
                           : 'bg-amber-100 text-amber-800'
                       }`}
                     >
-                      {sseConnected ? 'Sinkronisasi Real-Time Aktif' : 'Menunggu Sinkronisasi'}
+                      {!serverConnected
+                        ? 'Gagal Sinkronisasi'
+                        : sseConnected && !cloudSyncBusy
+                        ? 'Tersinkronisasi Real-Time'
+                        : 'Menghubungkan...'}
                     </span>
                   </div>
                 </div>

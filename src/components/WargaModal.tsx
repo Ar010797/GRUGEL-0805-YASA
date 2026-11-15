@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   X,
   UserPlus,
@@ -69,6 +69,19 @@ export const WargaModal: React.FC<WargaModalProps> = ({
   const [kodePos, setKodePos] = useState(profilRT?.kodePos || '53183');
   const [tanggalDikeluarkan, setTanggalDikeluarkan] = useState('');
   const [anggotaKeluarga, setAnggotaKeluarga] = useState<AnggotaKeluarga[]>([]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const nextRT = profilRT?.namaRT || '08';
+    const nextRW = profilRT?.namaRW || '05';
+    setRt(nextRT);
+    setRw(nextRW);
+    setAlamat(
+      profilRT?.sebutanWilayah ||
+        `RT ${nextRT} RW ${nextRW} ${profilRT?.desa || 'Desa Kotayasa'}`
+    );
+    setKodePos(profilRT?.kodePos || '53183');
+  }, [isOpen, profilRT?.namaRT, profilRT?.namaRW, profilRT?.sebutanWilayah, profilRT?.desa, profilRT?.kodePos]);
 
   if (!isOpen) return null;
 
