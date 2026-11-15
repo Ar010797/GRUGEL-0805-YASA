@@ -3,7 +3,14 @@ import path from 'path';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'url';
 import { eq, inArray, sql } from 'drizzle-orm';
-import { db, getDatabaseConfigStatus, pool } from './index.ts';
+import {
+  db,
+  getDatabaseConfigStatus,
+  isSqlNetworkOrUnavailableError,
+  isSqlTemporarilyUnavailable,
+  markSqlUnavailable,
+  pool,
+} from './index.ts';
 import {
   adminAccounts,
   appSettings,
@@ -210,12 +217,32 @@ let hasCheckedInitialSeed = false;
 let hasEnsuredTables = false;
 let ensureTablesPromise: Promise<void> | null = null;
 
+export class SqlUnavailableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'SqlUnavailableError';
+  }
+}
+
+export function isSqlUnavailable(err: unknown): boolean {
+  if (err instanceof SqlUnavailableError || isSqlNetworkOrUnavailableError(err)) {
+    markSqlUnavailable(60_000);
+    return true;
+  }
+  return false;
+}
+
 function assertDatabaseConfigured() {
+  if (isSqlTemporarilyUnavailable()) {
+    throw new SqlUnavailableError(
+      'Cloud SQL sedang tidak terjangkau pada runtime ini (aplikasi berjalan menggunakan Firebase Authentication & Cloud Firestore).'
+    );
+  }
   const status = getDatabaseConfigStatus();
   if (!status.configured) {
-    throw new Error(
+    throw new SqlUnavailableError(
       status.errorMessage ||
-        'Database PostgreSQL belum dikonfigurasi (DATABASE_URL / SQL_HOST tidak ditemukan).'
+        'Database PostgreSQL belum dikonfigurasi pada runtime ini (aplikasi berjalan menggunakan Firebase Authentication & Cloud Firestore).'
     );
   }
   return status;
@@ -436,6 +463,7 @@ export async function ensureSqlSeeded(): Promise<void> {
   if (!seedPromise) {
     seedPromise = (async () => {
       try {
+        await pool.query('SELECT 1');
         let metaRows;
         try {
           metaRows = await db.select().from(syncMeta).where(eq(syncMeta.id, 'global')).limit(1);
@@ -521,6 +549,11 @@ export async function ensureSqlSeeded(): Promise<void> {
         }
         hasCheckedInitialSeed = true;
       } catch (err: any) {
+        if (isSqlUnavailable(err)) {
+          const msg = 'Cloud SQL tidak tersedia pada runtime ini (Mode Firebase aktif).';
+          console.info(msg);
+          throw err instanceof SqlUnavailableError ? err : new SqlUnavailableError(msg, { cause: err });
+        }
         console.error('SQL initial seed error:', err);
         const detail = err?.code ? `${err.code}: ${err.message}` : err?.message;
         throw new Error(
@@ -1079,7 +1112,12 @@ export async function readFullStateSql(): Promise<FullAppDatabaseState> {
       laporanBulananRT: laporanRows.map(mapRowToLaporan),
       deletedIds,
     };
-  } catch (err) {
+  } catch (err: any) {
+    if (isSqlUnavailable(err)) {
+      throw err instanceof SqlUnavailableError
+        ? err
+        : new SqlUnavailableError(err?.message || 'Cloud SQL tidak tersedia.', { cause: err });
+    }
     console.error('Database read error (readFullStateSql):', err);
     throw new Error('Gagal membaca database server pusat.', { cause: err });
   }
@@ -1135,6 +1173,11 @@ export async function checkDatabaseHealthSql(): Promise<{
       totalAdminAccounts: Number(adminCountRows[0]?.count) || 0,
     };
   } catch (err: any) {
+    if (isSqlUnavailable(err)) {
+      throw err instanceof SqlUnavailableError
+        ? err
+        : new SqlUnavailableError(err?.message || 'Cloud SQL tidak terjangkau.', { cause: err });
+    }
     console.error('Database health check failed:', err);
     const detail = err?.code ? `${err.code}: ${err.message}` : err?.message;
     if (detail && detail.includes('belum dikonfigurasi')) {
@@ -1146,6 +1189,15 @@ export async function checkDatabaseHealthSql(): Promise<{
 
 export async function getPublicBootstrapInfoSql() {
   try {
+    if (!getDatabaseConfigStatus().configured) {
+      return {
+        pengaturanKas: { ...DEFAULT_PENGATURAN_KAS },
+        tahunAktif: DEFAULT_PENGATURAN_KAS.tahunAktif,
+        revision: 1,
+        lastUpdated: new Date().toISOString(),
+        backend: 'firebase' as const,
+      };
+    }
     await ensureSqlSeeded();
     const [settingsRows, metaRows] = await Promise.all([
       db.select().from(appSettings).where(eq(appSettings.id, 'kas')).limit(1),
@@ -1157,8 +1209,19 @@ export async function getPublicBootstrapInfoSql() {
       tahunAktif: settings.tahunAktif,
       revision: metaRows[0] ? Number(metaRows[0].revision) || 1 : 1,
       lastUpdated: metaRows[0]?.lastUpdated || new Date().toISOString(),
+      backend: 'firebase' as const,
     };
   } catch (err: any) {
+    if (isSqlUnavailable(err)) {
+      console.info('Public bootstrap info fallback to defaults (Firebase-primary mode).');
+      return {
+        pengaturanKas: { ...DEFAULT_PENGATURAN_KAS },
+        tahunAktif: DEFAULT_PENGATURAN_KAS.tahunAktif,
+        revision: 1,
+        lastUpdated: new Date().toISOString(),
+        backend: 'firebase' as const,
+      };
+    }
     console.error('Public bootstrap info error:', err);
     throw new Error(err?.message || 'Gagal memuat info server.', { cause: err });
   }
@@ -1181,7 +1244,12 @@ export async function getAdminAccountsSql(): Promise<{
       deletedAdminIds: delRows.map((d) => d.entityId),
       revision: metaRows[0] ? Number(metaRows[0].revision) || 1 : 1,
     };
-  } catch (err) {
+  } catch (err: any) {
+    if (isSqlUnavailable(err)) {
+      throw err instanceof SqlUnavailableError
+        ? err
+        : new SqlUnavailableError(err?.message || 'Cloud SQL tidak tersedia.', { cause: err });
+    }
     console.error('Get admin accounts error:', err);
     throw new Error('Gagal mengambil daftar akun admin.', { cause: err });
   }
@@ -1192,6 +1260,14 @@ export async function authenticateAndCreateSessionSql(params: {
   username: string;
   password: string;
 }): Promise<{ ok: true; token: string; user: AuthUser } | { ok: false; status: number; message: string }> {
+  if (!getDatabaseConfigStatus().configured) {
+    return {
+      ok: false,
+      status: 401,
+      message:
+        'Autentikasi aplikasi kini menggunakan Firebase Authentication. Silakan muat ulang halaman dan masuk menggunakan Firebase.',
+    };
+  }
   try {
     await ensureSqlSeeded();
     const role = params.role;
@@ -1390,6 +1466,12 @@ export async function authenticateAndCreateSessionSql(params: {
 
     return { ok: true, token: rawToken, user: matchedUser };
   } catch (err: any) {
+    if (isSqlUnavailable(err)) {
+      console.info('Legacy SQL auth unavailable (Firebase-primary mode active).');
+      throw err instanceof SqlUnavailableError
+        ? err
+        : new SqlUnavailableError(err?.message || 'Cloud SQL tidak tersedia.', { cause: err });
+    }
     console.error('Authentication SQL error:', err);
     const detail = err?.message || '';
     throw new Error(
@@ -1420,6 +1502,9 @@ export async function createSessionForAdminUserSql(user: AuthUser): Promise<stri
 }
 
 export async function verifySessionTokenSql(rawToken: string): Promise<ServerSessionRecord | null> {
+  if (isSqlTemporarilyUnavailable() || !getDatabaseConfigStatus().configured) {
+    return null;
+  }
   try {
     assertDatabaseConfigured();
     const tokenHash = hashToken(rawToken);
@@ -1474,16 +1559,25 @@ export async function verifySessionTokenSql(rawToken: string): Promise<ServerSes
       expiresAt: Number(session.expiresAt),
     };
   } catch (err: any) {
+    if (isSqlUnavailable(err)) {
+      console.info('Legacy SQL session check skipped (Firebase-primary mode active).');
+      return null;
+    }
     console.error('Verify session token SQL error:', err);
     throw new Error(err?.message || 'Gagal memverifikasi sesi server.', { cause: err });
   }
 }
 
 export async function revokeSessionTokenSql(rawToken: string): Promise<void> {
+  if (!getDatabaseConfigStatus().configured) return;
   try {
     const tokenHash = hashToken(rawToken);
     await db.delete(authSessions).where(eq(authSessions.tokenHash, tokenHash));
-  } catch (err) {
+  } catch (err: any) {
+    if (isSqlUnavailable(err)) {
+      console.info('Legacy SQL session revoke skipped (Firebase-primary mode active).');
+      return;
+    }
     console.error('Revoke session token error:', err);
   }
 }
@@ -2258,3 +2352,49 @@ export async function syncAdminAccountSql(params: {
     throw new Error('Gagal menyinkronkan akun admin ke database server.', { cause: err });
   }
 }
+
+export async function readCloudSqlMigrationSnapshot(): Promise<{
+  available: boolean;
+  data?: FullAppDatabaseState;
+  reason?: string;
+}> {
+  if (isSqlTemporarilyUnavailable()) {
+    return {
+      available: false,
+      reason: 'Cloud SQL tidak terjangkau pada runtime ini (mode Firebase aktif).',
+    };
+  }
+  const status = getDatabaseConfigStatus();
+  if (!status.configured) {
+    return { available: false, reason: 'Cloud SQL tidak dikonfigurasi pada runtime ini.' };
+  }
+  try {
+    await pool.query('SELECT 1');
+    await ensureSqlSeeded();
+    const state = await readFullStateSql();
+    const hasMeaningfulData =
+      state.wargaList.length > 0 ||
+      state.transactions.length > 0 ||
+      state.bantuanList.length > 0 ||
+      state.pengumumanList.length > 0 ||
+      state.dokumenList.length > 0 ||
+      state.adminAccounts.length > 0;
+    if (!hasMeaningfulData) {
+      return { available: false, reason: 'Cloud SQL kosong.' };
+    }
+    return { available: true, data: state };
+  } catch (err: any) {
+    if (isSqlUnavailable(err)) {
+      return {
+        available: false,
+        reason: 'Cloud SQL tidak terjangkau pada runtime ini (mode Firebase aktif).',
+      };
+    }
+    console.info('Cloud SQL migration snapshot skipped (non-fatal).');
+    return {
+      available: false,
+      reason: 'Cloud SQL tidak terjangkau dari runtime ini.',
+    };
+  }
+}
+

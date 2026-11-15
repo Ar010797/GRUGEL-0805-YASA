@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
-import { verifySessionTokenSql } from '../db/repository.ts';
+import { isSqlNetworkOrUnavailableError } from '../db/index.ts';
+import { isSqlUnavailable, verifySessionTokenSql } from '../db/repository.ts';
 import type { AuthUser } from '../types.ts';
 
 export interface AuthRequest extends Request {
@@ -25,6 +26,7 @@ export function createRequireAuth(options?: { allowQueryToken?: boolean }) {
     if (!token) {
       return res.status(401).json({
         success: false,
+        code: 'REAUTH_FIREBASE',
         message: 'Akses ditolak: Anda belum login atau sesi telah berakhir.',
       });
     }
@@ -46,9 +48,20 @@ export function createRequireAuth(options?: { allowQueryToken?: boolean }) {
       }
       return res.status(401).json({
         success: false,
-        message: 'Sesi login tidak valid atau sudah kedaluwarsa. Silakan login kembali.',
+        code: 'REAUTH_FIREBASE',
+        message:
+          'Sesi login lama tidak valid atau telah berakhir. Aplikasi kini menggunakan Firebase Authentication — silakan login ulang.',
       });
     } catch (err: any) {
+      if (isSqlUnavailable(err) || isSqlNetworkOrUnavailableError(err)) {
+        console.info('Legacy SQL auth session verification skipped (Firebase mode active).');
+        return res.status(401).json({
+          success: false,
+          code: 'REAUTH_FIREBASE',
+          message:
+            'Sesi lama tidak dapat diverifikasi karena autentikasi telah beralih ke Firebase Authentication. Silakan muat ulang aplikasi.',
+        });
+      }
       console.error('SQL auth session verification error:', err);
       return res.status(503).json({
         success: false,

@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool, type PoolConfig } from 'pg';
 import * as schema from './schema.ts';
@@ -13,6 +15,49 @@ export interface DatabaseConfigStatus {
   errorMessage?: string;
 }
 
+let sqlUnavailableUntilMs = 0;
+
+export function markSqlUnavailable(cooldownMs = 60_000): void {
+  sqlUnavailableUntilMs = Math.max(sqlUnavailableUntilMs, Date.now() + cooldownMs);
+}
+
+export function isSqlTemporarilyUnavailable(): boolean {
+  return Date.now() < sqlUnavailableUntilMs;
+}
+
+export function clearSqlUnavailable(): void {
+  sqlUnavailableUntilMs = 0;
+}
+
+export function isSqlNetworkOrUnavailableError(err: unknown): boolean {
+  let curr: any = err;
+  for (let depth = 0; depth < 6 && curr; depth++) {
+    const code = String(curr?.code || '').toUpperCase();
+    const msg = String(curr?.message || '');
+    if (
+      code === 'ENOTFOUND' ||
+      code === 'ECONNREFUSED' ||
+      code === 'ETIMEDOUT' ||
+      code === 'EAI_AGAIN' ||
+      code === 'ENOENT' ||
+      code === 'ECONNRESET' ||
+      code === 'EPIPE' ||
+      code === 'ENETUNREACH' ||
+      code === 'EHOSTUNREACH' ||
+      code === '08001' ||
+      code === '08006' ||
+      code === '57P01' ||
+      /getaddrinfo\s+ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ECONNRESET|Connection terminated|connection timeout|timeout expired|belum dikonfigurasi|Socket Cloud SQL tidak terpasang/i.test(
+        msg
+      )
+    ) {
+      return true;
+    }
+    curr = curr?.cause;
+  }
+  return false;
+}
+
 function getConnectionString(): string {
   return String(
     process.env.DATABASE_URL ||
@@ -22,6 +67,21 @@ function getConnectionString(): string {
       process.env.CLOUD_SQL_URL ||
       ''
   ).trim();
+}
+
+function isUnixSocketAvailable(socketPath: string): boolean {
+  try {
+    if (!fs.existsSync(socketPath)) return false;
+    const stat = fs.statSync(socketPath);
+    if (stat.isDirectory()) {
+      const port = process.env.SQL_PORT ? Number(process.env.SQL_PORT) : 5432;
+      const pgSocket = path.join(socketPath, `.s.PGSQL.${Number.isFinite(port) ? port : 5432}`);
+      return fs.existsSync(pgSocket);
+    }
+    return stat.isSocket();
+  } catch {
+    return false;
+  }
 }
 
 export function getDatabaseConfigStatus(): DatabaseConfigStatus {
@@ -35,10 +95,18 @@ export function getDatabaseConfigStatus(): DatabaseConfigStatus {
     };
   }
 
-  const hasSqlParams = Boolean(
-    process.env.SQL_HOST && process.env.SQL_USER && process.env.SQL_DB_NAME
-  );
+  const sqlHost = String(process.env.SQL_HOST || '').trim();
+  const hasSqlParams = Boolean(sqlHost && process.env.SQL_USER && process.env.SQL_DB_NAME);
   if (hasSqlParams) {
+    if (sqlHost.startsWith('/') && !isUnixSocketAvailable(sqlHost)) {
+      return {
+        configured: false,
+        mode: 'unconfigured',
+        engineLabel: 'Firebase Auth & Cloud Firestore (Socket Cloud SQL tidak terpasang)',
+        errorMessage:
+          'Socket Cloud SQL tidak terpasang pada runtime ini (aplikasi berjalan menggunakan Firebase Authentication & Cloud Firestore).',
+      };
+    }
     return {
       configured: true,
       mode: 'sql_params',
@@ -49,9 +117,9 @@ export function getDatabaseConfigStatus(): DatabaseConfigStatus {
   return {
     configured: false,
     mode: 'unconfigured',
-    engineLabel: 'PostgreSQL (Belum Terkonfigurasi)',
+    engineLabel: 'Firebase Auth & Cloud Firestore (PostgreSQL Belum Terkonfigurasi)',
     errorMessage:
-      'Database PostgreSQL belum dikonfigurasi di server ini (variabel environment DATABASE_URL / POSTGRES_URL atau SQL_HOST belum diisi). Jika Anda menggunakan Vercel, hubungkan database PostgreSQL (Neon/Supabase/Vercel Postgres) di Settings > Environment Variables lalu redeploy.',
+      'Database PostgreSQL belum dikonfigurasi pada runtime ini (aplikasi berjalan menggunakan Firebase Authentication & Cloud Firestore).',
   };
 }
 
@@ -69,22 +137,23 @@ function buildPoolConfig(): PoolConfig {
       connectionString,
       ssl: isLocalHost ? false : { rejectUnauthorized: false },
       max: isServerless ? 3 : 10,
-      connectionTimeoutMillis: 15000,
+      connectionTimeoutMillis: 5000,
       idleTimeoutMillis: isServerless ? 10000 : 30000,
     };
   }
 
-  if (process.env.SQL_HOST) {
+  const sqlHost = String(process.env.SQL_HOST || '').trim();
+  if (sqlHost && (!sqlHost.startsWith('/') || isUnixSocketAvailable(sqlHost))) {
     const port = process.env.SQL_PORT ? Number(process.env.SQL_PORT) : undefined;
     return {
-      host: process.env.SQL_HOST,
+      host: sqlHost,
       port: Number.isFinite(port) ? port : undefined,
       user: process.env.SQL_USER,
       password: process.env.SQL_PASSWORD,
       database: process.env.SQL_DB_NAME,
       ssl: process.env.SQL_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
       max: isServerless ? 3 : 10,
-      connectionTimeoutMillis: 15000,
+      connectionTimeoutMillis: 5000,
     };
   }
 
@@ -93,7 +162,7 @@ function buildPoolConfig(): PoolConfig {
     host: '127.0.0.1',
     port: 5432,
     max: 1,
-    connectionTimeoutMillis: 3000,
+    connectionTimeoutMillis: 2000,
   };
 }
 
@@ -102,7 +171,7 @@ export const createPool = () => {
     global._postgresPool = new Pool(buildPoolConfig());
 
     global._postgresPool.on('error', (err) => {
-      console.error('Unexpected error on idle SQL pool client:', err);
+      console.info('Idle SQL pool client notice:', err?.message || err);
     });
   }
   return global._postgresPool;

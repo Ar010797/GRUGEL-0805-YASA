@@ -33,7 +33,6 @@ import { Warga, BantuanPemerintah, ProfilRT, PengaturanKas } from '../types';
 import { exportDataWargaPerKK_PDF, exportSingleKK_PDF, exportKartuKeluargaPemerintah_PDF } from '../utils/pdfExport';
 import { downloadTemplateExcelWargaBansos } from '../utils/excelWargaImport';
 import { ConfirmationModal } from '../components/ConfirmationModal';
-import { searchWargaOnServer } from '../utils/cloudSync';
 import { normalizeRTCode } from '../utils/rtFilter';
 
 interface DataWargaViewProps {
@@ -70,7 +69,6 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
 
   const [filterGender, setFilterGender] = useState<'semua' | 'Laki-laki' | 'Perempuan'>('semua');
   const [search, setSearch] = useState('');
-  const [serverSearchResults, setServerSearchResults] = useState<Warga[] | null>(null);
   const [selectedWarga, setSelectedWarga] = useState<Warga | null>(null);
   const [viewMode, setViewMode] = useState<'auto' | 'cards' | 'table'>('auto');
   const tableScrollRef = useRef<HTMLDivElement | null>(null);
@@ -78,26 +76,6 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
   const scrollTableBy = (delta: number) => {
     tableScrollRef.current?.scrollBy({ left: delta, behavior: 'smooth' });
   };
-
-  // Query database server directly on search input
-  useEffect(() => {
-    const q = search.trim();
-    if (!q) {
-      setServerSearchResults(null);
-      return;
-    }
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      const results = await searchWargaOnServer(q);
-      if (!cancelled && results !== null) {
-        setServerSearchResults(results);
-      }
-    }, 200);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [search, wargaList]);
 
   // Confirmation Modal State
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -119,10 +97,8 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
   const totalJiwa = wargaList.reduce((acc, w) => acc + (w.anggotaKeluarga?.length || w.jumlahJiwa || 1), 0);
 
   const rawServerList =
-    search.trim() && serverSearchResults !== null
-      ? !isAllRT && isServer
-        ? serverSearchResults.filter((w) => normalizeRTCode(w.rt) === normalizeRTCode(rtStr))
-        : serverSearchResults
+    search.trim() && !isAllRT && isServer
+      ? wargaList.filter((w) => normalizeRTCode(w.rt) === normalizeRTCode(rtStr))
       : wargaList;
   const seenIds = new Set<string>();
   const sourceList = rawServerList.filter((w) => {

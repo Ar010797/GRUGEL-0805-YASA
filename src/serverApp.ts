@@ -14,7 +14,9 @@ import {
   getAdminAccountsSql,
   getDatabaseSnapshotForUser,
   getPublicBootstrapInfoSql,
+  isSqlUnavailable,
   mergeAndSaveFullStateSql,
+  readCloudSqlMigrationSnapshot,
   readFullStateSql,
   revokeSessionTokenSql,
   searchWargaSql,
@@ -64,6 +66,7 @@ function filterStateForUser(full: Awaited<ReturnType<typeof readFullStateSql>>, 
 }
 
 function getSqlErrorHttpStatus(err: any): number {
+  if (isSqlUnavailable(err)) return 503;
   const msg = String(err?.message || '');
   if (
     msg.includes('belum dikonfigurasi') ||
@@ -122,15 +125,17 @@ export function createApiApp() {
     }
   }
 
-  // Health Check (verifies live PostgreSQL connection)
+  // Health Check (Firebase primary backend + optional Cloud SQL migration status)
   app.get('/api/health', async (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
       const health = await checkDatabaseHealthSql();
       return res.json({
         status: 'ok',
-        database: 'connected',
-        engine: health.engine,
+        backend: 'firebase',
+        database: 'firebase-primary',
+        cloudSqlConnected: true,
+        engine: 'Firebase Auth & Cloud Firestore (+ Cloud SQL Legacy)',
         app: 'Sistem Informasi Kas Warga & Server Desa Kotayasa',
         revision: health.revision,
         lastUpdated: health.lastUpdated,
@@ -138,12 +143,29 @@ export function createApiApp() {
         totalAdminAccounts: health.totalAdminAccounts,
         time: new Date().toISOString(),
       });
-    } catch (err: any) {
-      return res.status(503).json({
-        status: 'error',
-        database: 'disconnected',
-        message: err?.message || 'Koneksi database server pusat terputus.',
+    } catch {
+      return res.status(200).json({
+        status: 'ok',
+        backend: 'firebase',
+        database: 'firebase-primary',
+        cloudSqlConnected: false,
+        engine: 'Firebase Auth & Cloud Firestore',
+        app: 'Sistem Informasi Kas Warga & Server Desa Kotayasa',
         time: new Date().toISOString(),
+      });
+    }
+  });
+
+  // One-time read-only export of legacy Cloud SQL data (e.g. 50 KK) for migration into Cloud Firestore
+  app.get('/api/migration/cloudsql-snapshot', async (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const snap = await readCloudSqlMigrationSnapshot();
+      return res.status(200).json(snap);
+    } catch (err: any) {
+      return res.status(200).json({
+        available: false,
+        reason: err?.message || 'Cloud SQL tidak tersedia.',
       });
     }
   });

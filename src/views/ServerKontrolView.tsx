@@ -732,10 +732,10 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-slate-900">
-                    Database Server Pusat (SQL &amp; REST API)
+                    Firebase Authentication &amp; Cloud Firestore Real-Time
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Seluruh perangkat (Admin HP, Warga HP, Desktop, dan APK) terhubung langsung ke satu database server pusat secara online
+                    Seluruh perangkat (AI Studio, Vercel Web, HP Browser, dan APK Median) terhubung ke satu database Cloud Firestore yang sama secara real-time
                   </p>
                 </div>
               </div>
@@ -750,10 +750,10 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                 <Wifi size={12} />
                 <span>
                   {sseConnected
-                    ? 'Database & SSE Live Terhubung'
+                    ? 'Cloud Firestore Live'
                     : serverConnected
-                    ? 'Database Server Online'
-                    : 'Koneksi Server Terputus'}
+                    ? 'Firebase Cloud Online'
+                    : 'Koneksi Terputus'}
                 </span>
               </span>
             </div>
@@ -762,7 +762,7 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                   <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-                    Status Koneksi &amp; Sinkronisasi Server Pusat
+                    Status Koneksi &amp; Sinkronisasi Cloud Firestore
                   </span>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
                     <span
@@ -771,8 +771,8 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                       }`}
                     >
                       {serverConnected
-                        ? 'Terhubung ke Database Server Pusat Online'
-                        : 'Gagal terhubung ke Database Server Pusat'}
+                        ? 'Terhubung ke Cloud Firestore Pusat (laughing-azimuth-807pf)'
+                        : 'Gagal terhubung ke Cloud Firestore'}
                     </span>
                     <span
                       className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
@@ -781,7 +781,7 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                           : 'bg-amber-100 text-amber-800'
                       }`}
                     >
-                      {sseConnected ? 'Sinkronisasi Real-Time Aktif' : 'Polling Sinkronisasi Aktif'}
+                      {sseConnected ? 'Sinkronisasi Real-Time Aktif' : 'Menunggu Sinkronisasi'}
                     </span>
                   </div>
                 </div>
@@ -818,13 +818,13 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
               <div>
                 <h3 className="text-sm font-bold text-slate-900">Penyimpanan Terpusat &amp; Cadangan JSON</h3>
                 <p className="text-xs text-slate-500">
-                  Data kas, iuran, pengumuman, bansos, dan warga tersimpan permanen di Database Server Pusat
+                  Data kas, iuran, pengumuman, bansos, dan warga tersimpan permanen di Cloud Firestore
                 </p>
               </div>
             </div>
 
             <p className="text-xs text-slate-600 leading-relaxed">
-              Setiap perubahan dari HP Admin, akun Warga, maupun Server Pusat dikirim melalui <strong>REST API Terautentikasi</strong> ke database SQL pusat dan disiarkan real-time melalui SSE ke semua perangkat yang sedang aktif. Data tetap utuh saat logout, ganti HP, atau instal ulang aplikasi.
+              Setiap perubahan dari HP Admin, akun Warga, maupun Server Pusat dikirim langsung ke <strong>Cloud Firestore</strong> dan disinkronkan real-time (onSnapshot) ke semua perangkat lain yang aktif. Data tetap utuh saat logout, ganti HP, atau instal ulang APK Median.
             </p>
 
             <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
@@ -943,9 +943,10 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                     <input
                       type={showFormPassword ? 'text' : 'password'}
                       required
+                      minLength={6}
                       value={formPassword}
                       onChange={(e) => setFormPassword(e.target.value)}
-                      placeholder={`rt${formRT}rw${formRW || '05'}`}
+                      placeholder={`rt${formRT}rw${formRW || '05'} (min. 6 karakter)`}
                       className="w-full rounded-xl border border-slate-200 pl-3 pr-9 py-2 text-xs font-mono text-slate-800"
                     />
                     <button
@@ -1085,6 +1086,7 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                     <input
                       type={showEditPassword ? 'text' : 'password'}
                       required
+                      minLength={6}
                       value={editPassword}
                       onChange={(e) => setEditPassword(e.target.value)}
                       className="w-full rounded-xl border border-slate-200 pl-3 pr-9 py-2 text-xs font-mono text-emerald-800 font-bold bg-emerald-50/50 focus:border-[#0B5D3F] outline-hidden"

@@ -2,23 +2,117 @@
   "entities": {
     "AdminUser": {
       "title": "AdminUser",
-      "description": "Authorized Google-authenticated administrator for the RT/RW cloud database",
+      "description": "Authenticated Server or RT Admin assignment and RBAC record",
       "type": "object",
       "properties": {
-        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "email": { "type": "string", "format": "email", "maxLength": 254 },
-        "displayName": { "type": "string", "maxLength": 120 },
+        "displayName": { "type": "string", "maxLength": 160 },
+        "username": { "type": "string", "maxLength": 80 },
         "role": { "type": "string", "enum": ["server", "admin"] },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rtScope": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "enum": ["aktif", "nonaktif"] },
+        "pinDigest": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "email", "role", "createdAt", "updatedAt"]
+      "required": ["uid", "email", "role", "rt", "rw", "status", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "WargaProfile": {
+      "title": "WargaProfile",
+      "description": "Trusted UID-to-KK/RW/RT assignment mapping for authenticated citizens",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "wargaId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "noKK": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "nama": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "wargaId", "noKK", "nama", "rt", "rw", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "SystemMeta": {
+      "title": "SystemMeta",
+      "description": "One-time server bootstrap lock and pin verification metadata",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "serverUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "bootstrapDigest": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "serverUid", "rw", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "RtRegistry": {
+      "title": "RtRegistry",
+      "description": "Per-RW directory of active server UID, RT admin UIDs, and registered RTs",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "adminsByRt": { "type": "object" },
+        "registeredRts": { "type": "array" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "rw", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "RtManifest": {
+      "title": "RtManifest",
+      "description": "Per-RT index of document IDs for seamless admin/server UID ACL sync",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "docIds": { "type": "object" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "rw", "rt", "docIds", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "RtPublicSummary": {
+      "title": "RtPublicSummary",
+      "description": "RT-scoped community summary feed (settings, non-PII ledger, announcements) for citizens in assigned RW/RT",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "tahunAktif": { "type": "number" },
+        "pengaturanKas": { "type": "object" },
+        "transactions": { "type": "array" },
+        "pengumuman": { "type": "array" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "rw", "rt", "tahunAktif", "ownerUid", "createdAt", "updatedAt"]
     },
     "AppSettings": {
       "title": "AppSettings",
       "description": "RT/RW cash configuration, dues rates, and regional profile",
       "type": "object",
       "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
         "tahunAktif": { "type": "number" },
         "nominalJimpitanTahunan": { "type": "number" },
         "nominalJimpitanBulanan": { "type": "number" },
@@ -32,10 +126,14 @@
         "kontakBendahara": { "type": "object" },
         "saldoBerlanjutPerTahun": { "type": "object" },
         "profilRT": { "type": "object" },
+        "accessUids": { "type": "array" },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "rtAdminUid": { "type": "string", "maxLength": 128 },
         "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["tahunAktif", "ownerUid", "updatedAt"]
+      "required": ["id", "rw", "rt", "tahunAktif", "accessUids", "ownerUid", "createdAt", "updatedAt"]
     },
     "Warga": {
       "title": "Warga",
@@ -48,8 +146,8 @@
         "noKK": { "type": "string", "maxLength": 32 },
         "nik": { "type": "string", "maxLength": 32 },
         "noRumah": { "type": "string", "maxLength": 32 },
-        "rt": { "type": "string", "maxLength": 10 },
-        "rw": { "type": "string", "maxLength": 10 },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
         "alamat": { "type": "string", "maxLength": 300 },
         "kodePos": { "type": "string", "maxLength": 12 },
         "tanggalDikeluarkan": { "type": "string", "maxLength": 32 },
@@ -71,11 +169,14 @@
         "pilihanSkema": { "type": "string", "enum": ["bulanan", "tahunan"] },
         "riwayatPerubahanKK": { "type": "array" },
         "linkedUid": { "type": "string", "maxLength": 128 },
+        "accessUids": { "type": "array" },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "rtAdminUid": { "type": "string", "maxLength": 128 },
         "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "nama", "jenisKelamin", "statusIuran", "ownerUid", "createdAt", "updatedAt"]
+      "required": ["id", "nama", "rt", "rw", "jenisKelamin", "statusIuran", "accessUids", "ownerUid", "createdAt", "updatedAt"]
     },
     "Transaction": {
       "title": "Transaction",
@@ -93,12 +194,17 @@
         "noKK": { "type": "string", "maxLength": 32 },
         "isSaldoAwal": { "type": "boolean" },
         "tahun": { "type": "number" },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
         "rtScope": { "type": "string", "maxLength": 64 },
+        "accessUids": { "type": "array" },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "rtAdminUid": { "type": "string", "maxLength": 128 },
         "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "tanggal", "kategori", "nominal", "tipe", "ownerUid", "createdAt", "updatedAt"]
+      "required": ["id", "tanggal", "kategori", "nominal", "tipe", "rt", "rw", "accessUids", "ownerUid", "createdAt", "updatedAt"]
     },
     "BantuanPemerintah": {
       "title": "BantuanPemerintah",
@@ -115,12 +221,17 @@
         "status": { "type": "string", "enum": ["Sudah Disalurkan", "Proses Verifikasi", "Baru Diusulkan", "Ditolak"] },
         "sumberDana": { "type": "string", "maxLength": 160 },
         "keterangan": { "type": "string", "maxLength": 400 },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
         "rtScope": { "type": "string", "maxLength": 64 },
+        "accessUids": { "type": "array" },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "rtAdminUid": { "type": "string", "maxLength": 128 },
         "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "jenisBantuan", "namaPenerima", "status", "ownerUid", "createdAt", "updatedAt"]
+      "required": ["id", "jenisBantuan", "namaPenerima", "status", "rt", "rw", "accessUids", "ownerUid", "createdAt", "updatedAt"]
     },
     "PengumumanRT": {
       "title": "PengumumanRT",
@@ -142,12 +253,17 @@
         "waktuAcara": { "type": "string", "maxLength": 80 },
         "tempatAcara": { "type": "string", "maxLength": 200 },
         "keteranganTambahan": { "type": "string", "maxLength": 500 },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
         "rtScope": { "type": "string", "maxLength": 64 },
+        "accessUids": { "type": "array" },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "rtAdminUid": { "type": "string", "maxLength": 128 },
         "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "judul", "isi", "kategori", "tanggal", "ownerUid", "createdAt", "updatedAt"]
+      "required": ["id", "judul", "isi", "kategori", "tanggal", "rt", "rw", "accessUids", "ownerUid", "createdAt", "updatedAt"]
     },
     "DokumenPdfWarga": {
       "title": "DokumenPdfWarga",
@@ -162,34 +278,43 @@
         "kategori": { "type": "string", "maxLength": 80 },
         "keterangan": { "type": "string", "maxLength": 300 },
         "dataBase64": { "type": "string", "maxLength": 850000 },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
         "rtScope": { "type": "string", "maxLength": 64 },
+        "accessUids": { "type": "array" },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "rtAdminUid": { "type": "string", "maxLength": 128 },
         "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "judul", "namaFile", "kategori", "ownerUid", "createdAt", "updatedAt"]
+      "required": ["id", "judul", "namaFile", "kategori", "rt", "rw", "accessUids", "ownerUid", "createdAt", "updatedAt"]
     },
     "AdminRTAccount": {
       "title": "AdminRTAccount",
-      "description": "RT admin account credentials managed by Village Server Control",
+      "description": "RT admin account registry managed by Village Server Control",
       "type": "object",
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "username": { "type": "string", "minLength": 1, "maxLength": 80 },
         "passwordHash": { "type": "string", "minLength": 1, "maxLength": 128 },
         "nama": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "rt": { "type": "string", "maxLength": 10 },
-        "rw": { "type": "string", "maxLength": 10 },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
         "kontak": { "type": "string", "maxLength": 40 },
         "jabatan": { "type": "string", "maxLength": 120 },
         "status": { "type": "string", "enum": ["aktif", "nonaktif"] },
         "terakhirLogin": { "type": "string", "maxLength": 64 },
         "terakhirSinkronisasi": { "type": "string", "maxLength": 64 },
+        "authUid": { "type": "string", "maxLength": 128 },
+        "accessUids": { "type": "array" },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "rtAdminUid": { "type": "string", "maxLength": 128 },
         "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "username", "passwordHash", "nama", "status", "ownerUid", "createdAt", "updatedAt"]
+      "required": ["id", "username", "passwordHash", "nama", "rt", "rw", "status", "accessUids", "ownerUid", "createdAt", "updatedAt"]
     },
     "PembaruanBulananRT": {
       "title": "PembaruanBulananRT",
@@ -197,8 +322,8 @@
       "type": "object",
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "rt": { "type": "string", "maxLength": 10 },
-        "rw": { "type": "string", "maxLength": 10 },
+        "rt": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "rw": { "type": "string", "minLength": 1, "maxLength": 10 },
         "namaAdminPengirim": { "type": "string", "maxLength": 160 },
         "tanggalKirim": { "type": "string", "maxLength": 32 },
         "bulanTahun": { "type": "string", "maxLength": 64 },
@@ -214,17 +339,40 @@
         "totalPenerimaBansos": { "type": "number" },
         "catatanKhusus": { "type": "string", "maxLength": 500 },
         "statusVerifikasi": { "type": "string", "enum": ["Diterima", "Menunggu Verifikasi", "Perlu Klarifikasi"] },
+        "accessUids": { "type": "array" },
+        "serverUid": { "type": "string", "maxLength": 128 },
+        "rtAdminUid": { "type": "string", "maxLength": 128 },
         "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "rt", "rw", "bulanTahun", "statusVerifikasi", "ownerUid", "createdAt", "updatedAt"]
+      "required": ["id", "rt", "rw", "bulanTahun", "statusVerifikasi", "accessUids", "ownerUid", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
     "/admins/{uid}": {
       "schema": { "$ref": "#/entities/AdminUser" },
-      "description": "Registered administrator access records"
+      "description": "Registered Server and Admin RT assignments (RW/RT)"
+    },
+    "/wargaProfiles/{uid}": {
+      "schema": { "$ref": "#/entities/WargaProfile" },
+      "description": "Resident UID-to-KK/RW/RT verification mapping"
+    },
+    "/systemMeta/{metaId}": {
+      "schema": { "$ref": "#/entities/SystemMeta" },
+      "description": "Server bootstrap lock metadata"
+    },
+    "/rtRegistry/{rwId}": {
+      "schema": { "$ref": "#/entities/RtRegistry" },
+      "description": "RW-level registry of server UID and RT admins"
+    },
+    "/rtManifest/{scopeId}": {
+      "schema": { "$ref": "#/entities/RtManifest" },
+      "description": "Per-RT document manifest for cross-admin/server ACL sync"
+    },
+    "/rtPublicSummaries/{scopeId}": {
+      "schema": { "$ref": "#/entities/RtPublicSummary" },
+      "description": "RT-scoped community summary feed for residents"
     },
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/AppSettings" },
@@ -232,23 +380,23 @@
     },
     "/warga/{wargaId}": {
       "schema": { "$ref": "#/entities/Warga" },
-      "description": "Resident Kartu Keluarga records (PII protected)"
+      "description": "Resident Kartu Keluarga records (PII protected, RW/RT scoped)"
     },
     "/transactions/{txId}": {
       "schema": { "$ref": "#/entities/Transaction" },
-      "description": "RT cash inflow, outflow, and death fund ledger"
+      "description": "RT cash inflow, outflow, and death fund ledger (RW/RT scoped)"
     },
     "/bantuan/{bantuanId}": {
       "schema": { "$ref": "#/entities/BantuanPemerintah" },
-      "description": "Confidential social aid records (Admin only)"
+      "description": "Confidential social aid records (Admin RW/RT only)"
     },
     "/pengumuman/{pengumumanId}": {
       "schema": { "$ref": "#/entities/PengumumanRT" },
-      "description": "Official RT announcements"
+      "description": "Official RT announcements (RW/RT scoped)"
     },
     "/dokumen/{dokumenId}": {
       "schema": { "$ref": "#/entities/DokumenPdfWarga" },
-      "description": "Admin-only PDF resident document archive"
+      "description": "Admin-only PDF resident document archive (RW/RT scoped)"
     },
     "/adminAccounts/{accountId}": {
       "schema": { "$ref": "#/entities/AdminRTAccount" },

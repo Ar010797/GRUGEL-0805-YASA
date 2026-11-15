@@ -52,6 +52,8 @@ import { LupaPasswordModal } from './components/LupaPasswordModal';
 import { FloatingNotification } from './components/FloatingNotification';
 import { KirimLaporanModal } from './components/KirimLaporanModal';
 import { UpgradeKKModal } from './components/UpgradeKKModal';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth } from './lib/firebase';
 import {
   AuthUser,
   Transaction,
@@ -67,42 +69,43 @@ import {
 } from './types';
 import { isPengumumanExpired } from './utils/security';
 import {
-  checkServerHealth,
-  fetchPublicBootstrapInfo,
-  verifySavedSession,
-  logoutFromServer,
-  getAuthToken,
-  clearAuthToken,
   readLegacyLocalCacheForMigration,
   clearLegacyLocalCache,
-  migrateLegacyLocalDataToServer,
-  fetchServerSnapshotWithStatus,
-  saveAppData,
-  clearAppData,
-  saveSingleWargaToServer,
-  bulkImportWargaOnServer,
-  deleteWargaFromServer,
-  updateWargaSelfOnServer,
-  saveTransactionOnServer,
-  savePengumumanOnServer,
-  deletePengumumanOnServer,
-  saveBantuanOnServer,
-  deleteBantuanOnServer,
-  saveDokumenOnServer,
-  deleteDokumenOnServer,
-  saveLaporanOnServer,
-  saveSettingsOnServer,
-  syncAdminAccountToServer,
   formatWaktuSyncID,
-  checkServerRevision,
-  flushSaveAppDataKeepalive,
   mergeDatabaseStates,
   dedupeEntityList,
-  subscribeServerStream,
-  EMPTY_DELETED_IDS,
-  type DeletedIdsMap,
   type AppDatabaseSchema,
 } from './utils/cloudSync';
+import {
+  resolveCurrentFirebaseUser,
+  logoutFromFirebase,
+  provisionAdminAuthAccount,
+  provisionWargaAuthAccounts,
+  claimAndSyncManifestDocs,
+  subscribeFirestoreState,
+  migrateSnapshotToFirestore,
+  fetchCloudSqlMigrationSnapshot,
+  hardResetFirestoreData,
+  saveWargaDoc,
+  deleteWargaDoc,
+  updateWargaSelfDoc,
+  bulkSaveWargaAndBantuanDocs,
+  saveTransactionDoc,
+  deleteTransactionDoc,
+  saveBantuanDoc,
+  deleteBantuanDoc,
+  savePengumumanDoc,
+  deletePengumumanDoc,
+  saveDokumenDoc,
+  deleteDokumenDoc,
+  saveAdminAccountDoc,
+  deleteAdminAccountDoc,
+  saveLaporanDoc,
+  saveSettingsDoc,
+  syncRtPublicSummary,
+  testFirestoreConnection,
+  toValidDocId,
+} from './utils/firebaseSync';
 import {
   EXCEL_DOWNLOAD_EVENT,
   ExcelDownloadNotificationDetail,
@@ -132,45 +135,14 @@ import { DokumenPdfWargaView } from './views/DokumenPdfWargaView';
 import { KebijakanPrivasiView } from './views/KebijakanPrivasiView';
 import { ServerKontrolView } from './views/ServerKontrolView';
 
-const ACTIVE_SESSION_KEY = 'kaswarga_active_session_v1';
-
-function readSavedSession(): AuthUser | null {
-  try {
-    if (!getAuthToken()) return null;
-    const raw = localStorage.getItem(ACTIVE_SESSION_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as AuthUser;
-    if (
-      parsed &&
-      (parsed.role === 'server' || parsed.role === 'admin' || parsed.role === 'warga') &&
-      typeof parsed.username === 'string' &&
-      parsed.username.trim().length > 0
-    ) {
-      return parsed;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function saveActiveSession(user: AuthUser | null) {
-  try {
-    if (user) {
-      localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(user));
-    } else {
-      localStorage.removeItem(ACTIVE_SESSION_KEY);
-    }
-  } catch {
-    // ignore storage errors
-  }
-}
-
 export default function App() {
-  // Authentication State (Role: 'server' | 'admin' | 'warga') - ALWAYS starts null on fresh install
-  const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => readSavedSession());
+  // Authentication State (Role: 'server' | 'admin' | 'warga') managed authoritatively by Firebase Auth
+  const [authReady, setAuthReady] = useState<boolean>(false);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const currentUserRef = useRef<AuthUser | null>(null);
+  currentUserRef.current = currentUser;
 
-  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(() => !readSavedSession());
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
   const [isLupaPasswordOpen, setIsLupaPasswordOpen] = useState<boolean>(false);
   const [isKirimLaporanModalOpen, setIsKirimLaporanModalOpen] = useState<boolean>(false);
 
@@ -186,7 +158,7 @@ export default function App() {
   const [tahunAktif, setTahunAktif] = useState<number>(2026);
   const [rolloverNotice, setRolloverNotice] = useState<string | null>(null);
 
-  // Central SQL Server Sync Notification indicator
+  // Cloud Firestore Sync Notification indicator
   const [syncStatus, setSyncStatus] = useState<'synced' | 'saving' | 'offline'>('synced');
   const [serverConnected, setServerConnected] = useState<boolean>(true);
   const [sseConnected, setSseConnected] = useState<boolean>(false);
@@ -197,12 +169,7 @@ export default function App() {
   const [cloudError, setCloudError] = useState<string | null>(null);
 
   // Navigation active tab
-  const [currentView, setCurrentView] = useState<string>(() => {
-    const saved = readSavedSession();
-    if (saved?.role === 'server') return 'server-kontrol';
-    if (saved?.role === 'warga') return 'dasbor-warga';
-    return 'beranda';
-  });
+  const [currentView, setCurrentView] = useState<string>('beranda');
 
   // Server RT filter ('SEMUA' or specific RT code e.g. '08', '01')
   const [selectedServerRT, setSelectedServerRT] = useState<string>('SEMUA');
@@ -312,40 +279,9 @@ export default function App() {
   // Monthly Submissions sent by RT Admins to the Server
   const [laporanBulananRT, setLaporanBulananRT] = useState<PembaruanBulananRT[]>([]);
 
-  // Real-time Bidirectional Sync Refs (Central SQL + REST API + Live SSE + Polling)
-  const isLoadedRef = useRef(false);
-  const bulkImportInFlightRef = useRef(false);
-  const deletedIdsRef = useRef<DeletedIdsMap>({ ...EMPTY_DELETED_IDS });
-  const lastServerHashRef = useRef<string>('');
-  const lastServerRevisionRef = useRef<number>(0);
-
-  const computeStateHash = (s: {
-    tahunAktif: number;
-    pengaturanKas: PengaturanKas;
-    wargaList: Warga[];
-    transactions: Transaction[];
-    bantuanList: BantuanPemerintah[];
-    pengumumanList: PengumumanRT[];
-    dokumenList: DokumenPdfWarga[];
-    adminAccounts: AdminRTAccount[];
-    laporanBulananRT: PembaruanBulananRT[];
-  }): string => {
-    try {
-      return JSON.stringify({
-        tahunAktif: s.tahunAktif,
-        pengaturanKas: s.pengaturanKas,
-        wargaList: s.wargaList,
-        transactions: s.transactions,
-        bantuanList: s.bantuanList,
-        pengumumanList: s.pengumumanList,
-        dokumenList: s.dokumenList,
-        adminAccounts: s.adminAccounts,
-        laporanBulananRT: s.laporanBulananRT,
-      });
-    } catch {
-      return String(Date.now());
-    }
-  };
+  // Firebase Real-time Refs
+  const migrationCheckedRef = useRef<boolean>(false);
+  const migrationInFlightRef = useRef<boolean>(false);
 
   const buildCurrentSchema = (): AppDatabaseSchema => ({
     version: 2,
@@ -359,555 +295,366 @@ export default function App() {
     dokumenList,
     adminAccounts,
     laporanBulananRT,
-    deletedIds: deletedIdsRef.current,
   });
 
   const latestStateRef = useRef<AppDatabaseSchema>(buildCurrentSchema());
   latestStateRef.current = buildCurrentSchema();
 
-  const recordDeletedId = (bucket: keyof DeletedIdsMap, id: string) => {
-    if (!id) return;
-    const current = deletedIdsRef.current[bucket] || [];
-    if (!current.includes(id)) {
-      deletedIdsRef.current = {
-        ...deletedIdsRef.current,
-        [bucket]: [...current, id].slice(-2000),
-      };
+  const triggerPublicSummarySync = async (overrides?: {
+    tahunAktif?: number;
+    pengaturanKas?: PengaturanKas;
+    transactions?: Transaction[];
+    pengumumanList?: PengumumanRT[];
+    wargaList?: Warga[];
+  }) => {
+    const snap = latestStateRef.current;
+    const user = currentUserRef.current;
+    if (!user || (user.role !== 'admin' && user.role !== 'server')) return;
+
+    const effectiveSettings = overrides?.pengaturanKas || snap.pengaturanKas;
+    const effectiveTahun = overrides?.tahunAktif || snap.tahunAktif;
+    const effectiveTxs = overrides?.transactions || snap.transactions;
+    const effectivePengumuman = overrides?.pengumumanList || snap.pengumumanList;
+    const effectiveWarga = overrides?.wargaList || snap.wargaList;
+    const rw = effectiveSettings?.profilRT?.namaRW || '05';
+    const defaultRT =
+      normalizeRTCode(effectiveSettings?.profilRT?.namaRT) ||
+      normalizeRTCode(user.rtScope) ||
+      '08';
+
+    if (user.role === 'server') {
+      const rtSet = new Set<string>([defaultRT]);
+      effectiveWarga.forEach((w) => {
+        const c = normalizeRTCode(w.rt);
+        if (c) rtSet.add(c);
+      });
+      for (const rtCode of rtSet) {
+        await syncRtPublicSummary({
+          rt: rtCode,
+          rw,
+          tahunAktif: effectiveTahun,
+          pengaturanKas: effectiveSettings,
+          transactions: effectiveTxs,
+          pengumumanList: effectivePengumuman,
+          wargaList: effectiveWarga,
+        });
+      }
+    } else {
+      await syncRtPublicSummary({
+        rt: defaultRT,
+        rw,
+        tahunAktif: effectiveTahun,
+        pengaturanKas: effectiveSettings,
+        transactions: effectiveTxs,
+        pengumumanList: effectivePengumuman,
+        wargaList: effectiveWarga,
+      });
     }
   };
 
-  const applyMergedStateToReact = (
-    nextState: AppDatabaseSchema,
-    source: 'init' | 'sse' | 'refresh',
-    isReset = false
-  ) => {
-    if (nextState.deletedIds) {
-      deletedIdsRef.current = {
-        warga: Array.from(new Set([...deletedIdsRef.current.warga, ...(nextState.deletedIds.warga || [])])),
-        transactions: Array.from(new Set([...deletedIdsRef.current.transactions, ...(nextState.deletedIds.transactions || [])])),
-        bantuan: Array.from(new Set([...deletedIdsRef.current.bantuan, ...(nextState.deletedIds.bantuan || [])])),
-        pengumuman: Array.from(new Set([...deletedIdsRef.current.pengumuman, ...(nextState.deletedIds.pengumuman || [])])),
-        dokumen: Array.from(new Set([...deletedIdsRef.current.dokumen, ...(nextState.deletedIds.dokumen || [])])),
-        adminAccounts: Array.from(new Set([...deletedIdsRef.current.adminAccounts, ...(nextState.deletedIds.adminAccounts || [])])),
-        laporanBulananRT: Array.from(new Set([...deletedIdsRef.current.laporanBulananRT, ...(nextState.deletedIds.laporanBulananRT || [])])),
-      };
-    }
-
-    const normalizedState: AppDatabaseSchema = {
-      ...nextState,
-      wargaList: dedupeEntityList(
-        Array.isArray(nextState.wargaList) ? nextState.wargaList : [],
-        deletedIdsRef.current.warga,
-        (a, b) => Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
-      ),
-      transactions: dedupeEntityList(
-        Array.isArray(nextState.transactions) ? nextState.transactions : [],
-        deletedIdsRef.current.transactions
-      ),
-      bantuanList: dedupeEntityList(
-        Array.isArray(nextState.bantuanList) ? nextState.bantuanList : [],
-        deletedIdsRef.current.bantuan
-      ),
-      pengumumanList: dedupeEntityList(
-        Array.isArray(nextState.pengumumanList) ? nextState.pengumumanList : [],
-        deletedIdsRef.current.pengumuman
-      ),
-      dokumenList: dedupeEntityList(
-        Array.isArray(nextState.dokumenList) ? nextState.dokumenList : [],
-        deletedIdsRef.current.dokumen
-      ),
-      adminAccounts: dedupeEntityList(
-        Array.isArray(nextState.adminAccounts) ? nextState.adminAccounts : [],
-        deletedIdsRef.current.adminAccounts,
-        (a, b) => a.username.toLowerCase() === b.username.toLowerCase()
-      ),
-      laporanBulananRT: dedupeEntityList(
-        Array.isArray(nextState.laporanBulananRT) ? nextState.laporanBulananRT : [],
-        deletedIdsRef.current.laporanBulananRT
-      ),
-    };
-
-    const currentHash = computeStateHash(latestStateRef.current);
-    const nextHash = computeStateHash(normalizedState);
-
-    if (typeof normalizedState.revision === 'number' && normalizedState.revision > lastServerRevisionRef.current) {
-      lastServerRevisionRef.current = normalizedState.revision;
-    }
-
-    if (source === 'init' || source === 'sse' || source === 'refresh') {
-      lastServerHashRef.current = nextHash;
-    }
-
-    if (!isReset && currentHash === nextHash) {
-      return;
-    }
-
-    latestStateRef.current = normalizedState;
-
-    if (normalizedState.tahunAktif) setTahunAktif(normalizedState.tahunAktif);
-    if (normalizedState.pengaturanKas) setPengaturanKas(normalizedState.pengaturanKas);
-    setWargaList(normalizedState.wargaList);
-    setTransactions(normalizedState.transactions);
-    setBantuanList(normalizedState.bantuanList);
-    setPengumumanList(normalizedState.pengumumanList);
-    setDokumenList(normalizedState.dokumenList);
-    setAdminAccounts(normalizedState.adminAccounts);
-    setLaporanBulananRT(normalizedState.laporanBulananRT);
-    if (
-      currentUser?.role === 'warga' &&
-      normalizedState.wargaList[0]?.pin
-    ) {
-      setCurrentPin(normalizedState.wargaList[0].pin);
-    }
-  };
-
-  // Bootstrap public settings, health status, and verify active session token on mount
+  // 1. Firebase Authentication Session Recovery + Connectivity Probe
   useEffect(() => {
     let active = true;
-    async function bootstrapPublicAndVerifyAuth() {
-      const [health, pub] = await Promise.all([checkServerHealth(), fetchPublicBootstrapInfo()]);
-      if (!active) return;
-      setServerConnected(health.connected);
-      if (!health.connected && health.message) {
-        setCloudError(health.message);
-      } else if (health.connected) {
-        setCloudError((prev) =>
-          prev && (prev.includes('server') || prev.includes('koneksi') || prev.includes('HTML') || prev.includes('HTTP'))
-            ? null
-            : prev
-        );
-      }
-      if (pub) {
-        if (pub.tahunAktif) setTahunAktif(pub.tahunAktif);
-        if (pub.pengaturanKas) setPengaturanKas(pub.pengaturanKas);
-      }
 
-      if (getAuthToken()) {
-        const sessionRes = await verifySavedSession();
-        if (!active) return;
-        if (sessionRes.unauthorized) {
-          saveActiveSession(null);
-          clearAuthToken();
-          setCurrentUser(null);
-          setIsLoginModalOpen(true);
-        } else if (sessionRes.ok && sessionRes.user) {
-          saveActiveSession(sessionRes.user);
-          setCurrentUser(sessionRes.user);
-          setIsLoginModalOpen(false);
-        }
-      }
+    try {
+      localStorage.removeItem('kaswarga_auth_token_v1');
+      localStorage.removeItem('kaswarga_active_session_v1');
+      localStorage.removeItem('kaswarga_pending_cloud_sync_v1');
+    } catch {
+      // ignore storage errors
     }
-    bootstrapPublicAndVerifyAuth();
+
+    testFirestoreConnection().then((diag) => {
+      if (!active) return;
+      setServerConnected(diag.connected);
+      if (!diag.connected && diag.message) {
+        setCloudError(diag.message);
+      }
+    });
 
     const healthCheckInterval = setInterval(async () => {
       if (!active) return;
-      const health = await checkServerHealth();
+      const diag = await testFirestoreConnection();
       if (!active) return;
-      setServerConnected(health.connected);
-      if (health.connected) {
+      setServerConnected(diag.connected);
+      if (diag.connected) {
         setCloudError((prev) =>
-          prev && (prev.includes('server') || prev.includes('koneksi') || prev.includes('HTML') || prev.includes('HTTP'))
+          prev && (prev.includes('Firestore') || prev.includes('koneksi') || prev.includes('Firebase'))
             ? null
             : prev
         );
-      } else if (health.message) {
-        setCloudError(health.message);
+      } else if (diag.message) {
+        setCloudError(diag.message);
       }
-    }, 15000);
+    }, 30000);
+
+    const unsubscribeAuth = onAuthStateChanged(auth, async (fbUser) => {
+      if (!active) return;
+      if (!fbUser) {
+        setCurrentUser(null);
+        setIsLoginModalOpen(true);
+        setDataLoadedReady(false);
+        setSseConnected(false);
+        setWargaList([]);
+        setTransactions([]);
+        setBantuanList([]);
+        setPengumumanList([]);
+        setDokumenList([]);
+        setAdminAccounts([]);
+        setServerAdminAccounts([]);
+        setLaporanBulananRT([]);
+        setAuthReady(true);
+        return;
+      }
+
+      const resolved = await resolveCurrentFirebaseUser(fbUser);
+      if (!active) return;
+
+      if (resolved) {
+        const hadUser = Boolean(currentUserRef.current);
+        const roleChanged = currentUserRef.current?.role !== resolved.role;
+        setCurrentUser(resolved);
+        setIsLoginModalOpen(false);
+        setServerConnected(true);
+        if (!hadUser || roleChanged) {
+          setCurrentView(
+            resolved.role === 'server'
+              ? 'server-kontrol'
+              : resolved.role === 'warga'
+              ? 'dasbor-warga'
+              : 'beranda'
+          );
+        }
+      }
+      setAuthReady(true);
+    });
 
     return () => {
       active = false;
       clearInterval(healthCheckInterval);
+      unsubscribeAuth();
     };
   }, []);
 
-  // Load Central SQL Data + Legacy HP Admin Migration + Live SSE Subscription + 2.5s Revision Polling
+  // 2. Real-Time Cloud Firestore Subscription + One-Time Cloud SQL (50 KK) & Local Cache Migration
   useEffect(() => {
-    if (!currentUser || !getAuthToken()) {
-      isLoadedRef.current = false;
+    if (!currentUser || !auth.currentUser) {
       setDataLoadedReady(false);
       setSseConnected(false);
+      migrationCheckedRef.current = false;
       return;
     }
 
     let active = true;
-    isLoadedRef.current = false;
     setDataLoadedReady(false);
+    migrationCheckedRef.current = false;
 
-    async function initAuthenticatedData() {
-      try {
-        const snapRes = await fetchServerSnapshotWithStatus();
+    const unsubFirestore = subscribeFirestoreState(
+      currentUser,
+      (partial, isFirstReady) => {
         if (!active) return;
 
-        if (snapRes.status === 401 || snapRes.status === 403) {
-          saveActiveSession(null);
-          clearAuthToken();
-          setCurrentUser(null);
-          setIsLoginModalOpen(true);
-          return;
-        }
+        const nextSnapshot: AppDatabaseSchema = { ...latestStateRef.current };
 
-        if (!snapRes.ok || !snapRes.data) {
-          setServerConnected(false);
-          setSyncStatus('offline');
-          setCloudError(snapRes.message || 'Gagal mengambil data dari Database Server Pusat.');
-          return;
-        }
-
-        setServerConnected(true);
-        setSyncStatus('synced');
-        setCloudError(null);
-
-        let workingData = snapRes.data;
-        if (typeof workingData.revision === 'number') {
-          lastServerRevisionRef.current = workingData.revision;
-        }
-        setServerAdminAccounts(
-          Array.isArray(workingData.adminAccounts) ? workingData.adminAccounts : []
-        );
-        applyMergedStateToReact(workingData, 'init', true);
-
-        // If logged in as Admin/Server and there is legacy pre-migration data in localStorage, migrate it safely to SQL once!
-        if (currentUser && (currentUser.role === 'admin' || currentUser.role === 'server')) {
-          const legacyLocal = readLegacyLocalCacheForMigration();
-          const hasLegacyRecords = Boolean(
-            legacyLocal &&
-              ((Array.isArray(legacyLocal.wargaList) && legacyLocal.wargaList.length > 0) ||
-                (Array.isArray(legacyLocal.transactions) && legacyLocal.transactions.length > 0) ||
-                (Array.isArray(legacyLocal.bantuanList) && legacyLocal.bantuanList.length > 0) ||
-                (Array.isArray(legacyLocal.pengumumanList) && legacyLocal.pengumumanList.length > 0) ||
-                (Array.isArray(legacyLocal.dokumenList) && legacyLocal.dokumenList.length > 0))
+        if (partial.wargaList !== undefined) {
+          const normalizedWarga = dedupeEntityList(
+            partial.wargaList,
+            [],
+            (a, b) => Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
           );
-
-          if (hasLegacyRecords && legacyLocal) {
-            const migRes = await migrateLegacyLocalDataToServer(legacyLocal);
-            if (active && migRes.ok && migRes.serverData) {
-              workingData = migRes.serverData;
-              if (typeof workingData.revision === 'number') {
-                lastServerRevisionRef.current = workingData.revision;
-              }
-              setServerAdminAccounts(
-                Array.isArray(workingData.adminAccounts) ? workingData.adminAccounts : []
-              );
-              applyMergedStateToReact(workingData, 'refresh', true);
-              clearLegacyLocalCache();
-              setRolloverNotice(
-                `Migrasi otomatis selesai! Data warga (${workingData.wargaList.length} KK) dan kas berhasil dipindahkan ke Database Server Pusat.`
-              );
-              setTimeout(() => setRolloverNotice(null), 7000);
-            }
-          } else if (legacyLocal) {
-            // Empty/redundant cache from old build -> remove so app strictly relies on Central DB
-            clearLegacyLocalCache();
+          nextSnapshot.wargaList = normalizedWarga;
+          setWargaList(normalizedWarga);
+          if (currentUser.role === 'warga' && normalizedWarga[0]?.pin) {
+            setCurrentPin(normalizedWarga[0].pin);
           }
         }
-      } catch (err: any) {
-        if (active) {
-          setServerConnected(false);
-          setSyncStatus('offline');
-          setCloudError(err?.message || 'Gagal memuat data dari database server.');
+        if (partial.transactions !== undefined) {
+          const normalizedTx = dedupeEntityList(partial.transactions, []);
+          nextSnapshot.transactions = normalizedTx;
+          setTransactions(normalizedTx);
         }
-      } finally {
-        if (active) {
-          isLoadedRef.current = true;
-          setDataLoadedReady(true);
+        if (partial.bantuanList !== undefined) {
+          const normalizedBantuan = dedupeEntityList(partial.bantuanList, []);
+          nextSnapshot.bantuanList = normalizedBantuan;
+          setBantuanList(normalizedBantuan);
         }
-      }
-    }
-
-    initAuthenticatedData();
-
-    const handleRefreshFromServer = async () => {
-      if (!active || !isLoadedRef.current || !getAuthToken()) return;
-      const snapRes = await fetchServerSnapshotWithStatus();
-      if (!active) return;
-      if (snapRes.status === 401 || snapRes.status === 403) {
-        saveActiveSession(null);
-        clearAuthToken();
-        setCurrentUser(null);
-        setIsLoginModalOpen(true);
-        return;
-      }
-      if (!snapRes.ok || !snapRes.data) {
-        setServerConnected(false);
-        return;
-      }
-      const remoteData = snapRes.data;
-      setServerConnected(true);
-      if (typeof remoteData.revision === 'number') {
-        lastServerRevisionRef.current = Math.max(lastServerRevisionRef.current, remoteData.revision);
-      }
-      setServerAdminAccounts(Array.isArray(remoteData.adminAccounts) ? remoteData.adminAccounts : []);
-      const isAdminOrServer = currentUser?.role === 'admin' || currentUser?.role === 'server';
-      if (isAdminOrServer && computeStateHash(latestStateRef.current) !== lastServerHashRef.current) {
-        const merged = mergeDatabaseStates(
-          remoteData,
-          latestStateRef.current,
-          deletedIdsRef.current
-        );
-        applyMergedStateToReact(merged, 'refresh');
-      } else {
-        applyMergedStateToReact(remoteData, 'refresh', true);
-      }
-    };
-
-    const unsubscribeStream = subscribeServerStream(
-      (remoteData, isReset) => {
-        if (!active || !isLoadedRef.current) return;
-        setServerConnected(true);
-        if (typeof remoteData.revision === 'number') {
-          lastServerRevisionRef.current = remoteData.revision;
+        if (partial.pengumumanList !== undefined) {
+          const normalizedPengumuman = dedupeEntityList(partial.pengumumanList, []);
+          nextSnapshot.pengumumanList = normalizedPengumuman;
+          setPengumumanList(normalizedPengumuman);
         }
-        setServerAdminAccounts(Array.isArray(remoteData.adminAccounts) ? remoteData.adminAccounts : []);
-        if (isReset) {
-          deletedIdsRef.current = { ...EMPTY_DELETED_IDS };
-          applyMergedStateToReact(remoteData, 'sse', true);
-          return;
+        if (partial.dokumenList !== undefined) {
+          const normalizedDokumen = dedupeEntityList(partial.dokumenList, []);
+          nextSnapshot.dokumenList = normalizedDokumen;
+          setDokumenList(normalizedDokumen);
         }
-        const isAdminOrServer = currentUser?.role === 'admin' || currentUser?.role === 'server';
-        if (isAdminOrServer && computeStateHash(latestStateRef.current) !== lastServerHashRef.current) {
-          const merged = mergeDatabaseStates(
-            remoteData,
-            latestStateRef.current,
-            deletedIdsRef.current
+        if (partial.adminAccounts !== undefined) {
+          const normalizedAdmins = dedupeEntityList(
+            partial.adminAccounts,
+            [],
+            (a, b) => a.username.toLowerCase() === b.username.toLowerCase()
           );
-          applyMergedStateToReact(merged, 'sse');
-        } else {
-          applyMergedStateToReact(remoteData, 'sse', true);
+          nextSnapshot.adminAccounts = normalizedAdmins;
+          setAdminAccounts(normalizedAdmins);
+          setServerAdminAccounts(normalizedAdmins);
+        }
+        if (partial.laporanBulananRT !== undefined) {
+          const normalizedLap = dedupeEntityList(partial.laporanBulananRT, []);
+          nextSnapshot.laporanBulananRT = normalizedLap;
+          setLaporanBulananRT(normalizedLap);
+        }
+        if (partial.tahunAktif !== undefined) {
+          nextSnapshot.tahunAktif = partial.tahunAktif;
+          setTahunAktif(partial.tahunAktif);
+        }
+        if (partial.pengaturanKas !== undefined) {
+          nextSnapshot.pengaturanKas = partial.pengaturanKas;
+          setPengaturanKas(partial.pengaturanKas);
+        }
+
+        latestStateRef.current = nextSnapshot;
+
+        if (isFirstReady) {
+          setDataLoadedReady(true);
+          setSseConnected(true);
+          setServerConnected(true);
+          setSyncStatus('synced');
+
+          // Auto-migrate existing Cloud SQL (50 KK) / legacy localStorage once when Firestore is empty
+          if (
+            (currentUser.role === 'admin' || currentUser.role === 'server') &&
+            !migrationCheckedRef.current &&
+            !migrationInFlightRef.current
+          ) {
+            migrationCheckedRef.current = true;
+            if (nextSnapshot.wargaList.length === 0) {
+              migrationInFlightRef.current = true;
+              (async () => {
+                try {
+                  const [cloudSqlSnap, legacySnap] = await Promise.all([
+                    fetchCloudSqlMigrationSnapshot(),
+                    Promise.resolve(readLegacyLocalCacheForMigration()),
+                  ]);
+                  if (!active) return;
+
+                  let mergedMig: AppDatabaseSchema | null = null;
+                  if (cloudSqlSnap && legacySnap) {
+                    mergedMig = mergeDatabaseStates(cloudSqlSnap, legacySnap);
+                  } else if (cloudSqlSnap) {
+                    mergedMig = cloudSqlSnap;
+                  } else if (legacySnap) {
+                    mergedMig = legacySnap;
+                  }
+
+                  const hasData = Boolean(
+                    mergedMig &&
+                      ((mergedMig.wargaList?.length || 0) > 0 ||
+                        (mergedMig.transactions?.length || 0) > 0 ||
+                        (mergedMig.bantuanList?.length || 0) > 0 ||
+                        (mergedMig.pengumumanList?.length || 0) > 0 ||
+                        (mergedMig.dokumenList?.length || 0) > 0)
+                  );
+
+                  if (hasData && mergedMig) {
+                    const migRes = await migrateSnapshotToFirestore(mergedMig);
+                    if (active && migRes.ok) {
+                      clearLegacyLocalCache();
+                      setRolloverNotice(
+                        `Sinkronisasi awal Cloud Firestore selesai! ${migRes.migratedWarga} KK & ${migRes.migratedTx} transaksi lama berhasil dipindahkan ke Firebase.`
+                      );
+                      setTimeout(() => setRolloverNotice(null), 8000);
+                    }
+                  } else if (legacySnap) {
+                    clearLegacyLocalCache();
+                  }
+                } catch (err) {
+                  console.warn('Auto-migration warning:', err);
+                } finally {
+                  migrationInFlightRef.current = false;
+                }
+              })();
+            } else {
+              // Firestore already populated; drop old local cache so Firestore stays sole source of truth
+              clearLegacyLocalCache();
+            }
+          }
         }
       },
-      (connected) => {
-        if (active) setSseConnected(connected);
+      (connected, errMsg) => {
+        if (!active) return;
+        setServerConnected(connected);
+        setSseConnected(connected);
+        setSyncStatus(connected ? 'synced' : 'offline');
+        if (errMsg) setCloudError(errMsg);
+        else if (connected) setCloudError(null);
       }
     );
 
-    const pollInterval = setInterval(async () => {
-      if (!active || !isLoadedRef.current) return;
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      const status = await checkServerRevision(lastServerRevisionRef.current);
-      if (!active || !status) return;
-      setServerConnected(true);
-      if (status.hasData && (status.changed || lastServerRevisionRef.current === 0)) {
-        await handleRefreshFromServer();
-      }
-    }, 2500);
-
-    const flushPendingIfHidden = () => {
-      if (!isLoadedRef.current) return;
-      if (currentUser?.role !== 'admin' && currentUser?.role !== 'server') return;
-      const currentSnapshot = latestStateRef.current;
-      if (computeStateHash(currentSnapshot) !== lastServerHashRef.current) {
-        flushSaveAppDataKeepalive(currentSnapshot, deletedIdsRef.current);
-      }
-    };
-
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        handleRefreshFromServer();
-      } else if (document.visibilityState === 'hidden') {
-        flushPendingIfHidden();
-      }
-    };
-
-    window.addEventListener('focus', handleRefreshFromServer);
-    window.addEventListener('pageshow', handleRefreshFromServer);
-    window.addEventListener('online', handleRefreshFromServer);
-    window.addEventListener('pagehide', flushPendingIfHidden);
-    window.addEventListener('beforeunload', flushPendingIfHidden);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-
     return () => {
       active = false;
-      clearInterval(pollInterval);
-      unsubscribeStream();
-      window.removeEventListener('focus', handleRefreshFromServer);
-      window.removeEventListener('pageshow', handleRefreshFromServer);
-      window.removeEventListener('online', handleRefreshFromServer);
-      window.removeEventListener('pagehide', flushPendingIfHidden);
-      window.removeEventListener('beforeunload', flushPendingIfHidden);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
+      unsubFirestore();
     };
   }, [currentUser?.role, currentUser?.username, currentUser?.noKK, currentUser?.wargaId]);
 
-  // Auto-Save for Admin/Server when state changes -> pushes straight to Central SQL Server
+  // 3. Background Firebase Auth Provisioning for Warga KK missing linkedUid
   useEffect(() => {
-    if (!isLoadedRef.current || !dataLoadedReady) return;
-    if (bulkImportInFlightRef.current) return;
-    if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'server')) return;
+    if (!dataLoadedReady || !currentUser) return;
+    if (currentUser.role !== 'admin' && currentUser.role !== 'server') return;
 
-    const stateToPersist = buildCurrentSchema();
-    const currentHash = computeStateHash(stateToPersist);
-    if (currentHash === lastServerHashRef.current) {
-      setSyncStatus('synced');
-      return;
-    }
+    const needsProvisioning = wargaList.some(
+      (w: any) => !w.linkedUid && String(w.noKK || '').replace(/\D/g, '').length >= 6
+    );
+    if (!needsProvisioning) return;
 
-    setSyncStatus('saving');
-    const timer = setTimeout(async () => {
-      if (bulkImportInFlightRef.current) return;
-      const res = await saveAppData(stateToPersist, {
-        deletedIds: deletedIdsRef.current,
-      });
-
-      if (res.ok) {
-        lastServerHashRef.current = currentHash;
-        setServerConnected(true);
-        setSyncStatus('synced');
-        setCloudError(null);
-        if (res.serverData) {
-          if (typeof res.serverData.revision === 'number') {
-            lastServerRevisionRef.current = Math.max(
-              lastServerRevisionRef.current,
-              res.serverData.revision
-            );
-          }
-          setServerAdminAccounts(
-            Array.isArray(res.serverData.adminAccounts) ? res.serverData.adminAccounts : []
-          );
-          const mergedBack = mergeDatabaseStates(
-            res.serverData,
-            latestStateRef.current,
-            deletedIdsRef.current
-          );
-          if (computeStateHash(mergedBack) !== computeStateHash(latestStateRef.current)) {
-            applyMergedStateToReact(mergedBack, 'sse');
-          }
-        }
-      } else {
-        setServerConnected(false);
-        setSyncStatus('offline');
-        setCloudError(res.message || 'Gagal menyinkronkan data ke Database Server Pusat.');
-      }
-    }, 120);
+    const timer = setTimeout(() => {
+      provisionWargaAuthAccounts(wargaList).catch(() => {});
+    }, 1000);
 
     return () => clearTimeout(timer);
-  }, [
-    dataLoadedReady,
-    currentUser,
-    tahunAktif,
-    pengaturanKas,
-    wargaList,
-    transactions,
-    bantuanList,
-    pengumumanList,
-    dokumenList,
-    adminAccounts,
-    laporanBulananRT,
-  ]);
-
-  // Automatic Background Retry Loop for Admin/Server if a save failed while offline
-  useEffect(() => {
-    if (!dataLoadedReady) return;
-    if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'server')) return;
-
-    const retryInterval = setInterval(async () => {
-      if (!isLoadedRef.current) return;
-      const snapshot = latestStateRef.current;
-      const currentHash = computeStateHash(snapshot);
-      const needsServerRetry = currentHash !== lastServerHashRef.current;
-
-      if (!needsServerRetry && syncStatus !== 'offline') return;
-
-      const res = await saveAppData(snapshot, { deletedIds: deletedIdsRef.current });
-      if (res.ok) {
-        lastServerHashRef.current = computeStateHash(latestStateRef.current);
-        setServerConnected(true);
-        setSyncStatus('synced');
-        setCloudError(null);
-        if (res.serverData) {
-          if (typeof res.serverData.revision === 'number') {
-            lastServerRevisionRef.current = Math.max(
-              lastServerRevisionRef.current,
-              res.serverData.revision
-            );
-          }
-          setServerAdminAccounts(
-            Array.isArray(res.serverData.adminAccounts) ? res.serverData.adminAccounts : []
-          );
-          const mergedBack = mergeDatabaseStates(
-            res.serverData,
-            latestStateRef.current,
-            deletedIdsRef.current
-          );
-          if (computeStateHash(mergedBack) !== computeStateHash(latestStateRef.current)) {
-            applyMergedStateToReact(mergedBack, 'sse');
-          }
-        }
-      } else {
-        setServerConnected(false);
-        setSyncStatus('offline');
-        if (res.message) setCloudError(res.message);
-      }
-    }, 4000);
-
-    return () => clearInterval(retryInterval);
-  }, [dataLoadedReady, syncStatus, currentUser]);
+  }, [dataLoadedReady, currentUser?.role, wargaList]);
 
   const handleForceSyncNow = async () => {
     setCloudSyncBusy(true);
     setCloudError(null);
     try {
-      const health = await checkServerHealth();
-      setServerConnected(health.connected);
-      if (!health.connected) {
+      const diag = await testFirestoreConnection();
+      setServerConnected(diag.connected);
+      if (!diag.connected) {
         setSyncStatus('offline');
-        setCloudError(health.message || 'Tidak dapat terhubung ke Database Server Pusat.');
+        setSseConnected(false);
+        setCloudError(diag.message || 'Tidak dapat terhubung ke Cloud Firestore.');
         return;
       }
 
-      if (!getAuthToken()) {
-        const pub = await fetchPublicBootstrapInfo();
-        if (pub?.pengaturanKas) setPengaturanKas(pub.pengaturanKas);
-        return;
-      }
-
-      const snapRes = await fetchServerSnapshotWithStatus();
-      if (!snapRes.ok || !snapRes.data) {
-        setSyncStatus('offline');
-        setCloudError(snapRes.message || 'Gagal menyinkronkan data dari server.');
-        return;
-      }
-
-      const remoteData = snapRes.data;
-      setServerAdminAccounts(Array.isArray(remoteData.adminAccounts) ? remoteData.adminAccounts : []);
-      const isAdminOrServer = currentUser?.role === 'admin' || currentUser?.role === 'server';
-
-      if (isAdminOrServer) {
-        let working = mergeDatabaseStates(remoteData, latestStateRef.current, deletedIdsRef.current);
-        applyMergedStateToReact(working, 'refresh');
-        const res = await saveAppData(working, { deletedIds: deletedIdsRef.current });
-        if (!res.ok) {
-          setSyncStatus('offline');
-          setCloudError(res.message || 'Gagal mengirim pembaruan ke server.');
-          return;
+      if (auth.currentUser) {
+        await claimAndSyncManifestDocs();
+        if (
+          (currentUserRef.current?.role === 'admin' || currentUserRef.current?.role === 'server') &&
+          latestStateRef.current.wargaList.length === 0
+        ) {
+          const cloudSqlSnap = await fetchCloudSqlMigrationSnapshot();
+          if (cloudSqlSnap && cloudSqlSnap.wargaList.length > 0) {
+            await migrateSnapshotToFirestore(cloudSqlSnap);
+          }
         }
-        if (res.serverData) {
-          setServerAdminAccounts(
-            Array.isArray(res.serverData.adminAccounts) ? res.serverData.adminAccounts : []
-          );
-          const mergedAfter = mergeDatabaseStates(res.serverData, working, deletedIdsRef.current);
-          applyMergedStateToReact(mergedAfter, 'refresh');
-          lastServerHashRef.current = computeStateHash(mergedAfter);
-        }
-      } else {
-        applyMergedStateToReact(remoteData, 'refresh', true);
+        await triggerPublicSummarySync();
       }
 
       setSyncStatus('synced');
+      setSseConnected(true);
       setServerConnected(true);
     } catch (err: any) {
       setServerConnected(false);
       setSyncStatus('offline');
-      setCloudError(err?.message || 'Gagal menyinkronkan data.');
+      setCloudError(err?.message || 'Gagal menyinkronkan Cloud Firestore.');
     } finally {
       setCloudSyncBusy(false);
     }
   };
 
-  // Explicit Admin Account Registration & Sync to Server
+  // Explicit Admin Account Sync to Cloud Firestore
   const handleSyncAdminAccountToServer = async (
-    overrideAccount?: AdminRTAccount,
-    securityPin?: string
+    overrideAccount?: AdminRTAccount
   ): Promise<{ ok: boolean; message?: string; account?: AdminRTAccount; user?: AuthUser }> => {
     setAdminSyncBusy(true);
     setCloudError(null);
@@ -956,57 +703,29 @@ export default function App() {
         updatedAt: nowIso,
       };
 
-      deletedIdsRef.current = {
-        ...deletedIdsRef.current,
-        adminAccounts: deletedIdsRef.current.adminAccounts.filter(
-          (id) =>
-            id !== stampedAccount.id &&
-            !(stampedAccount.username.toLowerCase() === 'admin' && id === 'adm_rt08')
-        ),
-      };
-
-      const legacyLocal = readLegacyLocalCacheForMigration();
-      const syncDataPayload = legacyLocal
-        ? mergeDatabaseStates(currentSnapshot, legacyLocal, deletedIdsRef.current)
-        : currentSnapshot;
-
-      const res = await syncAdminAccountToServer({
-        account: stampedAccount,
-        syncData: syncDataPayload,
-        deletedIds: deletedIdsRef.current,
-        securityPin,
-      });
-
+      const res = await saveAdminAccountDoc(stampedAccount, auth.currentUser?.uid);
       if (!res.ok) {
-        setCloudError(res.message || 'Gagal menyinkronkan akun admin ke server.');
+        setCloudError(res.message || 'Gagal menyinkronkan akun admin ke Cloud Firestore.');
         return { ok: false, message: res.message };
       }
 
-      clearLegacyLocalCache();
-
-      if (res.serverData) {
-        setServerAdminAccounts(
-          Array.isArray(res.serverData.adminAccounts) ? res.serverData.adminAccounts : []
-        );
-        applyMergedStateToReact(res.serverData, 'refresh');
-        lastServerHashRef.current = computeStateHash(res.serverData);
-        if (typeof res.serverData.revision === 'number') {
-          lastServerRevisionRef.current = Math.max(
-            lastServerRevisionRef.current,
-            res.serverData.revision
-          );
-        }
+      await claimAndSyncManifestDocs();
+      const legacyLocal = readLegacyLocalCacheForMigration();
+      if (legacyLocal && (legacyLocal.wargaList?.length || legacyLocal.transactions?.length)) {
+        await migrateSnapshotToFirestore(legacyLocal);
+        clearLegacyLocalCache();
       }
 
       setServerConnected(true);
+      setSseConnected(true);
       setSyncStatus('synced');
       setRolloverNotice(
-        `Akun Admin "${stampedAccount.username}" & seluruh data (${(res.serverData?.wargaList || currentSnapshot.wargaList).length} KK) berhasil terdaftar & tersinkron ke Database Server!`
+        `Akun Admin "${stampedAccount.username}" & seluruh data tersinkron real-time ke Cloud Firestore!`
       );
       setTimeout(() => setRolloverNotice(null), 6000);
-      return { ok: true, message: res.message, account: res.account || stampedAccount, user: res.user };
+      return { ok: true, account: stampedAccount, user: currentUser || undefined };
     } catch (err: any) {
-      const msg = err?.message || 'Gagal menyinkronkan akun admin ke server.';
+      const msg = err?.message || 'Gagal menyinkronkan akun admin ke Cloud Firestore.';
       setCloudError(msg);
       return { ok: false, message: msg };
     } finally {
@@ -1073,169 +792,218 @@ export default function App() {
     .reduce((sum, t) => sum + t.nominal, 0);
 
   // Annual Rollover Handler (Pergantian Tahun Otomatis - Saldo Berlanjut Tanpa Dikosongkan)
-  const handleSwitchTahunAktif = (newYear: number) => {
+  const handleSwitchTahunAktif = async (newYear: number) => {
     if (newYear === tahunAktif) return;
 
-    // Calculate current accumulated balance
     const currentEndSaldoUmum = totalKasUmumMasuk - totalKasUmumKeluar;
     const currentEndSaldoKematian = saldoKasKematianBerjalan;
+    const nowIso = new Date().toISOString();
 
-    // If advancing to a future year, create a transition record without wiping balances
     if (newYear > tahunAktif) {
-      const nowIso = new Date().toISOString();
-      // Archive warga payment status for the current year, and set up the new year
-      setWargaList((prevWarga) =>
-        prevWarga.map((w) => {
-          const priorHistory = w.riwayatIuranPerTahun || {};
-          const currentYearHistory = priorHistory[tahunAktif] || w.riwayatIuran || {};
-          const currentYearStatus = (w.statusIuranPerTahun && w.statusIuranPerTahun[tahunAktif]) || w.statusIuran;
+      const updatedWarga = latestStateRef.current.wargaList.map((w) => {
+        const priorHistory = w.riwayatIuranPerTahun || {};
+        const currentYearHistory = priorHistory[tahunAktif] || w.riwayatIuran || {};
+        const currentYearStatus =
+          (w.statusIuranPerTahun && w.statusIuranPerTahun[tahunAktif]) || w.statusIuran;
 
-          const updatedPerTahun: Record<number, Record<number, boolean>> = {
-            ...priorHistory,
-            [tahunAktif]: currentYearHistory,
-          };
+        const updatedPerTahun: Record<number, Record<number, boolean>> = {
+          ...priorHistory,
+          [tahunAktif]: currentYearHistory,
+        };
 
-          const updatedStatusPerTahun: Record<number, 'Sudah' | 'Belum'> = {
-            ...(w.statusIuranPerTahun || {}),
-            [tahunAktif]: currentYearStatus as 'Sudah' | 'Belum',
-          };
+        const updatedStatusPerTahun: Record<number, 'Sudah' | 'Belum'> = {
+          ...(w.statusIuranPerTahun || {}),
+          [tahunAktif]: currentYearStatus as 'Sudah' | 'Belum',
+        };
 
-          // Check if already paid in the new year
-          const newYearPaid: 'Sudah' | 'Belum' = updatedStatusPerTahun[newYear] || 'Belum';
+        const newYearPaid: 'Sudah' | 'Belum' = updatedStatusPerTahun[newYear] || 'Belum';
 
-          return {
-            ...w,
-            statusIuran: newYearPaid,
-            riwayatIuranPerTahun: updatedPerTahun,
-            statusIuranPerTahun: updatedStatusPerTahun,
-            riwayatIuran: updatedPerTahun[newYear] || {},
-            updatedAt: nowIso,
-          };
-        })
-      );
+        return {
+          ...w,
+          statusIuran: newYearPaid,
+          riwayatIuranPerTahun: updatedPerTahun,
+          statusIuranPerTahun: updatedStatusPerTahun,
+          riwayatIuran: updatedPerTahun[newYear] || {},
+          updatedAt: nowIso,
+        };
+      });
 
-      // Carry forward the closing balance of the past year into the new year
-      setPengaturanKas((prev) => ({
-        ...prev,
+      const nextPengaturan: PengaturanKas = {
+        ...latestStateRef.current.pengaturanKas,
         tahunAktif: newYear,
         saldoAwalKasUmum: currentEndSaldoUmum,
         saldoAwalKasKematian: currentEndSaldoKematian,
         keteranganSaldoAwal: `Pindahan Saldo Akhir Tahun ${tahunAktif} ke Tahun ${newYear} (Otomatis Berlanjut)`,
         tanggalSaldoAwal: `${newYear}-01-01`,
         updatedAt: nowIso,
-      }));
+      };
 
+      setWargaList(updatedWarga);
+      setPengaturanKas(nextPengaturan);
+      setTahunAktif(newYear);
       setRolloverNotice(
         `Pergantian Tahun ${newYear} Berhasil! Saldo kas berlanjut otomatis (Rp ${currentEndSaldoUmum.toLocaleString('id-ID')}). Status iuran tahun ${newYear} siap dicatat.`
       );
-    } else {
-      // Switching to view past year archives
-      setWargaList((prevWarga) =>
-        prevWarga.map((w) => {
-          const pastStatus = (w.statusIuranPerTahun && w.statusIuranPerTahun[newYear]) || 'Sudah';
-          const pastHistory = (w.riwayatIuranPerTahun && w.riwayatIuranPerTahun[newYear]) || {};
-          return {
-            ...w,
-            statusIuran: pastStatus,
-            riwayatIuran: pastHistory,
-          };
-        })
-      );
 
+      setSyncStatus('saving');
+      await Promise.all([
+        saveSettingsDoc(nextPengaturan, newYear),
+        bulkSaveWargaAndBantuanDocs(updatedWarga, []),
+      ]);
+      await triggerPublicSummarySync({
+        tahunAktif: newYear,
+        pengaturanKas: nextPengaturan,
+        wargaList: updatedWarga,
+      });
+      setSyncStatus('synced');
+    } else {
+      const updatedWargaView = latestStateRef.current.wargaList.map((w) => {
+        const pastStatus = (w.statusIuranPerTahun && w.statusIuranPerTahun[newYear]) || 'Sudah';
+        const pastHistory = (w.riwayatIuranPerTahun && w.riwayatIuranPerTahun[newYear]) || {};
+        return {
+          ...w,
+          statusIuran: pastStatus,
+          riwayatIuran: pastHistory,
+        };
+      });
+      const nextPengaturan: PengaturanKas = {
+        ...latestStateRef.current.pengaturanKas,
+        tahunAktif: newYear,
+        updatedAt: nowIso,
+      };
+      setWargaList(updatedWargaView);
+      setPengaturanKas(nextPengaturan);
+      setTahunAktif(newYear);
       setRolloverNotice(`Melihat arsip pembukuan tahun ${newYear}.`);
+
+      await saveSettingsDoc(nextPengaturan, newYear);
+      await triggerPublicSummarySync({
+        tahunAktif: newYear,
+        pengaturanKas: nextPengaturan,
+      });
     }
 
-    setTahunAktif(newYear);
     setTimeout(() => setRolloverNotice(null), 5000);
   };
 
   // Handlers for Government Aid
   const handleAddBantuan = async (b: Omit<BantuanPemerintah, 'id'>) => {
     const nowIso = new Date().toISOString();
-    const newItem: BantuanPemerintah = { ...b, id: 'b' + Date.now(), updatedAt: nowIso };
+    const newItem: BantuanPemerintah = {
+      ...b,
+      id: toValidDocId('b_' + Date.now(), 'b'),
+      updatedAt: nowIso,
+    };
     setBantuanList((prev) => [newItem, ...prev]);
-    const res = await saveBantuanOnServer(newItem);
+    setSyncStatus('saving');
+    const res = await saveBantuanDoc(newItem);
     if (!res.ok) {
       setSyncStatus('offline');
-      setCloudError(res.message || 'Gagal menyinkronkan data bantuan ke server.');
+      setCloudError(res.message || 'Gagal menyinkronkan data bantuan ke Cloud Firestore.');
     } else {
       setServerConnected(true);
+      setSyncStatus('synced');
     }
   };
 
   const handleUpdateStatusBantuan = async (id: string, newStatus: BantuanPemerintah['status']) => {
     const nowIso = new Date().toISOString();
-    const existing = bantuanList.find((item) => item.id === id);
+    const existing = latestStateRef.current.bantuanList.find((item) => item.id === id);
     const updatedItem = existing ? { ...existing, status: newStatus, updatedAt: nowIso } : null;
     setBantuanList((prev) =>
       prev.map((item) => (item.id === id ? { ...item, status: newStatus, updatedAt: nowIso } : item))
     );
     if (updatedItem) {
-      const res = await saveBantuanOnServer(updatedItem);
+      setSyncStatus('saving');
+      const res = await saveBantuanDoc(updatedItem);
       if (!res.ok) {
         setSyncStatus('offline');
-        setCloudError(res.message || 'Gagal memperbarui status bantuan di server.');
+        setCloudError(res.message || 'Gagal memperbarui status bantuan di Cloud Firestore.');
       } else {
         setServerConnected(true);
+        setSyncStatus('synced');
       }
     }
   };
 
   const handleDeleteBantuan = async (id: string) => {
-    recordDeletedId('bantuan', id);
     setBantuanList((prev) => prev.filter((b) => b.id !== id));
-    const res = await deleteBantuanOnServer(id);
+    setSyncStatus('saving');
+    const res = await deleteBantuanDoc(id);
     if (!res.ok) {
       setSyncStatus('offline');
-      setCloudError(res.message || 'Gagal menghapus data bantuan di server.');
+      setCloudError(res.message || 'Gagal menghapus data bantuan di Cloud Firestore.');
     } else {
       setServerConnected(true);
+      setSyncStatus('synced');
     }
   };
 
   // Handlers for PDF Documents
-  const handleUploadDokumen = async (doc: Omit<DokumenPdfWarga, 'id'>) => {
+  const handleUploadDokumen = async (docItem: Omit<DokumenPdfWarga, 'id'>) => {
     const nowIso = new Date().toISOString();
-    const newDoc: DokumenPdfWarga = { ...doc, id: 'doc' + Date.now(), updatedAt: nowIso };
+    const newDoc: DokumenPdfWarga = {
+      ...docItem,
+      id: toValidDocId('doc_' + Date.now(), 'doc'),
+      updatedAt: nowIso,
+    };
     setDokumenList((prev) => [newDoc, ...prev]);
-    const res = await saveDokumenOnServer(newDoc);
+    setSyncStatus('saving');
+    const res = await saveDokumenDoc(newDoc);
     if (!res.ok) {
       setSyncStatus('offline');
-      setCloudError(res.message || 'Gagal menyinkronkan dokumen PDF ke server.');
+      setCloudError(res.message || 'Gagal menyinkronkan dokumen PDF ke Cloud Firestore.');
     } else {
       setServerConnected(true);
+      setSyncStatus('synced');
     }
   };
 
   const handleDeleteDokumen = async (id: string) => {
-    recordDeletedId('dokumen', id);
     setDokumenList((prev) => prev.filter((d) => d.id !== id));
-    const res = await deleteDokumenOnServer(id);
+    setSyncStatus('saving');
+    const res = await deleteDokumenDoc(id);
     if (!res.ok) {
       setSyncStatus('offline');
-      setCloudError(res.message || 'Gagal menghapus dokumen PDF di server.');
+      setCloudError(res.message || 'Gagal menghapus dokumen PDF di Cloud Firestore.');
     } else {
       setServerConnected(true);
+      setSyncStatus('synced');
     }
   };
 
   // Sample data loader for demo
-  const handleLoadSample = () => {
+  const handleLoadSample = async () => {
     const nowIso = new Date().toISOString();
-    setTransactions([
-      { id: '1', tanggal: `${tahunAktif}-10-12`, kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan Periode Aktif', nominal: 250000, tipe: 'masuk', namaWarga: 'Ahmad Fauzi', tahun: tahunAktif, updatedAt: nowIso },
-      { id: '2', tanggal: `${tahunAktif}-10-10`, kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan & Kas Kematian', nominal: 350000, tipe: 'masuk', namaWarga: 'Siti Aminah', tahun: tahunAktif, updatedAt: nowIso },
-      { id: '3', tanggal: `${tahunAktif}-10-08`, kategori: 'Kas Kematian', keterangan: 'Pengadaan Kain Mori & Perlengkapan Jenazah', nominal: 200000, tipe: 'keluar', namaWarga: 'Bendahara Kas', tahun: tahunAktif, updatedAt: nowIso },
-    ]);
+    const rtStr = pengaturanKas.profilRT?.namaRT || '08';
+    const rwStr = pengaturanKas.profilRT?.namaRW || '05';
+    const scopeStr = `RT ${rtStr} RW ${rwStr}`;
+    const samples: Transaction[] = [
+      { id: 'sample_1_' + Date.now(), tanggal: `${tahunAktif}-10-12`, kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan Periode Aktif', nominal: 250000, tipe: 'masuk', namaWarga: 'Ahmad Fauzi', tahun: tahunAktif, rtScope: scopeStr, updatedAt: nowIso },
+      { id: 'sample_2_' + (Date.now() + 1), tanggal: `${tahunAktif}-10-10`, kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan & Kas Kematian', nominal: 350000, tipe: 'masuk', namaWarga: 'Siti Aminah', tahun: tahunAktif, rtScope: scopeStr, updatedAt: nowIso },
+      { id: 'sample_3_' + (Date.now() + 2), tanggal: `${tahunAktif}-10-08`, kategori: 'Kas Kematian', keterangan: 'Pengadaan Kain Mori & Perlengkapan Jenazah', nominal: 200000, tipe: 'keluar', namaWarga: 'Bendahara Kas', tahun: tahunAktif, rtScope: scopeStr, updatedAt: nowIso },
+    ];
+    setTransactions(samples);
+    setSyncStatus('saving');
+    await Promise.all(samples.map((tx) => saveTransactionDoc(tx)));
+    await triggerPublicSummarySync({ transactions: samples });
+    setSyncStatus('synced');
   };
 
-  // Complete Reset: Wipes all residents, transactions, aid records, documents, announcements from central DB
+  // Complete Reset: Wipes all residents, transactions, aid records, documents, announcements from Cloud Firestore
   const handleResetEmpty = async () => {
     const nowIso = new Date().toISOString();
-    deletedIdsRef.current = { ...EMPTY_DELETED_IDS };
-    const preservedAdmins = latestStateRef.current.adminAccounts;
+    const prevSnapshot = latestStateRef.current;
 
-    // 1. Wipe in-memory states
+    const resetSettings: PengaturanKas = {
+      ...prevSnapshot.pengaturanKas,
+      saldoAwalKasUmum: 0,
+      saldoAwalKasKematian: 0,
+      keteranganSaldoAwal: 'Sisa Kas RT Periode Lalu',
+      tanggalSaldoAwal: `${tahunAktif}-01-01`,
+      updatedAt: nowIso,
+    };
+
     setWargaList([]);
     setTransactions([]);
     setBantuanList([]);
@@ -1244,29 +1012,34 @@ export default function App() {
     setLaporanBulananRT([]);
     setFloatingAnnouncement(null);
     setDismissedNotificationIds([]);
-    setPengaturanKas((prev) => ({
-      ...prev,
-      saldoAwalKasUmum: 0,
-      saldoAwalKasKematian: 0,
-      keteranganSaldoAwal: 'Sisa Kas RT Periode Lalu',
-      tanggalSaldoAwal: `${tahunAktif}-01-01`,
-      updatedAt: nowIso,
-    }));
+    setPengaturanKas(resetSettings);
 
-    // 2. Wipe persistent backend while preserving Admin accounts
-    const ok = await clearAppData(preservedAdmins);
+    setSyncStatus('saving');
+    const ok = await hardResetFirestoreData({
+      wargaIds: prevSnapshot.wargaList.map((w) => w.id),
+      txIds: prevSnapshot.transactions.map((t) => t.id),
+      bantuanIds: prevSnapshot.bantuanList.map((b) => b.id),
+      pengumumanIds: prevSnapshot.pengumumanList.map((p) => p.id),
+      dokumenIds: prevSnapshot.dokumenList.map((d) => d.id),
+      laporanIds: prevSnapshot.laporanBulananRT.map((l) => l.id),
+      resetSettings,
+      tahunAktif,
+    });
+
     if (ok) {
-      const snap = await fetchServerSnapshotWithStatus();
-      if (snap.ok && snap.data) {
-        applyMergedStateToReact(snap.data, 'refresh', true);
-      }
+      await triggerPublicSummarySync({
+        pengaturanKas: resetSettings,
+        transactions: [],
+        pengumumanList: [],
+        wargaList: [],
+      });
       setServerConnected(true);
       setSyncStatus('synced');
       setCloudError(null);
-      setRolloverNotice('Seluruh data berhasil direset dan dihapus secara tuntas dari database server.');
+      setRolloverNotice('Seluruh data berhasil direset dan dihapus tuntas dari Cloud Firestore.');
     } else {
       setSyncStatus('offline');
-      setCloudError('Gagal mereset database server. Periksa koneksi internet Anda.');
+      setCloudError('Gagal mereset database Cloud Firestore. Periksa koneksi internet Anda.');
     }
     setTimeout(() => setRolloverNotice(null), 5000);
   };
@@ -1276,14 +1049,16 @@ export default function App() {
     const prev = latestStateRef.current.pengaturanKas || pengaturanKas;
     const merged: PengaturanKas = { ...prev, ...newSetting, updatedAt: nowIso };
     setPengaturanKas(merged);
-    saveSettingsOnServer(merged, tahunAktif).then((res) => {
-      if (!res.ok) {
-        setSyncStatus('offline');
-        setCloudError(res.message || 'Gagal menyimpan pengaturan ke server.');
-      } else {
-        setServerConnected(true);
-      }
-    });
+    setSyncStatus('saving');
+
+    const res = await saveSettingsDoc(merged, tahunAktif);
+    if (!res.ok) {
+      setSyncStatus('offline');
+      setCloudError(res.message || 'Gagal menyimpan pengaturan ke Cloud Firestore.');
+    } else {
+      setServerConnected(true);
+      setSyncStatus('synced');
+    }
 
     const oldKetua = (prev.kontakKetuaRT?.nama || '').trim();
     const newKetua = (merged.kontakKetuaRT?.nama || '').trim();
@@ -1298,6 +1073,8 @@ export default function App() {
       (newKetua && newKetua !== oldKetua) ||
       (newBendahara && newBendahara !== oldBendahara) ||
       newRT !== oldRT;
+
+    let updatedPengumumanList = latestStateRef.current.pengumumanList;
 
     if (pengurusChanged) {
       const legacyKetuaPlaceholders = ['bpk. suwardi', 'bapak suwardi', oldKetua.toLowerCase()].filter(Boolean);
@@ -1342,28 +1119,36 @@ export default function App() {
         };
       };
 
-      setPengumumanList((prevList) => prevList.map(syncPengumumanItem));
+      updatedPengumumanList = latestStateRef.current.pengumumanList.map(syncPengumumanItem);
+      setPengumumanList(updatedPengumumanList);
       setFloatingAnnouncement((prevFloat) => (prevFloat ? syncPengumumanItem(prevFloat) : prevFloat));
+      Promise.all(updatedPengumumanList.map((p) => savePengumumanDoc(p))).catch(() => {});
 
       if (newKetua) {
-        setAdminAccounts((prevAdmins) =>
-          prevAdmins.map((acc) => {
-            const isPrimaryAdmin =
-              acc.id === 'adm_rt08' ||
-              acc.username.toLowerCase() === 'admin' ||
-              (oldKetua && acc.nama.toLowerCase().includes(oldKetua.toLowerCase()));
-            if (!isPrimaryAdmin) return acc;
-            return {
-              ...acc,
-              nama: `${newKetua} (Ketua RT ${newRT})`,
-              rt: newRT,
-              rw: newRW,
-              kontak: newKetuaTelp || acc.kontak,
-              jabatan: `Ketua RT ${newRT} RW ${newRW}`,
-              updatedAt: nowIso,
-            };
-          })
-        );
+        const updatedAdmins = latestStateRef.current.adminAccounts.map((acc) => {
+          const isPrimaryAdmin =
+            acc.id === 'adm_rt08' ||
+            acc.username.toLowerCase() === 'admin' ||
+            (oldKetua && acc.nama.toLowerCase().includes(oldKetua.toLowerCase()));
+          if (!isPrimaryAdmin) return acc;
+          return {
+            ...acc,
+            nama: `${newKetua} (Ketua RT ${newRT})`,
+            rt: newRT,
+            rw: newRW,
+            kontak: newKetuaTelp || acc.kontak,
+            jabatan: `Ketua RT ${newRT} RW ${newRW}`,
+            updatedAt: nowIso,
+          };
+        });
+        setAdminAccounts(updatedAdmins);
+        updatedAdmins.forEach((acc) => {
+          const isPrimaryAdmin =
+            acc.id === 'adm_rt08' || acc.username.toLowerCase() === 'admin';
+          if (isPrimaryAdmin) {
+            saveAdminAccountDoc(acc, (acc as any).authUid).catch(() => {});
+          }
+        });
 
         setCurrentUser((prevUser) => {
           if (!prevUser || prevUser.role !== 'admin') return prevUser;
@@ -1371,71 +1156,90 @@ export default function App() {
             prevUser.username.toLowerCase() === 'admin' ||
             (oldKetua && prevUser.nama.toLowerCase().includes(oldKetua.toLowerCase()));
           if (!isPrimaryUser) return prevUser;
-          const nextUser: AuthUser = {
+          return {
             ...prevUser,
             nama: `${newKetua} (Ketua RT ${newRT})`,
             rtScope: `RT ${newRT} RW ${newRW}`,
           };
-          saveActiveSession(nextUser);
-          return nextUser;
         });
       }
     }
+
+    await triggerPublicSummarySync({
+      pengaturanKas: merged,
+      pengumumanList: updatedPengumumanList,
+    });
   };
 
-  const handleSaveSaldoAwal = (
+  const handleSaveSaldoAwal = async (
     kasUmum: number,
     kasKematian: number,
     keterangan: string,
     tanggal: string
   ) => {
     const nowIso = new Date().toISOString();
-    setPengaturanKas((prev) => ({
-      ...prev,
+    const nextPengaturan: PengaturanKas = {
+      ...latestStateRef.current.pengaturanKas,
       saldoAwalKasUmum: kasUmum,
       saldoAwalKasKematian: kasKematian,
       keteranganSaldoAwal: keterangan,
       tanggalSaldoAwal: tanggal,
       updatedAt: nowIso,
-    }));
+    };
 
-    setTransactions((prev) => {
-      prev.filter((t) => t.isSaldoAwal).forEach((t) => recordDeletedId('transactions', t.id));
-      const nonSaldoAwal = prev.filter((t) => !t.isSaldoAwal);
-      const newSaldoTxs: Transaction[] = [];
+    const currentTxs = latestStateRef.current.transactions;
+    const oldSaldoAwal = currentTxs.filter((t) => t.isSaldoAwal);
+    const nonSaldoAwal = currentTxs.filter((t) => !t.isSaldoAwal);
+    const newSaldoTxs: Transaction[] = [];
+    const rtScopeStr = `RT ${nextPengaturan.profilRT?.namaRT || '08'} RW ${nextPengaturan.profilRT?.namaRW || '05'}`;
 
-      if (kasUmum > 0) {
-        newSaldoTxs.push({
-          id: 'saldo-awal-umum-' + Date.now(),
-          tanggal: tanggal || `${tahunAktif}-01-01`,
-          kategori: 'Saldo Awal / Pindahan Kas Lalu',
-          keterangan: `Saldo Kas Umum Masa Lalu: ${keterangan}`,
-          nominal: kasUmum,
-          tipe: 'masuk',
-          namaWarga: 'Pindahan Kas Masa Lalu',
-          isSaldoAwal: true,
-          tahun: tahunAktif,
-          updatedAt: nowIso,
-        });
-      }
+    if (kasUmum > 0) {
+      newSaldoTxs.push({
+        id: 'saldo_awal_umum_' + Date.now(),
+        tanggal: tanggal || `${tahunAktif}-01-01`,
+        kategori: 'Saldo Awal / Pindahan Kas Lalu',
+        keterangan: `Saldo Kas Umum Masa Lalu: ${keterangan}`,
+        nominal: kasUmum,
+        tipe: 'masuk',
+        namaWarga: 'Pindahan Kas Masa Lalu',
+        isSaldoAwal: true,
+        tahun: tahunAktif,
+        rtScope: rtScopeStr,
+        updatedAt: nowIso,
+      });
+    }
 
-      if (kasKematian > 0) {
-        newSaldoTxs.push({
-          id: 'saldo-awal-kematian-' + Date.now(),
-          tanggal: tanggal || `${tahunAktif}-01-01`,
-          kategori: 'Kas Kematian',
-          keterangan: `Saldo Kas Kematian Masa Lalu: ${keterangan}`,
-          nominal: kasKematian,
-          tipe: 'kematian',
-          namaWarga: 'Pindahan Kas Kematian Lalu',
-          isSaldoAwal: true,
-          tahun: tahunAktif,
-          updatedAt: nowIso,
-        });
-      }
+    if (kasKematian > 0) {
+      newSaldoTxs.push({
+        id: 'saldo_awal_kematian_' + (Date.now() + 1),
+        tanggal: tanggal || `${tahunAktif}-01-01`,
+        kategori: 'Kas Kematian',
+        keterangan: `Saldo Kas Kematian Masa Lalu: ${keterangan}`,
+        nominal: kasKematian,
+        tipe: 'kematian',
+        namaWarga: 'Pindahan Kas Kematian Lalu',
+        isSaldoAwal: true,
+        tahun: tahunAktif,
+        rtScope: rtScopeStr,
+        updatedAt: nowIso,
+      });
+    }
 
-      return [...newSaldoTxs, ...nonSaldoAwal];
+    const nextTransactions = [...newSaldoTxs, ...nonSaldoAwal];
+    setPengaturanKas(nextPengaturan);
+    setTransactions(nextTransactions);
+    setSyncStatus('saving');
+
+    await saveSettingsDoc(nextPengaturan, tahunAktif);
+    await Promise.all([
+      ...oldSaldoAwal.map((t) => deleteTransactionDoc(t.id)),
+      ...newSaldoTxs.map((t) => saveTransactionDoc(t)),
+    ]);
+    await triggerPublicSummarySync({
+      pengaturanKas: nextPengaturan,
+      transactions: nextTransactions,
     });
+    setSyncStatus('synced');
   };
 
   // Add Transaction
@@ -1449,18 +1253,22 @@ export default function App() {
           `RT ${pengaturanKas.profilRT?.namaRT || '08'} RW ${pengaturanKas.profilRT?.namaRW || '05'}`);
     const newTx: Transaction = {
       ...tx,
-      id: Date.now().toString(),
+      id: toValidDocId('tx_' + Date.now(), 'tx'),
       tahun: tahunAktif,
       rtScope: resolvedRtScope,
       updatedAt: nowIso,
     };
-    setTransactions((prev) => [newTx, ...prev]);
-    const res = await saveTransactionOnServer(newTx);
+    const nextTransactions = [newTx, ...latestStateRef.current.transactions];
+    setTransactions(nextTransactions);
+    setSyncStatus('saving');
+    const res = await saveTransactionDoc(newTx);
     if (!res.ok) {
       setSyncStatus('offline');
-      setCloudError(res.message || 'Gagal menyinkronkan transaksi ke server.');
+      setCloudError(res.message || 'Gagal menyinkronkan transaksi ke Cloud Firestore.');
     } else {
       setServerConnected(true);
+      setSyncStatus('synced');
+      await triggerPublicSummarySync({ transactions: nextTransactions });
     }
   };
 
@@ -1474,19 +1282,23 @@ export default function App() {
     const newW: Warga = {
       ...w,
       rt: w.rt || fallbackRT,
-      id: Date.now().toString(),
-      no: wargaList.length + 1,
+      id: toValidDocId('w_' + Date.now(), 'w'),
+      no: latestStateRef.current.wargaList.length + 1,
       statusIuran: w.statusIuran || 'Belum',
       statusIuranPerTahun: { [tahunAktif]: w.statusIuran || 'Belum' },
       updatedAt: nowIso,
     };
-    setWargaList((prev) => [...prev, newW]);
-    const res = await saveSingleWargaToServer(newW);
+    const nextWarga = [...latestStateRef.current.wargaList, newW];
+    setWargaList(nextWarga);
+    setSyncStatus('saving');
+    const res = await saveWargaDoc(newW);
     if (!res.ok) {
       setSyncStatus('offline');
-      setCloudError(res.message || 'Gagal menyimpan data warga ke database server.');
+      setCloudError(res.message || 'Gagal menyimpan data warga ke Cloud Firestore.');
     } else {
       setServerConnected(true);
+      setSyncStatus('synced');
+      await triggerPublicSummarySync({ wargaList: nextWarga });
     }
   };
 
@@ -1502,7 +1314,7 @@ export default function App() {
 
     const currentWarga = latestStateRef.current.wargaList || [];
     const updatedWarga = [...currentWarga];
-    const payloadWargaForServer: Array<Omit<Warga, 'id' | 'no'> & { id?: string }> = [];
+    const changedWargaToSave: Warga[] = [];
     let addedKKCount = 0;
     let updatedKKCount = 0;
 
@@ -1515,7 +1327,7 @@ export default function App() {
         if (options.mergeExisting) {
           const existing = updatedWarga[existingIndex];
           const nextStatus = incoming.statusIuran || existing.statusIuran || 'Belum';
-          updatedWarga[existingIndex] = {
+          const mergedItem: Warga = {
             ...existing,
             nama: incoming.nama || existing.nama,
             noKK: incoming.noKK || existing.noKK,
@@ -1542,7 +1354,8 @@ export default function App() {
             },
             updatedAt: nowIso,
           };
-          payloadWargaForServer.push({ ...incoming, id: existing.id });
+          updatedWarga[existingIndex] = mergedItem;
+          changedWargaToSave.push(mergedItem);
           updatedKKCount++;
         }
       } else {
@@ -1557,14 +1370,14 @@ export default function App() {
           updatedAt: nowIso,
         };
         updatedWarga.push(newWarga);
-        payloadWargaForServer.push({ ...incoming, id: assignedId });
+        changedWargaToSave.push(newWarga);
         addedKKCount++;
       }
     });
 
     const currentBantuan = latestStateRef.current.bantuanList || [];
     const nextBantuanList = [...currentBantuan];
-    const payloadBantuanForServer: Array<Omit<BantuanPemerintah, 'id'> & { id?: string }> = [];
+    const newBantuanToSave: BantuanPemerintah[] = [];
     let addedBantuanCount = 0;
 
     importedBantuan.forEach((b, idx) => {
@@ -1577,45 +1390,33 @@ export default function App() {
       );
       if (!isDuplicate) {
         const assignedBId = `b_${baseTime}_${idx}_${nonce}`;
-        nextBantuanList.unshift({
+        const item: BantuanPemerintah = {
           ...b,
           id: assignedBId,
           updatedAt: nowIso,
-        });
-        payloadBantuanForServer.push({ ...b, id: assignedBId });
+        };
+        nextBantuanList.unshift(item);
+        newBantuanToSave.push(item);
         addedBantuanCount++;
       }
     });
 
-    bulkImportInFlightRef.current = true;
     setSyncStatus('saving');
     setWargaList(updatedWarga);
     if (addedBantuanCount > 0) {
       setBantuanList(nextBantuanList);
     }
 
-    // Persist bulk import directly to Central SQL Server without auto-save racing
-    bulkImportWargaOnServer({
-      wargaList: payloadWargaForServer,
-      bantuanList: payloadBantuanForServer,
-      mergeExisting: options.mergeExisting,
-      tahunAktif,
-    })
+    bulkSaveWargaAndBantuanDocs(changedWargaToSave, newBantuanToSave)
       .then(async (bulkRes) => {
         if (!bulkRes.ok) {
           setSyncStatus('offline');
-          setCloudError(bulkRes.message || 'Gagal menyinkronkan import Excel ke server.');
+          setCloudError(bulkRes.message || 'Gagal menyinkronkan import Excel ke Cloud Firestore.');
         } else {
           setServerConnected(true);
           setSyncStatus('synced');
-          const snap = await fetchServerSnapshotWithStatus();
-          if (snap.ok && snap.data) {
-            applyMergedStateToReact(snap.data, 'refresh', true);
-          }
+          await triggerPublicSummarySync({ wargaList: updatedWarga });
         }
-      })
-      .finally(() => {
-        bulkImportInFlightRef.current = false;
       });
 
     const totalJiwa = importedWarga.reduce(
@@ -1629,57 +1430,53 @@ export default function App() {
   };
 
   // Toggle resident fee status
-  const handleToggleWargaStatus = (id: string) => {
+  const handleToggleWargaStatus = async (id: string) => {
     const nowIso = new Date().toISOString();
-    let updatedTarget: Warga | null = null;
-    setWargaList((prev) =>
-      prev.map((w) => {
-        if (w.id === id) {
-          const nextStatus: 'Sudah' | 'Belum' = w.statusIuran === 'Sudah' ? 'Belum' : 'Sudah';
-          const perTahun: Record<number, 'Sudah' | 'Belum'> = {
-            ...(w.statusIuranPerTahun || {}),
-            [tahunAktif]: nextStatus,
-          };
-          const updated = {
-            ...w,
-            statusIuran: nextStatus,
-            statusIuranPerTahun: perTahun,
-            updatedAt: nowIso,
-          };
-          updatedTarget = updated;
-          return updated;
-        }
-        return w;
-      })
-    );
-    if (updatedTarget) {
-      saveSingleWargaToServer(updatedTarget).then((res) => {
-        if (!res.ok) {
-          setSyncStatus('offline');
-          setCloudError(res.message || 'Gagal memperbarui status iuran ke server.');
-        } else {
-          setServerConnected(true);
-        }
-      });
+    const target = latestStateRef.current.wargaList.find((w) => w.id === id);
+    if (!target) return;
+
+    const nextStatus: 'Sudah' | 'Belum' = target.statusIuran === 'Sudah' ? 'Belum' : 'Sudah';
+    const perTahun: Record<number, 'Sudah' | 'Belum'> = {
+      ...(target.statusIuranPerTahun || {}),
+      [tahunAktif]: nextStatus,
+    };
+    const updatedTarget: Warga = {
+      ...target,
+      statusIuran: nextStatus,
+      statusIuranPerTahun: perTahun,
+      updatedAt: nowIso,
+    };
+
+    setWargaList((prev) => prev.map((w) => (w.id === id ? updatedTarget : w)));
+    setSyncStatus('saving');
+    const res = await saveWargaDoc(updatedTarget);
+    if (!res.ok) {
+      setSyncStatus('offline');
+      setCloudError(res.message || 'Gagal memperbarui status iuran ke Cloud Firestore.');
+    } else {
+      setServerConnected(true);
+      setSyncStatus('synced');
     }
   };
 
   // Delete resident
   const handleDeleteWarga = async (id: string) => {
-    recordDeletedId('warga', id);
-    setWargaList((prev) => prev.filter((w) => w.id !== id));
-    const res = await deleteWargaFromServer(id);
+    const nextWarga = latestStateRef.current.wargaList.filter((w) => w.id !== id);
+    setWargaList(nextWarga);
+    setSyncStatus('saving');
+    const res = await deleteWargaDoc(id);
     if (!res.ok) {
       setSyncStatus('offline');
-      setCloudError(res.message || 'Gagal menghapus data warga di server.');
+      setCloudError(res.message || 'Gagal menghapus data warga di Cloud Firestore.');
     } else {
       setServerConnected(true);
+      setSyncStatus('synced');
+      await triggerPublicSummarySync({ wargaList: nextWarga });
     }
   };
 
   // Upgrade / Perbarui Data KK Warga (Meninggal Dunia, Pisah KK, Pembaruan Berkala)
-  // Menjamin 100% data uang kas & catatan iuran tidak hilang dan dialihkan otomatis ke KK / Kepala Keluarga baru
-  const handleApplyUpgradeKK = ({
+  const handleApplyUpgradeKK = async ({
     wargaId,
     oldWarga,
     newKKData,
@@ -1706,15 +1503,14 @@ export default function App() {
     catatSantunanKematian: boolean;
     namaMeninggal?: string;
   }) => {
-    // 1. Hitung total uang kas yang tercatat atas KK ini
-    const oldTxs = transactions.filter(
+    const currentTxs = latestStateRef.current.transactions;
+    const oldTxs = currentTxs.filter(
       (t) =>
         (t.noKK && t.noKK === oldWarga.noKK) ||
         (t.namaWarga && t.namaWarga.toLowerCase() === oldWarga.nama.toLowerCase())
     );
     const totalKasDipindahkan = oldTxs.reduce((sum, t) => sum + (t.nominal || 0), 0);
 
-    // 2. Deteksi anggota keluar & masuk
     const oldAnggotaNames = (oldWarga.anggotaKeluarga || []).map((a) => a.nama.trim().toLowerCase());
     const newAnggotaNames = (newKKData.anggotaKeluarga || []).map((a) => a.nama.trim().toLowerCase());
 
@@ -1726,7 +1522,6 @@ export default function App() {
       .filter((a) => !oldAnggotaNames.includes(a.nama.trim().toLowerCase()))
       .map((a) => `${a.nama} (${a.hubungan})`);
 
-    // 3. Buat catatan riwayat perubahan KK
     const riwayatBaru: RiwayatPerubahanKK = {
       id: 'rw_' + Date.now(),
       tanggal: new Date().toISOString().split('T')[0],
@@ -1742,56 +1537,54 @@ export default function App() {
     };
 
     const nowIso = new Date().toISOString();
-    // 4. Update data warga target tanpa menghilangkan data kas/iuran (keuangan utuh 100%)
-    setWargaList((prev) =>
-      prev.map((w) => {
-        if (w.id === wargaId) {
-          return {
-            ...w,
-            nama: newKKData.nama,
-            noKK: newKKData.noKK,
-            rt: newKKData.rt || w.rt,
-            rw: newKKData.rw || w.rw,
-            alamat: newKKData.alamat || w.alamat,
-            kodePos: newKKData.kodePos || w.kodePos,
-            tanggalDikeluarkan: newKKData.tanggalDikeluarkan || w.tanggalDikeluarkan,
-            jenisKelamin: newKKData.jenisKelamin || w.jenisKelamin,
-            jumlahJiwa:
-              newKKData.anggotaKeluarga.length > 0
-                ? newKKData.anggotaKeluarga.length
-                : w.jumlahJiwa,
-            anggotaKeluarga: newKKData.anggotaKeluarga,
-            riwayatPerubahanKK: [riwayatBaru, ...(w.riwayatPerubahanKK || [])],
-            updatedAt: nowIso,
-          };
-        }
-        return w;
-      })
-    );
+    let updatedWargaItem: Warga | null = null;
+    const nextWargaList = latestStateRef.current.wargaList.map((w) => {
+      if (w.id === wargaId) {
+        updatedWargaItem = {
+          ...w,
+          nama: newKKData.nama,
+          noKK: newKKData.noKK,
+          rt: newKKData.rt || w.rt,
+          rw: newKKData.rw || w.rw,
+          alamat: newKKData.alamat || w.alamat,
+          kodePos: newKKData.kodePos || w.kodePos,
+          tanggalDikeluarkan: newKKData.tanggalDikeluarkan || w.tanggalDikeluarkan,
+          jenisKelamin: newKKData.jenisKelamin || w.jenisKelamin,
+          jumlahJiwa:
+            newKKData.anggotaKeluarga.length > 0
+              ? newKKData.anggotaKeluarga.length
+              : w.jumlahJiwa,
+          anggotaKeluarga: newKKData.anggotaKeluarga,
+          riwayatPerubahanKK: [riwayatBaru, ...(w.riwayatPerubahanKK || [])],
+          updatedAt: nowIso,
+        };
+        return updatedWargaItem;
+      }
+      return w;
+    });
 
-    // 5. Update seluruh riwayat transaksi kas lama ke data KK & Kepala Keluarga baru
-    setTransactions((prev) =>
-      prev.map((t) => {
-        const matchesKK = t.noKK && t.noKK === oldWarga.noKK;
-        const matchesNama =
-          t.namaWarga && t.namaWarga.toLowerCase() === oldWarga.nama.toLowerCase();
+    const modifiedTxs: Transaction[] = [];
+    let nextTxList = currentTxs.map((t) => {
+      const matchesKK = t.noKK && t.noKK === oldWarga.noKK;
+      const matchesNama =
+        t.namaWarga && t.namaWarga.toLowerCase() === oldWarga.nama.toLowerCase();
 
-        if (matchesKK || matchesNama) {
-          return {
-            ...t,
-            noKK: newKKData.noKK,
-            namaWarga: newKKData.nama,
-            keterangan: t.keterangan.includes('Dialihkan')
-              ? t.keterangan
-              : `${t.keterangan} (Dialihkan dari KK lama: ${oldWarga.noKK})`,
-            updatedAt: nowIso,
-          };
-        }
-        return t;
-      })
-    );
+      if (matchesKK || matchesNama) {
+        const nextTx: Transaction = {
+          ...t,
+          noKK: newKKData.noKK,
+          namaWarga: newKKData.nama,
+          keterangan: t.keterangan.includes('Dialihkan')
+            ? t.keterangan
+            : `${t.keterangan} (Dialihkan dari KK lama: ${oldWarga.noKK})`,
+          updatedAt: nowIso,
+        };
+        modifiedTxs.push(nextTx);
+        return nextTx;
+      }
+      return t;
+    });
 
-    // 6. Jika opsional santunan kas kematian dicentang, buat transaksi santunan keluar otomatis
     if (catatSantunanKematian) {
       const santunanTx: Transaction = {
         id: 'santunan_' + Date.now(),
@@ -1803,30 +1596,34 @@ export default function App() {
         namaWarga: newKKData.nama,
         noKK: newKKData.noKK,
         tahun: tahunAktif,
+        rtScope: `RT ${newKKData.rt || oldWarga.rt || '08'} RW ${newKKData.rw || oldWarga.rw || '05'}`,
         updatedAt: nowIso,
       };
-      setTransactions((prev) => [santunanTx, ...prev]);
+      nextTxList = [santunanTx, ...nextTxList];
+      modifiedTxs.push(santunanTx);
     }
 
-    // 7. Update data bantuan pemerintah jika ada
-    setBantuanList((prev) =>
-      prev.map((b) => {
-        if (
-          b.noKK === oldWarga.noKK ||
-          b.namaPenerima.toLowerCase() === oldWarga.nama.toLowerCase()
-        ) {
-          return {
-            ...b,
-            namaPenerima: newKKData.nama,
-            noKK: newKKData.noKK,
-            updatedAt: nowIso,
-          };
-        }
-        return b;
-      })
-    );
+    const modifiedBantuan: BantuanPemerintah[] = [];
+    const nextBantuanList = latestStateRef.current.bantuanList.map((b) => {
+      if (
+        b.noKK === oldWarga.noKK ||
+        b.namaPenerima.toLowerCase() === oldWarga.nama.toLowerCase()
+      ) {
+        const nextB: BantuanPemerintah = {
+          ...b,
+          namaPenerima: newKKData.nama,
+          noKK: newKKData.noKK,
+          updatedAt: nowIso,
+        };
+        modifiedBantuan.push(nextB);
+        return nextB;
+      }
+      return b;
+    });
 
-    // 8. Tampilkan pengumuman/notifikasi konfirmasi sukses
+    setWargaList(nextWargaList);
+    setTransactions(nextTxList);
+    setBantuanList(nextBantuanList);
     setFloatingAnnouncement({
       id: 'upgrade_' + Date.now(),
       judul: 'Data KK Berhasil Diperbarui',
@@ -1836,83 +1633,143 @@ export default function App() {
       tanggalBerakhir: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       penulis: 'Sistem Upgrade KK',
     });
-
     setIsUpgradeModalOpen(false);
     setUpgradeTargetWarga(null);
+
+    setSyncStatus('saving');
+    await Promise.all([
+      ...(updatedWargaItem ? [saveWargaDoc(updatedWargaItem)] : []),
+      ...modifiedTxs.map((tx) => saveTransactionDoc(tx)),
+      ...modifiedBantuan.map((b) => saveBantuanDoc(b)),
+    ]);
+    await triggerPublicSummarySync({
+      wargaList: nextWargaList,
+      transactions: nextTxList,
+    });
+    setSyncStatus('synced');
   };
 
   // Create Announcement
   const handleSavePengumuman = async (p: Omit<PengumumanRT, 'id'>) => {
     const newP: PengumumanRT = {
       ...p,
-      id: 'p' + Date.now(),
+      id: toValidDocId('p_' + Date.now(), 'p'),
       updatedAt: new Date().toISOString(),
     };
-    setPengumumanList((prev) => [newP, ...prev]);
+    const nextList = [newP, ...latestStateRef.current.pengumumanList];
+    setPengumumanList(nextList);
     setFloatingAnnouncement(newP);
-    const res = await savePengumumanOnServer(newP);
+    setSyncStatus('saving');
+    const res = await savePengumumanDoc(newP);
     if (!res.ok) {
       setSyncStatus('offline');
-      setCloudError(res.message || 'Gagal menyinkronkan pengumuman ke server.');
+      setCloudError(res.message || 'Gagal menyinkronkan pengumuman ke Cloud Firestore.');
     } else {
       setServerConnected(true);
+      setSyncStatus('synced');
+      await triggerPublicSummarySync({ pengumumanList: nextList });
     }
   };
 
-  // Delete Announcement (Permanently records id as dismissed so it NEVER reappears)
+  // Delete Announcement
   const handleDeletePengumuman = async (id: string) => {
-    recordDeletedId('pengumuman', id);
-    setPengumumanList((prev) => prev.filter((p) => p.id !== id));
+    const nextList = latestStateRef.current.pengumumanList.filter((p) => p.id !== id);
+    setPengumumanList(nextList);
     setDismissedNotificationIds((prev) => Array.from(new Set([...prev, id])));
     if (floatingAnnouncement?.id === id) {
       setFloatingAnnouncement(null);
     }
-    const res = await deletePengumumanOnServer(id);
+    setSyncStatus('saving');
+    const res = await deletePengumumanDoc(id);
     if (!res.ok) {
       setSyncStatus('offline');
-      setCloudError(res.message || 'Gagal menghapus pengumuman dari server.');
+      setCloudError(res.message || 'Gagal menghapus pengumuman dari Cloud Firestore.');
     } else {
       setServerConnected(true);
+      setSyncStatus('synced');
+      await triggerPublicSummarySync({ pengumumanList: nextList });
     }
   };
 
-  // Server: Admin RT Accounts Management
-  const handleAddAdminAccount = (acc: Omit<AdminRTAccount, 'id'>) => {
+  // Server: Admin RT Accounts Management (Provisions Firebase Auth + Cloud Firestore)
+  const handleAddAdminAccount = async (acc: Omit<AdminRTAccount, 'id'>) => {
     const newAcc: AdminRTAccount = {
       ...acc,
-      id: 'adm_' + Date.now(),
+      id: toValidDocId('adm_' + Date.now(), 'adm'),
       updatedAt: new Date().toISOString(),
     };
     setAdminAccounts((prev) => [newAcc, ...prev]);
+    setSyncStatus('saving');
+
+    const prov = await provisionAdminAuthAccount(newAcc);
+    if (prov.error) {
+      setCloudError(prov.error);
+    }
+    const saveRes = await saveAdminAccountDoc(newAcc, prov.authUid);
+    if (!saveRes.ok) {
+      setSyncStatus('offline');
+      setCloudError(saveRes.message || 'Gagal menyimpan akun Admin RT ke Cloud Firestore.');
+    } else {
+      setServerConnected(true);
+      setSyncStatus('synced');
+    }
   };
 
-  const handleUpdateAdminAccount = (id: string, updated: Partial<AdminRTAccount>) => {
+  const handleUpdateAdminAccount = async (id: string, updated: Partial<AdminRTAccount>) => {
     const nowIso = new Date().toISOString();
-    setAdminAccounts((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, ...updated, updatedAt: nowIso } : a))
+    const oldAcc = latestStateRef.current.adminAccounts.find((a) => a.id === id);
+    if (!oldAcc) return;
+    const mergedAcc: AdminRTAccount = { ...oldAcc, ...updated, updatedAt: nowIso };
+    setAdminAccounts((prev) => prev.map((a) => (a.id === id ? mergedAcc : a)));
+    setSyncStatus('saving');
+
+    const prov = await provisionAdminAuthAccount(mergedAcc, oldAcc.passwordHash);
+    if (prov.error) {
+      setCloudError(prov.error);
+    }
+    const saveRes = await saveAdminAccountDoc(
+      mergedAcc,
+      prov.authUid || (oldAcc as any).authUid
     );
+    if (!saveRes.ok) {
+      setSyncStatus('offline');
+      setCloudError(saveRes.message || 'Gagal memperbarui akun Admin RT di Cloud Firestore.');
+    } else {
+      setServerConnected(true);
+      setSyncStatus('synced');
+    }
   };
 
-  const handleDeleteAdminAccount = (id: string) => {
-    recordDeletedId('adminAccounts', id);
+  const handleDeleteAdminAccount = async (id: string) => {
     setAdminAccounts((prev) => prev.filter((a) => a.id !== id));
+    setSyncStatus('saving');
+    const res = await deleteAdminAccountDoc(id);
+    if (!res.ok) {
+      setSyncStatus('offline');
+      setCloudError(res.message || 'Gagal menghapus akun Admin RT di Cloud Firestore.');
+    } else {
+      setServerConnected(true);
+      setSyncStatus('synced');
+    }
   };
 
   // Server: Update verification status of monthly submission
   const handleUpdateStatusLaporan = async (id: string, status: PembaruanBulananRT['statusVerifikasi']) => {
     const nowIso = new Date().toISOString();
-    const existing = laporanBulananRT.find((lap) => lap.id === id);
+    const existing = latestStateRef.current.laporanBulananRT.find((lap) => lap.id === id);
     const updatedLap = existing ? { ...existing, statusVerifikasi: status, updatedAt: nowIso } : null;
     setLaporanBulananRT((prev) =>
       prev.map((lap) => (lap.id === id ? { ...lap, statusVerifikasi: status, updatedAt: nowIso } : lap))
     );
     if (updatedLap) {
-      const res = await saveLaporanOnServer(updatedLap);
+      setSyncStatus('saving');
+      const res = await saveLaporanDoc(updatedLap);
       if (!res.ok) {
         setSyncStatus('offline');
-        setCloudError(res.message || 'Gagal memperbarui status laporan di server.');
+        setCloudError(res.message || 'Gagal memperbarui status laporan di Cloud Firestore.');
       } else {
         setServerConnected(true);
+        setSyncStatus('synced');
       }
     }
   };
@@ -1921,49 +1778,92 @@ export default function App() {
   const handleKirimLaporanBulanan = async (laporan: PembaruanBulananRT) => {
     const nowIso = new Date().toISOString();
     const nowLabel = formatWaktuSyncID();
-    const stamped = { ...laporan, updatedAt: nowIso };
+    const stamped: PembaruanBulananRT = {
+      ...laporan,
+      id: toValidDocId(laporan.id || 'lap_' + Date.now(), 'lap'),
+      updatedAt: nowIso,
+    };
     setLaporanBulananRT((prev) => [stamped, ...prev]);
 
+    let updatedAdminAcc: AdminRTAccount | null = null;
     if (currentUser?.role === 'admin') {
-      setAdminAccounts((prev) =>
-        prev.map((acc) =>
-          acc.username.toLowerCase() === currentUser.username.toLowerCase()
-            ? { ...acc, terakhirSinkronisasi: `Tersinkron ${nowLabel}`, updatedAt: nowIso }
-            : acc
-        )
-      );
+      const nextAdmins = latestStateRef.current.adminAccounts.map((acc) => {
+        if (acc.username.toLowerCase() === currentUser.username.toLowerCase()) {
+          updatedAdminAcc = {
+            ...acc,
+            terakhirSinkronisasi: `Tersinkron ${nowLabel}`,
+            updatedAt: nowIso,
+          };
+          return updatedAdminAcc;
+        }
+        return acc;
+      });
+      setAdminAccounts(nextAdmins);
     }
 
-    const res = await saveLaporanOnServer(stamped);
+    setSyncStatus('saving');
+    const res = await saveLaporanDoc(stamped);
+    if (updatedAdminAcc) {
+      await saveAdminAccountDoc(updatedAdminAcc, auth.currentUser?.uid);
+    }
     if (!res.ok) {
       setSyncStatus('offline');
-      setCloudError(res.message || 'Gagal mengirim laporan bulanan ke server.');
+      setCloudError(res.message || 'Gagal mengirim laporan bulanan ke Cloud Firestore.');
     } else {
       setServerConnected(true);
+      setSyncStatus('synced');
     }
   };
 
-  // Restore entire database from backup JSON
-  const handleRestoreDatabase = (db: AppDatabaseSchema) => {
+  // Restore entire database from backup JSON -> writes directly to Cloud Firestore
+  const handleRestoreDatabase = async (dbData: AppDatabaseSchema) => {
     const nowIso = new Date().toISOString();
     const stampAll = <T extends { updatedAt?: string }>(list?: T[]): T[] =>
       Array.isArray(list) ? list.map((item) => ({ ...item, updatedAt: item.updatedAt || nowIso })) : [];
-    if (db.tahunAktif) setTahunAktif(db.tahunAktif);
-    if (db.pengaturanKas) setPengaturanKas({ ...db.pengaturanKas, updatedAt: nowIso });
-    if (db.wargaList) setWargaList(stampAll(db.wargaList));
-    if (db.transactions) setTransactions(stampAll(db.transactions));
-    if (db.bantuanList) setBantuanList(stampAll(db.bantuanList));
-    if (db.pengumumanList) setPengumumanList(stampAll(db.pengumumanList));
-    if (db.dokumenList) setDokumenList(stampAll(db.dokumenList));
-    if (db.adminAccounts) setAdminAccounts(stampAll(db.adminAccounts));
-    if (db.laporanBulananRT) setLaporanBulananRT(stampAll(db.laporanBulananRT));
-    setRolloverNotice('Database berhasil dipulihkan dari cadangan JSON dan sedang disinkronkan ke Server Pusat!');
-    setTimeout(() => setRolloverNotice(null), 4000);
+
+    const restored: AppDatabaseSchema = {
+      version: 2,
+      lastUpdated: nowIso,
+      tahunAktif: dbData.tahunAktif || tahunAktif,
+      pengaturanKas: dbData.pengaturanKas
+        ? { ...dbData.pengaturanKas, updatedAt: nowIso }
+        : pengaturanKas,
+      wargaList: stampAll(dbData.wargaList),
+      transactions: stampAll(dbData.transactions),
+      bantuanList: stampAll(dbData.bantuanList),
+      pengumumanList: stampAll(dbData.pengumumanList),
+      dokumenList: stampAll(dbData.dokumenList),
+      adminAccounts: stampAll(dbData.adminAccounts),
+      laporanBulananRT: stampAll(dbData.laporanBulananRT),
+    };
+
+    setTahunAktif(restored.tahunAktif);
+    setPengaturanKas(restored.pengaturanKas);
+    setWargaList(restored.wargaList);
+    setTransactions(restored.transactions);
+    setBantuanList(restored.bantuanList);
+    setPengumumanList(restored.pengumumanList);
+    setDokumenList(restored.dokumenList);
+    setAdminAccounts(restored.adminAccounts);
+    setLaporanBulananRT(restored.laporanBulananRT);
+
+    setSyncStatus('saving');
+    const migRes = await migrateSnapshotToFirestore(restored);
+    if (migRes.ok) {
+      setSyncStatus('synced');
+      setRolloverNotice(
+        `Database berhasil dipulihkan & disinkronkan ke Cloud Firestore (${migRes.migratedWarga} KK, ${migRes.migratedTx} transaksi)!`
+      );
+    } else {
+      setSyncStatus('offline');
+      setCloudError(migRes.message || 'Gagal memulihkan cadangan JSON ke Cloud Firestore.');
+    }
+    setTimeout(() => setRolloverNotice(null), 5000);
   };
 
   // Handle Login
   const handleLoginSuccess = (user: AuthUser) => {
-    saveActiveSession(user);
+    setAuthReady(true);
     setCurrentUser(user);
     setIsLoginModalOpen(false);
     setIsPinLocked(false);
@@ -1976,26 +1876,12 @@ export default function App() {
       setCurrentView('dasbor-warga');
     } else {
       setCurrentView('beranda');
-      const nowIso = new Date().toISOString();
-      const nowLabel = formatWaktuSyncID();
-      setAdminAccounts((prev) =>
-        prev.map((acc) =>
-          acc.username.toLowerCase() === user.username.toLowerCase()
-            ? { ...acc, terakhirLogin: nowLabel, updatedAt: nowIso }
-            : acc
-        )
-      );
     }
   };
 
-  // Handle Explicit Logout -> invalidates server session & clears sensitive local memory
+  // Handle Explicit Logout -> signs out of Firebase Auth & clears state
   const handleLogout = async () => {
-    await logoutFromServer();
-    saveActiveSession(null);
-    clearAuthToken();
-    isLoadedRef.current = false;
-    lastServerHashRef.current = '';
-    lastServerRevisionRef.current = 0;
+    await logoutFromFirebase();
     setDataLoadedReady(false);
     setSseConnected(false);
     setCurrentUser(null);
@@ -2012,11 +1898,6 @@ export default function App() {
     setIsSidebarOpen(false);
     setCloudError(null);
     setIsLoginModalOpen(true);
-    const pub = await fetchPublicBootstrapInfo();
-    if (pub?.pengaturanKas) {
-      setPengaturanKas(pub.pengaturanKas);
-      setTahunAktif(pub.tahunAktif);
-    }
   };
 
   // Quick switch role helper (only triggered from inside Server control view)
@@ -2029,7 +1910,6 @@ export default function App() {
         rtScope: 'Semua RT se-RW 05 Glempang',
         isPinAuthenticated: true,
       };
-      saveActiveSession(nextUser);
       setCurrentUser(nextUser);
       setCurrentView('server-kontrol');
     } else if (targetRole === 'admin') {
@@ -2051,21 +1931,19 @@ export default function App() {
         rtScope: `RT ${rtStr} RW ${rwStr}`,
         isPinAuthenticated: true,
       };
-      saveActiveSession(nextUser);
       setCurrentUser(nextUser);
       setCurrentView('beranda');
     } else {
       const sampleWarga = wargaList[0];
       const nextUser: AuthUser = {
         role: 'warga',
-        username: sampleWarga?.nama || 'Budi Santoso',
-        nama: sampleWarga?.nama || 'Budi Santoso',
-        noKK: sampleWarga?.noKK || '3302140508000003',
-        wargaId: sampleWarga?.id || 'w3',
+        username: sampleWarga?.nama || 'Warga',
+        nama: sampleWarga?.nama || 'Warga',
+        noKK: sampleWarga?.noKK || '',
+        wargaId: sampleWarga?.id || '',
         rtScope: sampleWarga ? `RT ${sampleWarga.rt || '08'} RW ${sampleWarga.rw || '05'}` : 'RT 08 RW 05',
         isPinAuthenticated: true,
       };
-      saveActiveSession(nextUser);
       setCurrentUser(nextUser);
       setCurrentView('dasbor-warga');
     }
@@ -2160,6 +2038,22 @@ export default function App() {
   ];
 
   const currentNavItems: NavItem[] = isServer ? serverNavItems : isAdminRT ? adminNavItems : wargaNavItems;
+
+  // Wait briefly for Firebase Auth persistence recovery before showing login screen
+  if (!authReady) {
+    return (
+      <div className="min-h-screen w-full flex flex-col items-center justify-center bg-gradient-to-br from-[#063A27] via-[#0B5D3F] to-[#0F172A] text-white p-6">
+        <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-white/10 p-2 backdrop-blur-xs shadow-lg mb-4">
+          <HouseLogo size={46} variant="white" />
+        </div>
+        <h1 className="text-lg font-extrabold tracking-tight">Aplikasi Desa Kotayasa</h1>
+        <p className="mt-1 text-xs text-emerald-200 flex items-center gap-2">
+          <RefreshCw size={13} className="animate-spin" />
+          Memulihkan sesi Firebase Authentication...
+        </p>
+      </div>
+    );
+  }
 
   // SECURITY GATE: Fresh installs & logged-out users MUST enter via the Login Menu first
   if (!currentUser) {
@@ -2354,7 +2248,7 @@ export default function App() {
 
         {/* Sidebar Footer */}
         <div className="border-t border-white/10 pt-4 space-y-2">
-          {/* Central SQL & Live Server persistence indicator */}
+          {/* Cloud Firestore Real-time persistence indicator */}
           <div className="flex items-center justify-between text-[10px] text-white/80 px-1">
             <span className="flex items-center gap-1.5">
               <span
@@ -2372,10 +2266,10 @@ export default function App() {
                 {syncStatus === 'saving'
                   ? 'Menyinkronkan...'
                   : !serverConnected || syncStatus === 'offline'
-                  ? 'Koneksi Server Terputus'
+                  ? 'Firebase Terputus'
                   : sseConnected
-                  ? 'Server Pusat Live'
-                  : 'Server Terhubung'}
+                  ? 'Cloud Firestore Live'
+                  : 'Firebase Terhubung'}
               </span>
             </span>
             <button
@@ -2395,22 +2289,22 @@ export default function App() {
               onClick={() => handleSyncAdminAccountToServer()}
               disabled={adminSyncBusy}
               className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 px-3 py-1.5 text-[11px] font-bold text-slate-950 transition-all cursor-pointer disabled:opacity-60 shadow-xs"
-              title="Akun Admin belum terdaftar ke Server. Klik untuk menyinkronkan akun & data ke Server."
+              title="Akun Admin belum terdaftar di Cloud Firestore. Klik untuk menyinkronkan akun & data."
             >
               <CloudUpload size={13} />
-              <span>{adminSyncBusy ? 'Menyinkronkan Akun...' : 'Sinkron Akun ke Server'}</span>
+              <span>{adminSyncBusy ? 'Menyinkronkan Akun...' : 'Sinkron Akun ke Firebase'}</span>
             </button>
           )}
 
           {isAdminRT && dataLoadedReady && isCurrentAdminOnServer && (
             <div className="flex items-center justify-between rounded-xl bg-emerald-400/15 px-2.5 py-1.5 text-[10px] text-emerald-100 border border-emerald-300/20">
-              <span className="truncate font-semibold">Database Server: Terhubung</span>
+              <span className="truncate font-semibold">Cloud Firestore: Live</span>
               <button
                 type="button"
                 onClick={() => handleSyncAdminAccountToServer()}
                 disabled={adminSyncBusy}
                 className="shrink-0 font-black text-emerald-300 hover:text-white ml-1 cursor-pointer disabled:opacity-50"
-                title="Sinkronkan ulang akun & data ke Server"
+                title="Sinkronkan ulang akun & data ke Cloud Firestore"
               >
                 {adminSyncBusy ? '...' : 'SINKRON'}
               </button>
@@ -2545,12 +2439,12 @@ export default function App() {
               )}
               <span>
                 {!serverConnected || syncStatus === 'offline'
-                  ? 'Server Terputus'
+                  ? 'Firebase Terputus'
                   : syncStatus === 'saving' || cloudSyncBusy
                   ? 'Menyinkronkan...'
                   : sseConnected
-                  ? 'Server Live'
-                  : 'Server Terhubung'}
+                  ? 'Cloud Live'
+                  : 'Firebase Siap'}
               </span>
             </button>
 
@@ -2911,12 +2805,15 @@ export default function App() {
                   currentPin={currentPin}
                   onUpdatePin={async (pin) => {
                     setCurrentPin(pin);
-                    const res = await updateWargaSelfOnServer({ pin });
+                    const targetWargaId = currentUser?.wargaId || wargaList[0]?.id;
+                    if (!targetWargaId) return;
+                    const res = await updateWargaSelfDoc(targetWargaId, { pin });
                     if (!res.ok) {
                       setSyncStatus('offline');
-                      setCloudError(res.message || 'Gagal menyimpan PIN baru ke database server.');
+                      setCloudError(res.message || 'Gagal menyimpan PIN baru ke Cloud Firestore.');
                     } else {
                       setServerConnected(true);
+                      setSyncStatus('synced');
                     }
                   }}
                   onUpdatePengaturan={handleUpdatePengaturan}
