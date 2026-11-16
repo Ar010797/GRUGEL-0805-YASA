@@ -2,7 +2,12 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
 import { Transaction, Warga, AnggotaKeluarga, PengumumanRT, BantuanPemerintah, ProfilRT, PengaturanKas } from '../types';
-import { resolveTransactionWargaName } from './rtFilter';
+import {
+  getKasKematianBalanceSummary,
+  isKasKematianOutflow,
+  isTransactionInflow,
+  resolveTransactionWargaName,
+} from './rtFilter';
 
 export const exportRekapTahunanPDF = (
   transactions: Transaction[],
@@ -38,9 +43,7 @@ export const exportRekapTahunanPDF = (
     .filter((t) => t.tipe === 'keluar')
     .reduce((acc, t) => acc + t.nominal, 0);
 
-  const totalKematian = transactions
-    .filter((t) => t.tipe === 'kematian')
-    .reduce((acc, t) => acc + t.nominal, 0);
+  const totalKematian = getKasKematianBalanceSummary(transactions).saldoKematian;
 
   const saldoAkhir = totalMasuk - totalKeluar;
 
@@ -104,8 +107,14 @@ export const exportRekapTahunanPDF = (
         t.tanggal,
         t.keterangan,
         resolveTransactionWargaName(t, wargaList) || '—',
-        t.tipe === 'masuk' ? 'Kas Masuk' : t.tipe === 'keluar' ? 'Kas Keluar' : 'Kas Kematian',
-        (t.tipe === 'masuk' ? '+' : '-') + formatRp(t.nominal),
+        t.tipe === 'masuk'
+          ? 'Kas Masuk'
+          : t.tipe === 'keluar'
+          ? 'Kas Keluar'
+          : isKasKematianOutflow(t)
+          ? 'Keluar Kematian'
+          : 'Kas Kematian',
+        (isTransactionInflow(t) ? '+' : '-') + formatRp(t.nominal),
       ])
     : [
         ['-', '-', 'Belum ada transaksi (Data Kas Masih Kosong)', '—', '—', 'Rp 0'],
@@ -195,7 +204,7 @@ export const exportPengeluaranPDF = (
   const namaBendahara = pengaturanKas?.kontakBendahara?.nama?.trim() || `Bendahara RT ${rtStr}`;
   const desaShort = desaStr.replace(/^Desa\s+/i, '');
 
-  const keluarList = transactions.filter((t) => t.tipe === 'keluar' || t.tipe === 'kematian');
+  const keluarList = transactions.filter((t) => t.tipe === 'keluar' || isKasKematianOutflow(t));
   const totalKeluar = keluarList.reduce((acc, t) => acc + t.nominal, 0);
 
   const formatRp = (val: number) => 'Rp ' + val.toLocaleString('id-ID');

@@ -91,7 +91,7 @@ export const SaldoAwalModal: React.FC<SaldoAwalModalProps> = ({
           <div>
             <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5 mb-1">
               <Heart size={15} className="text-[#F43F5E]" />
-              <span>Sisa Kas Kematian (Mori & Duka) Masa Lalu (Rp)</span>
+              <span>Sisa Kas Kematian Warga Masa Lalu (Rp)</span>
             </label>
             <div className="relative">
               <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">Rp</span>
@@ -106,7 +106,7 @@ export const SaldoAwalModal: React.FC<SaldoAwalModalProps> = ({
               />
             </div>
             <p className="mt-1 text-[11px] text-slate-400">
-              Dana khusus cadangan kain mori dan santunan pemulasaraan jenazah warga RT {pengaturanKas?.profilRT?.namaRT || '08'}.
+              Saldo cadangan kas kematian warga RT {pengaturanKas?.profilRT?.namaRT || '08'} yang terkumpul pada periode sebelumnya.
             </p>
           </div>
 

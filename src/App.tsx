@@ -120,6 +120,7 @@ import {
 import {
   collectRegisteredRTs,
   buildServerFilteredViewData,
+  getKasKematianBalanceSummary,
   normalizeRTCode,
 } from './utils/rtFilter';
 
@@ -1088,9 +1089,7 @@ export default function App() {
     return totalKasUmumKeluar;
   }
 
-  const saldoKasKematianBerjalan = transactions
-    .filter((t) => t.tipe === 'kematian')
-    .reduce((sum, t) => sum + t.nominal, 0);
+  const saldoKasKematianBerjalan = getKasKematianBalanceSummary(transactions).saldoKematian;
 
   // Annual Rollover Handler (Pergantian Tahun Otomatis - Saldo Berlanjut Tanpa Dikosongkan)
   const handleSwitchTahunAktif = async (newYear: number) => {
@@ -1645,35 +1644,50 @@ export default function App() {
     }
   };
 
-  // Add Transaction (with double-submit guard)
-  const handleSaveTransaction = async (tx: Omit<Transaction, 'id'>) => {
+  // Add Transaction or Paired Kas Warga + Kas Kematian Batch (with double-submit guard)
+  const handleSaveTransaction = async (
+    txInput: Omit<Transaction, 'id'> | Omit<Transaction, 'id'>[]
+  ) => {
     if (txSubmitLockRef.current) return;
     txSubmitLockRef.current = true;
     try {
+      const inputs = Array.isArray(txInput) ? txInput : [txInput];
+      if (inputs.length === 0) return;
+
       const nowIso = new Date().toISOString();
-      const resolvedRtScope =
-        tx.rtScope ||
-        (currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
-          ? `RT ${selectedServerRT}`
-          : currentUser?.rtScope ||
-            `RT ${pengaturanKas.profilRT?.namaRT || '08'} RW ${pengaturanKas.profilRT?.namaRW || '05'}`);
-      const newTx: Transaction = {
-        ...tx,
-        id: toValidDocId(`tx_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`, 'tx'),
-        tahun: tahunAktif,
-        rtScope: resolvedRtScope,
-        updatedAt: nowIso,
-      };
-      const nextTransactions = [newTx, ...latestStateRef.current.transactions];
+      const baseTime = Date.now();
+      const newTxs: Transaction[] = inputs.map((tx, idx) => {
+        const resolvedRtScope =
+          tx.rtScope ||
+          (currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
+            ? `RT ${selectedServerRT}`
+            : currentUser?.rtScope ||
+              `RT ${pengaturanKas.profilRT?.namaRT || '08'} RW ${pengaturanKas.profilRT?.namaRW || '05'}`);
+        return {
+          ...tx,
+          id: toValidDocId(
+            `tx_${baseTime + idx}_${Math.random().toString(36).slice(2, 6)}`,
+            'tx'
+          ),
+          tahun: tahunAktif,
+          rtScope: resolvedRtScope,
+          updatedAt: nowIso,
+        };
+      });
+
+      const nextTransactions = [...newTxs, ...latestStateRef.current.transactions];
       setTransactions(nextTransactions);
       setSyncStatus('connecting');
-      const res = await saveTransactionDoc(newTx);
-      if (!res.ok) {
+
+      const results = await Promise.all(newTxs.map((item) => saveTransactionDoc(item)));
+      const failed = results.find((r) => !r.ok);
+      if (failed) {
         setSyncStatus('error');
-        setCloudError(res.message || 'Gagal menyinkronkan transaksi ke Cloud Firestore.');
+        setCloudError(failed.message || 'Gagal menyinkronkan transaksi ke Cloud Firestore.');
       } else {
-        applyWriteSuccessStatus(res.pending);
-        if (!res.pending) {
+        const anyPending = results.some((r) => r.pending);
+        applyWriteSuccessStatus(anyPending);
+        if (!anyPending) {
           await triggerPublicSummarySync({ transactions: nextTransactions });
         }
       }
@@ -2458,7 +2472,7 @@ export default function App() {
     { id: 'kas-warga', label: 'Kas Warga', icon: <Wallet size={18} /> },
     { id: 'kas-masuk', label: 'Kas Masuk', icon: <ArrowUp size={18} strokeWidth={2.5} /> },
     { id: 'kas-keluar', label: 'Kas Keluar', icon: <ArrowDown size={18} strokeWidth={2.5} /> },
-    { id: 'kas-kematian', label: 'Kas Kematian (Mori)', icon: <Heart size={18} fill="currentColor" /> },
+    { id: 'kas-kematian', label: 'Kas Kematian Warga', icon: <Heart size={18} fill="currentColor" /> },
     { id: 'status-iuran', label: 'Status Iuran', icon: <CalendarCheck size={18} /> },
     { id: 'data-warga', label: 'Data Warga & Excel', icon: <Users size={18} /> },
     { id: 'bantuan-pemerintah', label: 'Bantuan Pemerintah', icon: <HandHeart size={18} />, badge: 'Rahasia' },

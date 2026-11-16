@@ -24,7 +24,11 @@ import {
 import { HouseLogo, LeafIcon } from '../components/HouseLogo';
 import { GreetingVillageIllustration } from '../components/VillageLandscape';
 import { Transaction, Warga, PengaturanKas } from '../types';
-import { resolveTransactionWargaName } from '../utils/rtFilter';
+import {
+  getKasKematianBalanceSummary,
+  isTransactionInflow,
+  resolveTransactionWargaName,
+} from '../utils/rtFilter';
 
 interface BerandaViewProps {
   transactions: Transaction[];
@@ -65,9 +69,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
     .filter((t) => t.tipe === 'keluar')
     .reduce((acc, t) => acc + t.nominal, 0);
 
-  const totalKematian = transactions
-    .filter((t) => t.tipe === 'kematian')
-    .reduce((acc, t) => acc + t.nominal, 0);
+  const totalKematian = getKasKematianBalanceSummary(transactions).saldoKematian;
 
   const saldoKas = totalMasuk - totalKeluar;
 
@@ -109,10 +111,10 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
     {
       id: 'kas-kematian',
       title: 'Kas Kematian',
-      desc: 'Data dana & santunan duka',
+      desc: 'Iuran & saldo kas kematian',
       icon: <Heart size={24} fill="currentColor" className="text-white" />,
       color: 'bg-[#F43F5E]',
-      badge: 'Sosial',
+      badge: 'Dana Sosial',
     },
     {
       id: 'status-iuran',
@@ -338,7 +340,7 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
             {formatRupiah(totalKematian)}
           </p>
           <span className="mt-1 block text-[11px] font-medium text-rose-600">
-            {totalKematian === 0 ? 'Belum ada data duka' : 'Santunan keluarga duka'}
+            {totalKematian === 0 ? 'Belum ada kas kematian' : 'Iuran & cadangan kas kematian'}
           </span>
         </motion.div>
       </div>
@@ -582,13 +584,18 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
                     </div>
                   </div>
                   <div className="text-right">
-                    <p
-                      className={`text-xs font-bold ${
-                        tx.tipe === 'masuk' ? 'text-emerald-700' : 'text-rose-600'
-                      }`}
-                    >
-                      {tx.tipe === 'masuk' ? '+' : '-'} {formatRupiah(tx.nominal)}
-                    </p>
+                    {(() => {
+                      const inflow = isTransactionInflow(tx);
+                      return (
+                        <p
+                          className={`text-xs font-bold ${
+                            inflow ? 'text-emerald-700' : 'text-rose-600'
+                          }`}
+                        >
+                          {inflow ? '+' : '-'} {formatRupiah(tx.nominal)}
+                        </p>
+                      );
+                    })()}
                     <span className="text-[10px] text-slate-400 capitalize">{tx.kategori}</span>
                   </div>
                 </div>

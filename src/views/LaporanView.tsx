@@ -2,7 +2,11 @@ import React from 'react';
 import { ArrowLeft, FileText, Download, Printer, ShieldCheck, CheckCircle2, ArrowDown, Users } from 'lucide-react';
 import { Transaction, Warga, BantuanPemerintah } from '../types';
 import { exportRekapTahunanPDF, exportPengeluaranPDF, exportDataWargaPerKK_PDF } from '../utils/pdfExport';
-import { resolveTransactionWargaName } from '../utils/rtFilter';
+import {
+  getKasKematianBalanceSummary,
+  isTransactionInflow,
+  resolveTransactionWargaName,
+} from '../utils/rtFilter';
 
 interface LaporanViewProps {
   transactions: Transaction[];
@@ -43,9 +47,7 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
     .filter((t) => t.tipe === 'keluar')
     .reduce((acc, t) => acc + t.nominal, 0);
 
-  const totalKematian = transactions
-    .filter((t) => t.tipe === 'kematian')
-    .reduce((acc, t) => acc + t.nominal, 0);
+  const totalKematian = getKasKematianBalanceSummary(transactions).saldoKematian;
 
   const saldoAkhir = totalMasuk - totalKeluar;
 
@@ -190,9 +192,14 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
                     <td className="py-2 px-4 text-slate-600">{resolveTransactionWargaName(t, wargaList) || '—'}</td>
                     <td className="py-2 px-4 capitalize">{t.tipe}</td>
                     <td className="py-2 px-4 text-right font-bold">
-                      <span className={t.tipe === 'masuk' ? 'text-emerald-700' : 'text-rose-600'}>
-                        {t.tipe === 'masuk' ? '+' : '-'} {formatRupiah(t.nominal)}
-                      </span>
+                      {(() => {
+                        const inflow = isTransactionInflow(t);
+                        return (
+                          <span className={inflow ? 'text-emerald-700' : 'text-rose-600'}>
+                            {inflow ? '+' : '-'} {formatRupiah(t.nominal)}
+                          </span>
+                        );
+                      })()}
                     </td>
                   </tr>
                 ))}

@@ -13,7 +13,11 @@ import {
 } from 'lucide-react';
 import { LeafIcon } from '../components/HouseLogo';
 import { Transaction, PengaturanKas, Warga } from '../types';
-import { resolveTransactionWargaName } from '../utils/rtFilter';
+import {
+  getKasKematianBalanceSummary,
+  isTransactionInflow,
+  resolveTransactionWargaName,
+} from '../utils/rtFilter';
 
 interface KasWargaViewProps {
   transactions: Transaction[];
@@ -49,9 +53,7 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
     .filter((t) => t.tipe === 'keluar')
     .reduce((acc, t) => acc + t.nominal, 0);
 
-  const totalKematian = transactions
-    .filter((t) => t.tipe === 'kematian')
-    .reduce((acc, t) => acc + t.nominal, 0);
+  const totalKematian = getKasKematianBalanceSummary(transactions).saldoKematian;
 
   const saldoKas = totalMasuk - totalKeluar;
 
@@ -239,9 +241,14 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
                       </span>
                     </td>
                     <td className="py-3.5 px-6 text-right font-extrabold">
-                      <span className={tx.tipe === 'masuk' ? 'text-emerald-700' : 'text-rose-600'}>
-                        {tx.tipe === 'masuk' ? '+' : '-'} {formatRupiah(tx.nominal)}
-                      </span>
+                      {(() => {
+                        const inflow = isTransactionInflow(tx);
+                        return (
+                          <span className={inflow ? 'text-emerald-700' : 'text-rose-600'}>
+                            {inflow ? '+' : '-'} {formatRupiah(tx.nominal)}
+                          </span>
+                        );
+                      })()}
                     </td>
                   </tr>
                 ))}

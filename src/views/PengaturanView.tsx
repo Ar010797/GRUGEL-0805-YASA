@@ -76,9 +76,13 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
     onConfirm: () => {},
   });
 
-  // Annual Dues Configuration (Admin input TAHUNAN -> auto hitung BULANAN)
+  // Annual Dues Configuration (Admin input TAHUNAN -> auto hitung BULANAN, plus mode fleksibel untuk Kas Kematian)
   const [jimpitanTahunan, setJimpitanTahunan] = useState(
     (pengaturanKas.nominalJimpitanTahunan || 300000).toString()
+  );
+  const [kematianInputMode, setKematianInputMode] = useState<'bulanan' | 'tahunan'>('bulanan');
+  const [kematianBulanan, setKematianBulanan] = useState(
+    (pengaturanKas.nominalKematianBulanan ?? Math.round((pengaturanKas.nominalKematianTahunan || 120000) / 12)).toString()
   );
   const [kematianTahunan, setKematianTahunan] = useState(
     (pengaturanKas.nominalKematianTahunan || 120000).toString()
@@ -107,7 +111,11 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
   // Sync local form state when pengaturanKas changes from server / Firestore / other tabs
   useEffect(() => {
     setJimpitanTahunan((pengaturanKas.nominalJimpitanTahunan || 300000).toString());
-    setKematianTahunan((pengaturanKas.nominalKematianTahunan || 120000).toString());
+    const syncedKematianTahunan = pengaturanKas.nominalKematianTahunan ?? 120000;
+    const syncedKematianBulanan =
+      pengaturanKas.nominalKematianBulanan ?? Math.round(syncedKematianTahunan / 12);
+    setKematianTahunan(syncedKematianTahunan.toString());
+    setKematianBulanan(syncedKematianBulanan.toString());
     if (pengaturanKas.profilRT) {
       setNamaRT(pengaturanKas.profilRT.namaRT || '08');
       setNamaRW(pengaturanKas.profilRT.namaRW || '05');
@@ -145,12 +153,18 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
 
   const [savedSettings, setSavedSettings] = useState(false);
 
-  // Live Auto-Calculation: Tahunan ÷ 12
+  // Live Auto-Calculation: Tahunan <-> Bulanan
   const numJimpitanTahunan = parseFloat(jimpitanTahunan.replace(/[^0-9]/g, '')) || 0;
   const numJimpitanBulanan = Math.round(numJimpitanTahunan / 12);
 
-  const numKematianTahunan = parseFloat(kematianTahunan.replace(/[^0-9]/g, '')) || 0;
-  const numKematianBulanan = Math.round(numKematianTahunan / 12);
+  const numKematianBulanan =
+    kematianInputMode === 'bulanan'
+      ? parseFloat(kematianBulanan.replace(/[^0-9]/g, '')) || 0
+      : Math.round((parseFloat(kematianTahunan.replace(/[^0-9]/g, '')) || 0) / 12);
+  const numKematianTahunan =
+    kematianInputMode === 'tahunan'
+      ? parseFloat(kematianTahunan.replace(/[^0-9]/g, '')) || 0
+      : numKematianBulanan * 12;
 
   const totalIuranTahunan = numJimpitanTahunan + numKematianTahunan;
   const totalIuranBulanan = numJimpitanBulanan + numKematianBulanan;
@@ -688,30 +702,106 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
                 </p>
               </div>
 
-              {/* Uang Kematian / Kain Mori */}
-              <div className="rounded-2xl bg-rose-50/60 p-4 border border-rose-200/80 space-y-2">
-                <div className="flex items-center justify-between">
+              {/* Iuran Kas Kematian Warga */}
+              <div className="rounded-2xl bg-rose-50/60 p-4 border border-rose-200/80 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <label className="text-xs font-bold text-rose-900 flex items-center gap-1.5">
                     <Heart size={14} className="text-rose-600" fill="currentColor" />
-                    <span>2. Kas Kematian & Kain Mori (Setahun)</span>
+                    <span>2. Iuran Kas Kematian Warga</span>
                   </label>
-                  <span className="text-[10px] font-bold text-rose-800 bg-rose-100 px-2 py-0.5 rounded-md">
-                    Auto: Rp {numKematianBulanan.toLocaleString('id-ID')} / bulan
-                  </span>
+                  <div className="inline-flex rounded-lg bg-white p-0.5 border border-rose-200">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setKematianBulanan(numKematianBulanan.toString());
+                        setKematianInputMode('bulanan');
+                      }}
+                      className={`rounded-md px-2 py-0.5 text-[10px] font-bold cursor-pointer transition-colors ${
+                        kematianInputMode === 'bulanan'
+                          ? 'bg-rose-600 text-white'
+                          : 'text-slate-600 hover:bg-rose-50'
+                      }`}
+                    >
+                      Per Bulan
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setKematianTahunan(numKematianTahunan.toString());
+                        setKematianInputMode('tahunan');
+                      }}
+                      className={`rounded-md px-2 py-0.5 text-[10px] font-bold cursor-pointer transition-colors ${
+                        kematianInputMode === 'tahunan'
+                          ? 'bg-rose-600 text-white'
+                          : 'text-slate-600 hover:bg-rose-50'
+                      }`}
+                    >
+                      Per Tahun
+                    </button>
+                  </div>
                 </div>
+
+                {/* Pilihan Cepat Tarif Kas Kematian */}
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { label: 'Rp 3.000/bln', mode: 'bulanan' as const, val: 3000 },
+                    { label: 'Rp 4.000/bln', mode: 'bulanan' as const, val: 4000 },
+                    { label: 'Rp 5.000/bln', mode: 'bulanan' as const, val: 5000 },
+                    { label: 'Rp 45.000/thn', mode: 'tahunan' as const, val: 45000 },
+                    { label: 'Rp 10.000/bln', mode: 'bulanan' as const, val: 10000 },
+                  ].map((preset) => {
+                    const active =
+                      preset.mode === 'bulanan'
+                        ? kematianInputMode === 'bulanan' && numKematianBulanan === preset.val
+                        : kematianInputMode === 'tahunan' && numKematianTahunan === preset.val;
+                    return (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        onClick={() => {
+                          setKematianInputMode(preset.mode);
+                          if (preset.mode === 'bulanan') {
+                            setKematianBulanan(String(preset.val));
+                            setKematianTahunan(String(preset.val * 12));
+                          } else {
+                            setKematianTahunan(String(preset.val));
+                            setKematianBulanan(String(Math.round(preset.val / 12)));
+                          }
+                        }}
+                        className={`rounded-lg px-2 py-1 text-[10px] font-bold border transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-rose-600 text-white border-rose-600'
+                            : 'bg-white text-rose-800 border-rose-200 hover:bg-rose-100/70'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">Rp</span>
                   <input
                     type="text"
                     required
-                    value={kematianTahunan}
-                    onChange={(e) => setKematianTahunan(e.target.value)}
-                    placeholder="120000"
-                    className="w-full rounded-xl border border-slate-300 pl-10 pr-4 py-2 text-sm font-bold text-slate-800 bg-white focus:border-[#0B5D3F] outline-hidden"
+                    value={kematianInputMode === 'bulanan' ? kematianBulanan : kematianTahunan}
+                    onChange={(e) => {
+                      if (kematianInputMode === 'bulanan') {
+                        setKematianBulanan(e.target.value);
+                      } else {
+                        setKematianTahunan(e.target.value);
+                      }
+                    }}
+                    placeholder={kematianInputMode === 'bulanan' ? '3000' : '45000'}
+                    className="w-full rounded-xl border border-slate-300 pl-10 pr-20 py-2 text-sm font-bold text-slate-800 bg-white focus:border-[#0B5D3F] outline-hidden"
                   />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-bold text-rose-700">
+                    / {kematianInputMode === 'bulanan' ? 'bulan' : 'tahun'}
+                  </span>
                 </div>
                 <p className="text-[11px] text-slate-500">
-                  Kalkulasi otomatis: Rp {numKematianTahunan.toLocaleString('id-ID')} &divide; 12 = <strong>Rp {numKematianBulanan.toLocaleString('id-ID')} / bulan</strong> untuk kain mori & santunan.
+                  Setoran iuran kas kematian warga: <strong>Rp {numKematianBulanan.toLocaleString('id-ID')} / bulan</strong> (setara <strong>Rp {numKematianTahunan.toLocaleString('id-ID')} / tahun</strong> per KK).
                 </p>
               </div>
 

@@ -196,6 +196,69 @@ export function resolveTransactionWargaName(
   return '';
 }
 
+export function isKasKematianOutflow(tx: Transaction): boolean {
+  if (tx.tipe !== 'kematian') return false;
+  if (tx.isSaldoAwal) return false;
+  const kat = String(tx.kategori || '').toLowerCase();
+  if (
+    kat.includes('iuran') ||
+    kat.includes('setoran') ||
+    kat.includes('pemasukan') ||
+    kat.includes('saldo') ||
+    kat.includes('masuk')
+  ) {
+    return false;
+  }
+  return (
+    kat.includes('santunan') ||
+    kat.includes('pengeluaran') ||
+    kat.includes('keluar') ||
+    kat.includes('duka') ||
+    kat.includes('pemakaman') ||
+    kat.includes('kafan') ||
+    kat.includes('mori')
+  );
+}
+
+export function isTransactionInflow(tx: Transaction): boolean {
+  if (tx.tipe === 'masuk') return true;
+  if (tx.tipe === 'keluar') return false;
+  if (tx.tipe === 'kematian') return !isKasKematianOutflow(tx);
+  return true;
+}
+
+export function getKasKematianBalanceSummary(transactions: Transaction[]): {
+  totalMasukKematian: number;
+  totalKeluarKematian: number;
+  saldoKematian: number;
+  masukCount: number;
+  keluarCount: number;
+} {
+  let totalMasukKematian = 0;
+  let totalKeluarKematian = 0;
+  let masukCount = 0;
+  let keluarCount = 0;
+
+  for (const t of transactions) {
+    if (t.tipe !== 'kematian') continue;
+    if (isKasKematianOutflow(t)) {
+      totalKeluarKematian += t.nominal;
+      keluarCount += 1;
+    } else {
+      totalMasukKematian += t.nominal;
+      masukCount += 1;
+    }
+  }
+
+  return {
+    totalMasukKematian,
+    totalKeluarKematian,
+    saldoKematian: totalMasukKematian - totalKeluarKematian,
+    masukCount,
+    keluarCount,
+  };
+}
+
 export function getTransactionRTCode(
   tx: Transaction,
   wargaList: Warga[],
@@ -328,9 +391,7 @@ export function collectRegisteredRTs(params: {
     const totalKeluar = rtTx
       .filter((t) => t.tipe === 'keluar')
       .reduce((acc, t) => acc + t.nominal, 0);
-    const totalKematian = rtTx
-      .filter((t) => t.tipe === 'kematian')
-      .reduce((acc, t) => acc + t.nominal, 0);
+    const totalKematian = getKasKematianBalanceSummary(rtTx).saldoKematian;
 
     const hasLiveTx = rtTx.length > 0;
     const totalKK = rtWarga.length > 0 ? rtWarga.length : latestLaporan?.totalKK || 0;

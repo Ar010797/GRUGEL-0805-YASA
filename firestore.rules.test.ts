@@ -7,9 +7,12 @@ import {
 import {
   buildServerFilteredViewData,
   collectRegisteredRTs,
+  getKasKematianBalanceSummary,
   getSelectableResidentsForRT,
   getTransactionRTCode,
   getWargaRTCode,
+  isKasKematianOutflow,
+  isTransactionInflow,
   normalizeRTCode,
   normalizeRWCode,
   resolveTransactionWargaName,
@@ -432,6 +435,71 @@ const unitLogicChecks: { name: string; assertFn: () => void }[] = [
         residentId: 'w_rt04_99',
       };
       assert.equal(getTransactionRTCode(txWithoutScope, wargaList, '08'), '04');
+    },
+  },
+  {
+    name: '23. Kas Kematian resident contributions & saldo awal count as positive inflows (+), separate from Santunan outflows (-)',
+    assertFn: () => {
+      const txs: Transaction[] = [
+        {
+          id: 'tx_km_saldo',
+          tanggal: '2026-01-01',
+          kategori: 'Kas Kematian',
+          keterangan: 'Saldo Kas Kematian Masa Lalu',
+          nominal: 500000,
+          tipe: 'kematian',
+          isSaldoAwal: true,
+        },
+        {
+          id: 'tx_km_bln1',
+          tanggal: '2026-10-01',
+          kategori: 'Iuran Kas Kematian',
+          keterangan: 'Setoran Iuran Kas Kematian (Bulanan)',
+          nominal: 3000,
+          tipe: 'kematian',
+          residentId: 'w_1',
+          namaWarga: 'Budi',
+        },
+        {
+          id: 'tx_km_thn1',
+          tanggal: '2026-10-02',
+          kategori: 'Iuran Kas Kematian',
+          keterangan: 'Setoran Iuran Kas Kematian (Tahunan)',
+          nominal: 45000,
+          tipe: 'kematian',
+          residentId: 'w_2',
+          namaWarga: 'Siti',
+        },
+        {
+          id: 'tx_km_out',
+          tanggal: '2026-10-10',
+          kategori: 'Santunan Kematian',
+          keterangan: 'Pengeluaran / Santunan Duka',
+          nominal: 200000,
+          tipe: 'kematian',
+          residentId: 'w_3',
+          namaWarga: 'Ahli Waris',
+        },
+      ];
+
+      assert.equal(isKasKematianOutflow(txs[0]), false);
+      assert.equal(isTransactionInflow(txs[0]), true);
+
+      assert.equal(isKasKematianOutflow(txs[1]), false);
+      assert.equal(isTransactionInflow(txs[1]), true);
+
+      assert.equal(isKasKematianOutflow(txs[2]), false);
+      assert.equal(isTransactionInflow(txs[2]), true);
+
+      assert.equal(isKasKematianOutflow(txs[3]), true);
+      assert.equal(isTransactionInflow(txs[3]), false);
+
+      const summary = getKasKematianBalanceSummary(txs);
+      assert.equal(summary.totalMasukKematian, 548000);
+      assert.equal(summary.totalKeluarKematian, 200000);
+      assert.equal(summary.saldoKematian, 348000);
+      assert.equal(summary.masukCount, 3);
+      assert.equal(summary.keluarCount, 1);
     },
   },
 ];

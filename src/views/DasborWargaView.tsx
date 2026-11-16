@@ -379,7 +379,7 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
                 </span>
               </div>
               <div className="flex justify-between">
-                <span>&bull; Kas Kematian & Kain Mori:</span>
+                <span>&bull; Kas Kematian Warga:</span>
                 <span className="font-bold text-slate-700">
                   {viewMode === 'tahunan' ? formatRp(kematianTahunan) : `${formatRp(kematianBulanan)}/bln`}
                 </span>
@@ -469,14 +469,14 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
           </div>
         </div>
 
-        {/* Kas Kematian & Kain Mori Explanation Banner */}
+        {/* Kas Kematian Warga Explanation Banner */}
         <div className="rounded-3xl bg-gradient-to-r from-rose-50 via-white to-rose-50/50 p-5 border border-rose-200/80 space-y-2">
           <div className="flex items-center gap-2 text-rose-800 font-bold text-xs">
             <Heart size={16} fill="currentColor" />
-            <span>Keterangan Alokasi Kas Kematian Warga ({formatRp(kematianTahunan)}/tahun = {formatRp(kematianBulanan)}/bulan):</span>
+            <span>Keterangan Iuran Kas Kematian Warga ({formatRp(kematianTahunan)}/tahun = {formatRp(kematianBulanan)}/bulan):</span>
           </div>
           <p className="text-xs text-slate-600 leading-relaxed">
-            Kas kematian dikumpulkan untuk menjamin kepastian pertolongan musibah warga RT {rtStr} RW {rwStr} {desaStr}. Dana ini disiapkan siap pakai untuk pengadaan <strong>kain mori/kafan lengkap</strong>, minyak wangi pemulasaraan, sabun, kapas, perlengkapan mandi jenazah, tenda duka, serta santunan duka bagi keluarga yang ditinggalkan.
+            Kas kematian dikumpulkan secara rutin dari warga RT {rtStr} RW {rwStr} {desaStr} dan dicatat sebagai dana cadangan kas tersendiri (terpisah dari kas umum warga). Dana ini disiapkan sebagai cadangan sosial apabila sewaktu-waktu dibutuhkan untuk keperluan kedukaan warga.
           </p>
         </div>
       </div>
