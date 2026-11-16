@@ -2,6 +2,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
 import { Transaction, Warga, AnggotaKeluarga, PengumumanRT, BantuanPemerintah, ProfilRT, PengaturanKas } from '../types';
+import { resolveTransactionWargaName } from './rtFilter';
 
 export const exportRekapTahunanPDF = (
   transactions: Transaction[],
@@ -102,7 +103,7 @@ export const exportRekapTahunanPDF = (
         (index + 1).toString(),
         t.tanggal,
         t.keterangan,
-        t.namaWarga || '—',
+        resolveTransactionWargaName(t, wargaList) || '—',
         t.tipe === 'masuk' ? 'Kas Masuk' : t.tipe === 'keluar' ? 'Kas Keluar' : 'Kas Kematian',
         (t.tipe === 'masuk' ? '+' : '-') + formatRp(t.nominal),
       ])
@@ -174,7 +175,8 @@ export const exportPengeluaranPDF = (
   transactions: Transaction[],
   tahun: string = '2026',
   profilRT?: ProfilRT,
-  pengaturanKas?: PengaturanKas
+  pengaturanKas?: PengaturanKas,
+  wargaList: Warga[] = []
 ) => {
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -237,7 +239,7 @@ export const exportPengeluaranPDF = (
         (idx + 1).toString(),
         t.tanggal,
         t.keterangan,
-        t.namaWarga || 'Operasional RT',
+        resolveTransactionWargaName(t, wargaList) || 'Operasional RT',
         t.kategori,
         formatRp(t.nominal),
       ])

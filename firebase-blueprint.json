@@ -203,6 +203,7 @@
         "keterangan": { "type": "string", "maxLength": 500 },
         "nominal": { "type": "number" },
         "tipe": { "type": "string", "enum": ["masuk", "keluar", "kematian"] },
+        "residentId": { "type": "string", "maxLength": 128 },
         "namaWarga": { "type": "string", "maxLength": 160 },
         "nomorRumah": { "type": "string", "maxLength": 32 },
         "noKK": { "type": "string", "maxLength": 32 },

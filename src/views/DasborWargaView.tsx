@@ -30,6 +30,7 @@ import { exportRekapTahunanPDF, exportPengeluaranPDF, exportSuratPengumumanPDF, 
 import { kirimWhatsAppPengumuman } from '../utils/whatsappShare';
 import { maskNIK, maskNoKK } from '../utils/security';
 import { ConfirmationModal } from '../components/ConfirmationModal';
+import { resolveTransactionWargaName } from '../utils/rtFilter';
 
 interface DasborWargaViewProps {
   currentUser: AuthUser;
@@ -138,12 +139,12 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
   ];
 
   // Personal transactions history
-  const personalTx = transactions.filter(
-    (t) =>
-      t.namaWarga &&
-      (t.namaWarga.toLowerCase().includes(wargaData.nama.toLowerCase()) ||
-        (t.noKK && t.noKK === wargaData.noKK))
-  );
+  const personalTx = transactions.filter((t) => {
+    if (t.residentId && t.residentId === wargaData.id) return true;
+    if (t.noKK && t.noKK === wargaData.noKK) return true;
+    const resolvedName = resolveTransactionWargaName(t, wargaList).toLowerCase();
+    return Boolean(resolvedName && resolvedName.includes(wargaData.nama.toLowerCase()));
+  });
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto">

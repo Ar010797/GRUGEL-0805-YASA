@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { ArrowLeft, ArrowDown, Plus, Search, Receipt, Heart, AlertCircle } from 'lucide-react';
-import { Transaction, PengaturanKas } from '../types';
+import { Transaction, PengaturanKas, Warga } from '../types';
+import { resolveTransactionWargaName } from '../utils/rtFilter';
 
 interface KasKeluarViewProps {
   transactions: Transaction[];
+  wargaList?: Warga[];
   pengaturanKas?: PengaturanKas;
   onOpenTxModal: () => void;
   onBack: () => void;
@@ -11,6 +13,7 @@ interface KasKeluarViewProps {
 
 export const KasKeluarView: React.FC<KasKeluarViewProps> = ({
   transactions,
+  wargaList = [],
   pengaturanKas,
   onOpenTxModal,
   onBack,
@@ -130,7 +133,7 @@ export const KasKeluarView: React.FC<KasKeluarViewProps> = ({
                     <tr key={t.id} className="hover:bg-slate-50 transition-colors">
                       <td className="py-3.5 px-4 sm:px-6 text-slate-500 whitespace-nowrap">{t.tanggal}</td>
                       <td className="py-3.5 px-4 sm:px-6 font-bold text-slate-800">{t.keterangan}</td>
-                      <td className="py-3.5 px-4 sm:px-6 text-slate-600">{t.namaWarga || 'Operasional RT'}</td>
+                      <td className="py-3.5 px-4 sm:px-6 text-slate-600">{resolveTransactionWargaName(t, wargaList) || 'Operasional RT'}</td>
                       <td className="py-3.5 px-4 sm:px-6">
                         <span className="rounded-full bg-rose-50 px-2.5 py-0.5 text-[10px] font-bold text-rose-700 border border-rose-200 whitespace-nowrap">
                           {t.kategori}

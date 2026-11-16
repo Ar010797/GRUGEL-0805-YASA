@@ -27,7 +27,9 @@ service cloud.firestore {
 
     function isBootstrappedAdmin() {
       return isSignedIn() &&
+        ('email_verified' in request.auth.token) &&
         request.auth.token.email_verified == true &&
+        ('email' in request.auth.token) &&
         request.auth.token.email == 'ar01071997@gmail.com';
     }
 
@@ -81,14 +83,18 @@ service cloud.firestore {
       return hasWargaProfile() && wargaProfile().rw == rw && wargaProfile().rt == rt;
     }
 
-    function canListOwnOrScoped(data) {
+    function canListOwnOrScoped() {
       return isBootstrappedAdmin() || (
         isSignedIn() && (
-          data.ownerUid == request.auth.uid ||
-          (('serverUid' in data) && data.serverUid == request.auth.uid) ||
-          (('rtAdminUid' in data) && data.rtAdminUid == request.auth.uid) ||
-          (('accessUids' in data) && data.accessUids is list && request.auth.uid in data.accessUids)
+          request.auth.uid in resource.data.accessUids ||
+          resource.data.ownerUid == request.auth.uid
         )
+      );
+    }
+
+    function canListOwnerScoped() {
+      return isBootstrappedAdmin() || (
+        isSignedIn() && resource.data.ownerUid == request.auth.uid
       );
     }
 
@@ -97,19 +103,19 @@ service cloud.firestore {
     }
 
     function isOptStr(data, key, maxLen) {
-      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+      return !(key in data) || data[key] == null || (data[key] is string && data[key].size() <= maxLen);
     }
 
     function isOptNum(data, key) {
-      return !(key in data) || (data[key] is number);
+      return !(key in data) || data[key] == null || (data[key] is number);
     }
 
     function isOptBool(data, key) {
-      return !(key in data) || (data[key] is bool);
+      return !(key in data) || data[key] == null || (data[key] is bool);
     }
 
     function isOptMap(data, key) {
-      return !(key in data) || (data[key] is map);
+      return !(key in data) || data[key] == null || (data[key] is map);
     }
 
     function isValidRwScope(data) {
@@ -215,7 +221,7 @@ service cloud.firestore {
         isValidRwScope(data) &&
         isOptStr(data, 'serverUid', 128) &&
         isOptMap(data, 'adminsByRt') &&
-        (!( 'registeredRts' in data ) || (data.registeredRts is list && data.registeredRts.size() <= 100 && (data.registeredRts.size() == 0 || data.registeredRts[0] is string))) &&
+        (!( 'registeredRts' in data ) || data.registeredRts == null || (data.registeredRts is list && data.registeredRts.size() <= 100 && (data.registeredRts.size() == 0 || data.registeredRts[0] is string))) &&
         isValidId(data.ownerUid) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -251,8 +257,8 @@ service cloud.firestore {
         isValidRwRtScope(data) &&
         data.tahunAktif is number &&
         isOptMap(data, 'pengaturanKas') &&
-        (!( 'transactions' in data ) || (data.transactions is list && data.transactions.size() <= 2000 && (data.transactions.size() == 0 || data.transactions[0] is map))) &&
-        (!( 'pengumuman' in data ) || (data.pengumuman is list && data.pengumuman.size() <= 200 && (data.pengumuman.size() == 0 || data.pengumuman[0] is map))) &&
+        (!( 'transactions' in data ) || data.transactions == null || (data.transactions is list && data.transactions.size() <= 2000 && (data.transactions.size() == 0 || data.transactions[0] is map))) &&
+        (!( 'pengumuman' in data ) || data.pengumuman == null || (data.pengumuman is list && data.pengumuman.size() <= 200 && (data.pengumuman.size() == 0 || data.pengumuman[0] is map))) &&
         isValidId(data.ownerUid) &&
         isOptStr(data, 'serverUid', 128) &&
         data.createdAt is timestamp &&
@@ -324,7 +330,7 @@ service cloud.firestore {
         (data.jenisKelamin == 'Laki-laki' || data.jenisKelamin == 'Perempuan') &&
         isOptNum(data, 'jumlahJiwa') &&
         (data.statusIuran == 'Sudah' || data.statusIuran == 'Belum') &&
-        (!( 'anggotaKeluarga' in data ) || (data.anggotaKeluarga is list && data.anggotaKeluarga.size() <= 30 && (data.anggotaKeluarga.size() == 0 || data.anggotaKeluarga[0] is map))) &&
+        (!( 'anggotaKeluarga' in data ) || data.anggotaKeluarga == null || (data.anggotaKeluarga is list && data.anggotaKeluarga.size() <= 30 && (data.anggotaKeluarga.size() == 0 || data.anggotaKeluarga[0] is map))) &&
         isOptStr(data, 'telepon', 32) &&
         isOptStr(data, 'pin', 12) &&
         isOptNum(data, 'pinAttempts') &&
@@ -336,8 +342,8 @@ service cloud.firestore {
         isOptMap(data, 'riwayatKematianPerTahun') &&
         isOptNum(data, 'iuranUmumTerbayar') &&
         isOptNum(data, 'iuranKematianTerbayar') &&
-        (!( 'pilihanSkema' in data ) || (data.pilihanSkema == 'bulanan' || data.pilihanSkema == 'tahunan')) &&
-        (!( 'riwayatPerubahanKK' in data ) || (data.riwayatPerubahanKK is list && data.riwayatPerubahanKK.size() <= 50 && (data.riwayatPerubahanKK.size() == 0 || data.riwayatPerubahanKK[0] is map))) &&
+        (!( 'pilihanSkema' in data ) || data.pilihanSkema == null || (data.pilihanSkema == 'bulanan' || data.pilihanSkema == 'tahunan')) &&
+        (!( 'riwayatPerubahanKK' in data ) || data.riwayatPerubahanKK == null || (data.riwayatPerubahanKK is list && data.riwayatPerubahanKK.size() <= 50 && (data.riwayatPerubahanKK.size() == 0 || data.riwayatPerubahanKK[0] is map))) &&
         isOptStr(data, 'linkedUid', 128) &&
         isValidAccessUids(data) &&
         isOptStr(data, 'serverUid', 128) &&
@@ -351,7 +357,7 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'tanggal', 'kategori', 'nominal', 'tipe', 'rt', 'rw', 'accessUids', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
           'id', 'tanggal', 'kategori', 'keterangan', 'nominal', 'tipe',
-          'namaWarga', 'nomorRumah', 'noKK', 'isSaldoAwal', 'tahun', 'rt', 'rw', 'rtId', 'rwId', 'rtScope',
+          'residentId', 'namaWarga', 'nomorRumah', 'noKK', 'isSaldoAwal', 'tahun', 'rt', 'rw', 'rtId', 'rwId', 'rtScope',
           'accessUids', 'serverUid', 'rtAdminUid', 'ownerUid', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.id) &&
@@ -360,6 +366,7 @@ service cloud.firestore {
         isOptStr(data, 'keterangan', 500) &&
         data.nominal is number &&
         (data.tipe == 'masuk' || data.tipe == 'keluar' || data.tipe == 'kematian') &&
+        isOptStr(data, 'residentId', 128) &&
         isOptStr(data, 'namaWarga', 160) &&
         isOptStr(data, 'nomorRumah', 32) &&
         isOptStr(data, 'noKK', 32) &&
@@ -660,7 +667,7 @@ service cloud.firestore {
         (resource == null && isActiveAdmin()) ||
         (resource != null && isAssignedAdmin(existing().rw, existing().rt))
       );
-      allow list: if canListOwnOrScoped(resource.data) || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow list: if canListOwnerScoped() || (isSignedIn() && resource.data.uid == request.auth.uid);
       allow create: if isValidId(uid) &&
         isSignedIn() &&
         isValidWargaProfile(incoming()) &&
@@ -689,7 +696,7 @@ service cloud.firestore {
         (resource == null && isActiveAdmin()) ||
         (resource != null && isActiveAdminInRW(existing().rw))
       );
-      allow list: if canListOwnOrScoped(resource.data);
+      allow list: if canListOwnerScoped();
       allow create: if isValidId(rwId) &&
         isSignedIn() &&
         isValidRtRegistry(incoming()) &&
@@ -718,7 +725,7 @@ service cloud.firestore {
         (resource == null && isActiveAdmin()) ||
         (resource != null && isAssignedAdmin(existing().rw, existing().rt))
       );
-      allow list: if canListOwnOrScoped(resource.data);
+      allow list: if canListOwnerScoped();
       allow create: if isValidId(scopeId) &&
         isSignedIn() &&
         isValidRtManifest(incoming()) &&
@@ -748,7 +755,7 @@ service cloud.firestore {
         (resource == null && (isActiveAdmin() || hasWargaProfile())) ||
         (resource != null && (isAssignedAdmin(existing().rw, existing().rt) || isWargaInRWRT(existing().rw, existing().rt)))
       );
-      allow list: if canListOwnOrScoped(resource.data);
+      allow list: if canListOwnerScoped();
       allow create: if isValidId(scopeId) &&
         isSignedIn() &&
         isValidRtPublicSummary(incoming()) &&
@@ -778,7 +785,7 @@ service cloud.firestore {
         (resource == null && (isActiveAdmin() || hasWargaProfile())) ||
         (resource != null && (isAssignedAdminReadSetting(existing().rw, existing().rt) || isWargaInRWRT(existing().rw, existing().rt)))
       );
-      allow list: if canListOwnOrScoped(resource.data);
+      allow list: if canListOwnOrScoped();
       allow create: if isValidId(settingId) &&
         isSignedIn() &&
         isValidAppSettings(incoming()) &&
@@ -815,7 +822,7 @@ service cloud.firestore {
         (resource == null && isActiveAdmin()) ||
         (resource != null && (isAssignedAdmin(existing().rw, existing().rt) || existing().linkedUid == request.auth.uid))
       );
-      allow list: if canListOwnOrScoped(resource.data) || (
+      allow list: if canListOwnOrScoped() || (
         isSignedIn() && resource.data.linkedUid == request.auth.uid
       );
       allow create: if isValidId(wargaId) &&
@@ -864,7 +871,7 @@ service cloud.firestore {
         (resource == null && isActiveAdmin()) ||
         (resource != null && isAssignedAdmin(existing().rw, existing().rt))
       );
-      allow list: if canListOwnOrScoped(resource.data);
+      allow list: if canListOwnOrScoped();
       allow create: if isValidId(txId) &&
         isSignedIn() &&
         isValidTransaction(incoming()) &&
@@ -886,7 +893,7 @@ service cloud.firestore {
         isAssignedAdmin(incoming().rw, incoming().rt) &&
         incoming().diff(existing()).affectedKeys().hasOnly([
           'tanggal', 'kategori', 'keterangan', 'nominal', 'tipe',
-          'namaWarga', 'nomorRumah', 'noKK', 'isSaldoAwal', 'tahun', 'rt', 'rtId', 'rwId', 'rtScope',
+          'residentId', 'namaWarga', 'nomorRumah', 'noKK', 'isSaldoAwal', 'tahun', 'rt', 'rtId', 'rwId', 'rtScope',
           'accessUids', 'serverUid', 'rtAdminUid', 'updatedAt'
         ]);
       allow delete: if isValidId(txId) && isSignedIn() && isAssignedAdmin(existing().rw, existing().rt);
@@ -898,7 +905,7 @@ service cloud.firestore {
         (resource == null && isActiveAdmin()) ||
         (resource != null && isAssignedAdmin(existing().rw, existing().rt))
       );
-      allow list: if canListOwnOrScoped(resource.data);
+      allow list: if canListOwnOrScoped();
       allow create: if isValidId(bantuanId) &&
         isSignedIn() &&
         isValidBantuan(incoming()) &&
@@ -932,7 +939,7 @@ service cloud.firestore {
         (resource == null && isActiveAdmin()) ||
         (resource != null && isAssignedAdminReadSetting(existing().rw, existing().rt))
       );
-      allow list: if canListOwnOrScoped(resource.data);
+      allow list: if canListOwnOrScoped();
       allow create: if isValidId(pengumumanId) &&
         isSignedIn() &&
         isValidPengumuman(incoming()) &&
@@ -971,7 +978,7 @@ service cloud.firestore {
         (resource == null && isActiveAdmin()) ||
         (resource != null && isAssignedAdmin(existing().rw, existing().rt))
       );
-      allow list: if canListOwnOrScoped(resource.data);
+      allow list: if canListOwnOrScoped();
       allow create: if isValidId(dokumenId) &&
         isSignedIn() &&
         isValidDokumen(incoming()) &&
@@ -1005,7 +1012,7 @@ service cloud.firestore {
         (resource == null && isActiveAdmin()) ||
         (resource != null && isAssignedAdmin(existing().rw, existing().rt))
       );
-      allow list: if canListOwnOrScoped(resource.data);
+      allow list: if canListOwnOrScoped();
       allow create: if isValidId(accountId) &&
         isSignedIn() &&
         isValidAdminRTAccount(incoming()) &&
@@ -1054,7 +1061,7 @@ service cloud.firestore {
         (resource == null && isActiveAdmin()) ||
         (resource != null && isAssignedAdmin(existing().rw, existing().rt))
       );
-      allow list: if canListOwnOrScoped(resource.data);
+      allow list: if canListOwnOrScoped();
       allow create: if isValidId(laporanId) &&
         isSignedIn() &&
         isValidLaporanBulanan(incoming()) &&

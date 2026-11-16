@@ -12,10 +12,12 @@ import {
   History,
 } from 'lucide-react';
 import { LeafIcon } from '../components/HouseLogo';
-import { Transaction, PengaturanKas } from '../types';
+import { Transaction, PengaturanKas, Warga } from '../types';
+import { resolveTransactionWargaName } from '../utils/rtFilter';
 
 interface KasWargaViewProps {
   transactions: Transaction[];
+  wargaList?: Warga[];
   pengaturanKas?: PengaturanKas;
   onOpenTxModal: (type?: 'masuk' | 'keluar' | 'kematian') => void;
   onOpenSaldoAwalModal?: () => void;
@@ -24,6 +26,7 @@ interface KasWargaViewProps {
 
 export const KasWargaView: React.FC<KasWargaViewProps> = ({
   transactions,
+  wargaList = [],
   pengaturanKas,
   onOpenTxModal,
   onOpenSaldoAwalModal,
@@ -54,8 +57,12 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
 
   const filtered = transactions.filter((t) => {
     if (activeTab !== 'semua' && t.tipe !== activeTab) return false;
-    if (search && !t.keterangan.toLowerCase().includes(search.toLowerCase()) && !t.namaWarga?.toLowerCase().includes(search.toLowerCase())) {
-      return false;
+    if (search) {
+      const q = search.toLowerCase();
+      const resolvedName = resolveTransactionWargaName(t, wargaList).toLowerCase();
+      if (!t.keterangan.toLowerCase().includes(q) && !resolvedName.includes(q)) {
+        return false;
+      }
     }
     return true;
   });
@@ -217,7 +224,7 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
                   <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
                     <td className="py-3.5 px-6 text-slate-500">{tx.tanggal}</td>
                     <td className="py-3.5 px-6 font-bold text-slate-800">{tx.keterangan}</td>
-                    <td className="py-3.5 px-6 text-slate-600">{tx.namaWarga || '—'}</td>
+                    <td className="py-3.5 px-6 text-slate-600">{resolveTransactionWargaName(tx, wargaList) || '—'}</td>
                     <td className="py-3.5 px-6">
                       <span
                         className={`inline-flex rounded-full px-2.5 py-0.5 text-[10px] font-bold ${

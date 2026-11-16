@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { ArrowLeft, Heart, Plus, Search, ShieldCheck, History, Info, Sparkles, Layers } from 'lucide-react';
-import { Transaction, PengaturanKas } from '../types';
+import { Transaction, PengaturanKas, Warga } from '../types';
+import { resolveTransactionWargaName } from '../utils/rtFilter';
 
 interface KasKematianViewProps {
   transactions: Transaction[];
+  wargaList?: Warga[];
   pengaturanKas?: PengaturanKas;
   onOpenTxModal: () => void;
   onOpenSaldoAwalModal?: () => void;
@@ -12,6 +14,7 @@ interface KasKematianViewProps {
 
 export const KasKematianView: React.FC<KasKematianViewProps> = ({
   transactions,
+  wargaList = [],
   pengaturanKas,
   onOpenTxModal,
   onOpenSaldoAwalModal,
@@ -159,7 +162,7 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
               {kematianList.map((t) => (
                 <tr key={t.id} className="hover:bg-slate-50 transition-colors">
                   <td className="py-3.5 px-6 text-slate-500">{t.tanggal}</td>
-                  <td className="py-3.5 px-6 font-bold text-slate-800">{t.namaWarga || `Warga RT ${rtStr}`}</td>
+                  <td className="py-3.5 px-6 font-bold text-slate-800">{resolveTransactionWargaName(t, wargaList) || `Warga RT ${rtStr}`}</td>
                   <td className="py-3.5 px-6 text-slate-600">{t.keterangan}</td>
                   <td className="py-3.5 px-6 text-right font-extrabold text-rose-600">
                     {formatRupiah(t.nominal)}

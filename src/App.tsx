@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard,
@@ -78,6 +78,7 @@ import {
 } from './utils/cloudSync';
 import {
   resolveCurrentFirebaseUser,
+  readAuthSessionHint,
   logoutFromFirebase,
   provisionAdminAuthAccount,
   provisionWargaAuthAccounts,
@@ -122,30 +123,47 @@ import {
   normalizeRTCode,
 } from './utils/rtFilter';
 
-// Views
+// Eager primary dashboard views for instant first paint; lazy-load secondary views
 import { BerandaView } from './views/BerandaView';
-import { KasWargaView } from './views/KasWargaView';
-import { KasMasukView } from './views/KasMasukView';
-import { KasKeluarView } from './views/KasKeluarView';
-import { KasKematianView } from './views/KasKematianView';
-import { StatusIuranView } from './views/StatusIuranView';
-import { DataWargaView } from './views/DataWargaView';
-import { LaporanView } from './views/LaporanView';
-import { PengaturanView } from './views/PengaturanView';
 import { DasborWargaView } from './views/DasborWargaView';
-import { PengumumanView } from './views/PengumumanView';
-import { BantuanPemerintahView } from './views/BantuanPemerintahView';
-import { DokumenPdfWargaView } from './views/DokumenPdfWargaView';
-import { KebijakanPrivasiView } from './views/KebijakanPrivasiView';
-import { ServerKontrolView } from './views/ServerKontrolView';
+
+const KasWargaView = lazy(() => import('./views/KasWargaView').then((m) => ({ default: m.KasWargaView })));
+const KasMasukView = lazy(() => import('./views/KasMasukView').then((m) => ({ default: m.KasMasukView })));
+const KasKeluarView = lazy(() => import('./views/KasKeluarView').then((m) => ({ default: m.KasKeluarView })));
+const KasKematianView = lazy(() => import('./views/KasKematianView').then((m) => ({ default: m.KasKematianView })));
+const StatusIuranView = lazy(() => import('./views/StatusIuranView').then((m) => ({ default: m.StatusIuranView })));
+const DataWargaView = lazy(() => import('./views/DataWargaView').then((m) => ({ default: m.DataWargaView })));
+const LaporanView = lazy(() => import('./views/LaporanView').then((m) => ({ default: m.LaporanView })));
+const PengaturanView = lazy(() => import('./views/PengaturanView').then((m) => ({ default: m.PengaturanView })));
+const PengumumanView = lazy(() => import('./views/PengumumanView').then((m) => ({ default: m.PengumumanView })));
+const BantuanPemerintahView = lazy(() => import('./views/BantuanPemerintahView').then((m) => ({ default: m.BantuanPemerintahView })));
+const DokumenPdfWargaView = lazy(() => import('./views/DokumenPdfWargaView').then((m) => ({ default: m.DokumenPdfWargaView })));
+const KebijakanPrivasiView = lazy(() => import('./views/KebijakanPrivasiView').then((m) => ({ default: m.KebijakanPrivasiView })));
+const ServerKontrolView = lazy(() => import('./views/ServerKontrolView').then((m) => ({ default: m.ServerKontrolView })));
+
+const ViewSkeleton: React.FC = () => (
+  <div className="space-y-4 animate-pulse">
+    <div className="h-24 rounded-3xl bg-white/80 border border-slate-200/70" />
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="h-28 rounded-2xl bg-white/80 border border-slate-200/70" />
+      <div className="h-28 rounded-2xl bg-white/80 border border-slate-200/70" />
+      <div className="h-28 rounded-2xl bg-white/80 border border-slate-200/70" />
+    </div>
+    <div className="h-64 rounded-3xl bg-white/80 border border-slate-200/70" />
+  </div>
+);
 
 export default function App() {
   // Authentication State (Role: 'server' | 'admin' | 'warga') managed authoritatively by Firebase Auth
   const [authReady, setAuthReady] = useState<boolean>(false);
   const [firebaseUid, setFirebaseUid] = useState<string | null>(() => auth.currentUser?.uid || null);
-  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => {
+    const uid = auth.currentUser?.uid;
+    return uid ? readAuthSessionHint(uid) : null;
+  });
   const currentUserRef = useRef<AuthUser | null>(null);
   currentUserRef.current = currentUser;
+  const txSubmitLockRef = useRef<boolean>(false);
 
   const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
   const [isLupaPasswordOpen, setIsLupaPasswordOpen] = useState<boolean>(false);
@@ -526,6 +544,22 @@ export default function App() {
         return;
       }
 
+      // Instant optimistic unlock via sessionStorage hint (no secrets stored; authoritatively verified below)
+      const hintUser = readAuthSessionHint(fbUser.uid);
+      if (hintUser && !currentUserRef.current) {
+        setCurrentUser(hintUser);
+        setIsLoginModalOpen(false);
+        setServerConnected(true);
+        setCurrentView(
+          hintUser.role === 'server'
+            ? 'server-kontrol'
+            : hintUser.role === 'warga'
+            ? 'dasbor-warga'
+            : 'beranda'
+        );
+        setAuthReady(true);
+      }
+
       const resolved = await resolveCurrentFirebaseUser(fbUser);
       if (!active) return;
 
@@ -544,6 +578,9 @@ export default function App() {
               : 'beranda'
           );
         }
+      } else {
+        setCurrentUser(null);
+        setIsLoginModalOpen(true);
       }
       setAuthReady(true);
     });
@@ -573,6 +610,12 @@ export default function App() {
     migrationCheckedRef.current = false;
     hasRemoteSettingsRef.current = false;
     setPendingOpsCount(readPendingOps().length);
+
+    const readyFallbackTimer = setTimeout(() => {
+      if (active) {
+        setDataLoadedReady(true);
+      }
+    }, 4000);
 
     const unsubFirestore = subscribeFirestoreState(
       currentUser,
@@ -641,6 +684,7 @@ export default function App() {
         latestStateRef.current = nextSnapshot;
 
         if (isFirstReady) {
+          clearTimeout(readyFallbackTimer);
           setDataLoadedReady(true);
           setSseConnected(true);
           setServerConnected(true);
@@ -786,6 +830,7 @@ export default function App() {
 
     return () => {
       active = false;
+      clearTimeout(readyFallbackTimer);
       unsubFirestore();
     };
   }, [currentUser?.role, currentUser?.username, currentUser?.noKK, currentUser?.wargaId, firebaseUid]);
@@ -1600,34 +1645,40 @@ export default function App() {
     }
   };
 
-  // Add Transaction
+  // Add Transaction (with double-submit guard)
   const handleSaveTransaction = async (tx: Omit<Transaction, 'id'>) => {
-    const nowIso = new Date().toISOString();
-    const resolvedRtScope =
-      tx.rtScope ||
-      (currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
-        ? `RT ${selectedServerRT}`
-        : currentUser?.rtScope ||
-          `RT ${pengaturanKas.profilRT?.namaRT || '08'} RW ${pengaturanKas.profilRT?.namaRW || '05'}`);
-    const newTx: Transaction = {
-      ...tx,
-      id: toValidDocId('tx_' + Date.now(), 'tx'),
-      tahun: tahunAktif,
-      rtScope: resolvedRtScope,
-      updatedAt: nowIso,
-    };
-    const nextTransactions = [newTx, ...latestStateRef.current.transactions];
-    setTransactions(nextTransactions);
-    setSyncStatus('connecting');
-    const res = await saveTransactionDoc(newTx);
-    if (!res.ok) {
-      setSyncStatus('error');
-      setCloudError(res.message || 'Gagal menyinkronkan transaksi ke Cloud Firestore.');
-    } else {
-      applyWriteSuccessStatus(res.pending);
-      if (!res.pending) {
-        await triggerPublicSummarySync({ transactions: nextTransactions });
+    if (txSubmitLockRef.current) return;
+    txSubmitLockRef.current = true;
+    try {
+      const nowIso = new Date().toISOString();
+      const resolvedRtScope =
+        tx.rtScope ||
+        (currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
+          ? `RT ${selectedServerRT}`
+          : currentUser?.rtScope ||
+            `RT ${pengaturanKas.profilRT?.namaRT || '08'} RW ${pengaturanKas.profilRT?.namaRW || '05'}`);
+      const newTx: Transaction = {
+        ...tx,
+        id: toValidDocId(`tx_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`, 'tx'),
+        tahun: tahunAktif,
+        rtScope: resolvedRtScope,
+        updatedAt: nowIso,
+      };
+      const nextTransactions = [newTx, ...latestStateRef.current.transactions];
+      setTransactions(nextTransactions);
+      setSyncStatus('connecting');
+      const res = await saveTransactionDoc(newTx);
+      if (!res.ok) {
+        setSyncStatus('error');
+        setCloudError(res.message || 'Gagal menyinkronkan transaksi ke Cloud Firestore.');
+      } else {
+        applyWriteSuccessStatus(res.pending);
+        if (!res.pending) {
+          await triggerPublicSummarySync({ transactions: nextTransactions });
+        }
       }
+    } finally {
+      txSubmitLockRef.current = false;
     }
   };
 
@@ -1867,6 +1918,7 @@ export default function App() {
     const currentTxs = latestStateRef.current.transactions;
     const oldTxs = currentTxs.filter(
       (t) =>
+        (t.residentId && t.residentId === wargaId) ||
         (t.noKK && t.noKK === oldWarga.noKK) ||
         (t.namaWarga && t.namaWarga.toLowerCase() === oldWarga.nama.toLowerCase())
     );
@@ -1926,13 +1978,15 @@ export default function App() {
 
     const modifiedTxs: Transaction[] = [];
     let nextTxList = currentTxs.map((t) => {
+      const matchesId = Boolean(t.residentId && t.residentId === wargaId);
       const matchesKK = t.noKK && t.noKK === oldWarga.noKK;
       const matchesNama =
         t.namaWarga && t.namaWarga.toLowerCase() === oldWarga.nama.toLowerCase();
 
-      if (matchesKK || matchesNama) {
+      if (matchesId || matchesKK || matchesNama) {
         const nextTx: Transaction = {
           ...t,
+          residentId: wargaId,
           noKK: newKKData.noKK,
           namaWarga: newKKData.nama,
           keterangan: t.keterangan.includes('Dialihkan')
@@ -1954,6 +2008,7 @@ export default function App() {
         keterangan: `Santunan Kas Kematian & Kain Mori (Alm. ${namaMeninggal || 'Anggota KK'}) - KK: ${newKKData.noKK}`,
         nominal: 200000,
         tipe: 'kematian',
+        residentId: wargaId,
         namaWarga: newKKData.nama,
         noKK: newKKData.noKK,
         tahun: tahunAktif,
@@ -3005,6 +3060,7 @@ export default function App() {
                 transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
                 className="w-full"
               >
+                <Suspense fallback={<ViewSkeleton />}>
                 {/* SERVER (SUPER ADMIN DESA) VIEWS */}
                 {isServer ? (
               currentView === 'server-kontrol' ? (
@@ -3078,6 +3134,7 @@ export default function App() {
               ) : currentView === 'kas-warga' ? (
                 <KasWargaView
                   transactions={serverViewData.transactions}
+                  wargaList={serverViewData.wargaList}
                   pengaturanKas={serverViewData.pengaturanKas}
                   onOpenTxModal={(type) => {
                     setTxModalType(type || 'masuk');
@@ -3089,6 +3146,7 @@ export default function App() {
               ) : currentView === 'kas-masuk' ? (
                 <KasMasukView
                   transactions={serverViewData.transactions}
+                  wargaList={serverViewData.wargaList}
                   pengaturanKas={serverViewData.pengaturanKas}
                   onOpenTxModal={() => {
                     setTxModalType('masuk');
@@ -3099,6 +3157,7 @@ export default function App() {
               ) : currentView === 'kas-keluar' ? (
                 <KasKeluarView
                   transactions={serverViewData.transactions}
+                  wargaList={serverViewData.wargaList}
                   pengaturanKas={serverViewData.pengaturanKas}
                   onOpenTxModal={() => {
                     setTxModalType('keluar');
@@ -3109,6 +3168,7 @@ export default function App() {
               ) : currentView === 'kas-kematian' ? (
                 <KasKematianView
                   transactions={serverViewData.transactions}
+                  wargaList={serverViewData.wargaList}
                   pengaturanKas={serverViewData.pengaturanKas}
                   onOpenTxModal={() => {
                     setTxModalType('kematian');
@@ -3236,6 +3296,7 @@ export default function App() {
                 {currentView === 'kas-warga' && (
                   <KasWargaView
                     transactions={transactions}
+                    wargaList={wargaList}
                     pengaturanKas={pengaturanKas}
                     onOpenTxModal={(type) => {
                       setTxModalType(type || 'masuk');
@@ -3249,6 +3310,7 @@ export default function App() {
                 {currentView === 'kas-masuk' && (
                   <KasMasukView
                     transactions={transactions}
+                    wargaList={wargaList}
                     pengaturanKas={pengaturanKas}
                     onOpenTxModal={() => {
                       setTxModalType('masuk');
@@ -3261,6 +3323,7 @@ export default function App() {
                 {currentView === 'kas-keluar' && (
                   <KasKeluarView
                     transactions={transactions}
+                    wargaList={wargaList}
                     pengaturanKas={pengaturanKas}
                     onOpenTxModal={() => {
                       setTxModalType('keluar');
@@ -3273,6 +3336,7 @@ export default function App() {
                 {currentView === 'kas-kematian' && (
                   <KasKematianView
                     transactions={transactions}
+                    wargaList={wargaList}
                     pengaturanKas={pengaturanKas}
                     onOpenTxModal={() => {
                       setTxModalType('kematian');
@@ -3379,6 +3443,7 @@ export default function App() {
                 )}
               </>
             )}
+                </Suspense>
               </motion.div>
             </AnimatePresence>
           </div>
@@ -3418,6 +3483,17 @@ export default function App() {
           onSave={handleSaveTransaction}
           defaultType={txModalType}
           pengaturanKas={isServer && selectedServerRT !== 'SEMUA' ? serverViewData.pengaturanKas : pengaturanKas}
+          wargaList={isServer ? serverViewData.wargaList : wargaList}
+          activeRole={currentUser?.role}
+          targetRT={
+            isServer
+              ? selectedServerRT
+              : normalizeRTCode(currentUser?.rtScope) || normalizeRTCode(pengaturanKas.profilRT?.namaRT) || '08'
+          }
+          onGoToDataWarga={() => {
+            setIsTxModalOpen(false);
+            setCurrentView('data-warga');
+          }}
         />
       )}
 

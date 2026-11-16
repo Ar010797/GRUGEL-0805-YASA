@@ -7,6 +7,7 @@ export interface Transaction {
   keterangan: string;
   nominal: number;
   tipe: TransactionType;
+  residentId?: string;
   namaWarga?: string;
   nomorRumah?: string;
   noKK?: string;

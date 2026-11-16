@@ -24,6 +24,7 @@ import {
 import { HouseLogo, LeafIcon } from '../components/HouseLogo';
 import { GreetingVillageIllustration } from '../components/VillageLandscape';
 import { Transaction, Warga, PengaturanKas } from '../types';
+import { resolveTransactionWargaName } from '../utils/rtFilter';
 
 interface BerandaViewProps {
   transactions: Transaction[];
@@ -572,7 +573,11 @@ export const BerandaView: React.FC<BerandaViewProps> = ({
                     <div>
                       <h4 className="text-xs font-bold text-slate-900">{tx.keterangan}</h4>
                       <p className="text-[11px] text-slate-400">
-                        {tx.tanggal} {tx.namaWarga ? `• ${tx.namaWarga}` : ''}
+                        {tx.tanggal}{' '}
+                        {(() => {
+                          const displayNama = resolveTransactionWargaName(tx, wargaList);
+                          return displayNama ? `• ${displayNama}` : '';
+                        })()}
                       </p>
                     </div>
                   </div>

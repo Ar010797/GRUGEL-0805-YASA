@@ -10,9 +10,11 @@ import {
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   FieldValue,
   getDoc,
+  getDocFromServer,
   getDocs,
   onSnapshot,
   onSnapshotsInSync,
@@ -106,6 +108,8 @@ interface CachedDocMeta {
   rtId?: string;
   linkedUid?: string;
   localCreated?: boolean;
+  serverConfirmed?: boolean;
+  nullKeys?: string[];
 }
 
 const docMetaCache = new Map<string, CachedDocMeta>();
@@ -345,9 +349,12 @@ export function formatFirebaseAuthError(error: any, fallbackMessage: string): st
   return msg ? `${fallbackMessage} (${code || msg})` : fallbackMessage;
 }
 
-function recordMeta(path: string, data: any) {
+function recordMeta(path: string, data: any, opts?: { serverConfirmed?: boolean }) {
   if (!data || typeof data !== 'object') return;
   const existing = docMetaCache.get(path);
+  const nullKeys = Object.entries(data)
+    .filter(([, v]) => v === null)
+    .map(([k]) => k);
   docMetaCache.set(path, {
     ownerUid: String(data.ownerUid || existing?.ownerUid || ''),
     createdAt: data.createdAt ?? existing?.createdAt ?? null,
@@ -360,12 +367,14 @@ function recordMeta(path: string, data: any) {
     rtId: typeof data.rtId === 'string' ? data.rtId : existing?.rtId,
     linkedUid: typeof data.linkedUid === 'string' ? data.linkedUid : existing?.linkedUid,
     localCreated: Boolean(data.localCreated ?? existing?.localCreated),
+    serverConfirmed: Boolean(opts?.serverConfirmed ?? existing?.serverConfirmed),
+    nullKeys: nullKeys.length > 0 ? nullKeys : existing?.nullKeys,
   });
 }
 
 async function resolveExistingMeta(path: string): Promise<CachedDocMeta | null> {
   const cached = docMetaCache.get(path);
-  if (cached && (cached.ownerUid || cached.localCreated)) {
+  if (cached && (cached.serverConfirmed || cached.ownerUid || cached.localCreated)) {
     return cached;
   }
   try {
@@ -374,7 +383,7 @@ async function resolveExistingMeta(path: string): Promise<CachedDocMeta | null> 
     const snap = await getDoc(doc(db, colName, docId));
     if (!snap.exists()) return null;
     const data = snap.data();
-    recordMeta(path, { ...data, localCreated: true });
+    recordMeta(path, { ...data, localCreated: true }, { serverConfirmed: !snap.metadata.fromCache });
     return docMetaCache.get(path) || null;
   } catch {
     return null;
@@ -384,7 +393,8 @@ async function resolveExistingMeta(path: string): Promise<CachedDocMeta | null> 
 function buildEntityUpdatePatch(
   colName: EntityBucket,
   payload: Record<string, any>,
-  ctx: AdminIdentityContext | null
+  ctx: AdminIdentityContext | null,
+  existing?: CachedDocMeta | null
 ): Record<string, any> {
   const omitted = new Set<string>(['id', 'ownerUid', 'rw', 'createdAt']);
   if (colName === 'adminAccounts' && ctx?.role !== 'server') {
@@ -397,6 +407,18 @@ function buildEntityUpdatePatch(
   for (const [k, v] of Object.entries(payload)) {
     if (omitted.has(k) || v === undefined) continue;
     patch[k] = v;
+  }
+  // Keep rwId aligned with immutable existing.rw on legacy docs so isValidRwScope passes
+  if (existing?.rw && existing.rw !== payload.rw) {
+    patch.rwId = `rw_${existing.rw}`;
+  }
+  // Purge legacy null optional fields on update
+  if (Array.isArray(existing?.nullKeys)) {
+    for (const nk of existing.nullKeys) {
+      if (!omitted.has(nk) && !(nk in patch)) {
+        patch[nk] = deleteField();
+      }
+    }
   }
   patch.updatedAt = serverTimestamp();
   return patch;
@@ -525,56 +547,109 @@ function resolveScopedRtRw(
 // 1. ROLE / REGISTRY / MANIFEST HELPERS
 // ==========================================
 
-export async function refreshAdminContext(uid: string): Promise<AdminIdentityContext | null> {
-  const currentUser = auth.currentUser;
-  if (!currentUser || currentUser.uid !== uid) return null;
+const AUTH_HINT_STORAGE_KEY = 'kaswarga_auth_hint_v1';
 
-  const adminRef = doc(db, 'admins', uid);
-  let adminSnap;
+export function saveAuthSessionHint(uid: string, user: AuthUser): void {
+  if (typeof window === 'undefined' || !uid || !user) return;
   try {
-    adminSnap = await getDoc(adminRef);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, `admins/${uid}`);
+    const safeUser: AuthUser = {
+      role: user.role,
+      username: user.username,
+      nama: user.nama,
+      rtScope: user.rtScope,
+      noKK: user.noKK,
+      wargaId: user.wargaId,
+      isPinAuthenticated: Boolean(user.isPinAuthenticated),
+    };
+    window.sessionStorage.setItem(AUTH_HINT_STORAGE_KEY, JSON.stringify({ uid, user: safeUser }));
+  } catch {
+    // ignore storage errors
   }
+}
 
-  if (!adminSnap.exists()) {
-    // Allow Google bootstrapped super admin even if /admins/{uid} hasn't been created yet
-    if (
-      currentUser.emailVerified &&
-      currentUser.email?.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL
-    ) {
-      const ctx: AdminIdentityContext = {
-        uid,
-        role: 'server',
-        rw: DEFAULT_RW,
-        rt: 'SEMUA',
-        email: currentUser.email,
-        username: DEFAULT_SERVER_USERNAME,
-        displayName: currentUser.displayName || 'Super Admin Server RW 05',
-        serverUid: uid,
-        adminsByRt: {},
-      };
-      activeAdminContext = ctx;
-      return ctx;
+export function readAuthSessionHint(uid: string): AuthUser | null {
+  if (typeof window === 'undefined' || !uid) return null;
+  try {
+    const raw = window.sessionStorage.getItem(AUTH_HINT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.uid === uid && parsed.user && parsed.user.role) {
+      return parsed.user as AuthUser;
     }
-    return null;
+  } catch {
+    // ignore parse errors
   }
+  return null;
+}
 
-  const adminData = adminSnap.data();
-  if (adminData.status === 'nonaktif') {
-    return null;
-  }
-
-  const rw = normalizeRWCode(adminData.rw, DEFAULT_RW);
-  const role: 'server' | 'admin' = adminData.role === 'server' ? 'server' : 'admin';
-  const rt = role === 'server' ? 'SEMUA' : normalizeRTCode(adminData.rt) || DEFAULT_RT;
-
-  let serverUid: string | undefined = role === 'server' ? uid : undefined;
-  let adminsByRt: Record<string, string[]> = {};
-
+export function clearAuthSessionHint(): void {
+  if (typeof window === 'undefined') return;
   try {
-    const regSnap = await getDoc(doc(db, 'rtRegistry', `rw_${rw}`));
-    if (regSnap.exists()) {
+    window.sessionStorage.removeItem(AUTH_HINT_STORAGE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+const inFlightAdminContext = new Map<string, Promise<AdminIdentityContext | null>>();
+
+export function refreshAdminContext(uid: string): Promise<AdminIdentityContext | null> {
+  const existingPromise = inFlightAdminContext.get(uid);
+  if (existingPromise) return existingPromise;
+
+  const task = (async (): Promise<AdminIdentityContext | null> => {
+    const currentUser = auth.currentUser;
+    if (!currentUser || currentUser.uid !== uid) return null;
+
+    const adminRef = doc(db, 'admins', uid);
+    let adminSnap;
+    try {
+      adminSnap = await getDoc(adminRef);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, `admins/${uid}`);
+    }
+
+    if (!adminSnap.exists()) {
+      // Allow Google bootstrapped super admin even if /admins/{uid} hasn't been created yet
+      if (
+        currentUser.emailVerified &&
+        currentUser.email?.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL
+      ) {
+        const ctx: AdminIdentityContext = {
+          uid,
+          role: 'server',
+          rw: DEFAULT_RW,
+          rt: 'SEMUA',
+          email: currentUser.email,
+          username: DEFAULT_SERVER_USERNAME,
+          displayName: currentUser.displayName || 'Super Admin Server RW 05',
+          serverUid: uid,
+          adminsByRt: {},
+        };
+        activeAdminContext = ctx;
+        return ctx;
+      }
+      return null;
+    }
+
+    const adminData = adminSnap.data();
+    if (adminData.status === 'nonaktif') {
+      return null;
+    }
+
+    const rw = normalizeRWCode(adminData.rw, DEFAULT_RW);
+    const role: 'server' | 'admin' = adminData.role === 'server' ? 'server' : 'admin';
+    const rt = role === 'server' ? 'SEMUA' : normalizeRTCode(adminData.rt) || DEFAULT_RT;
+
+    let serverUid: string | undefined = role === 'server' ? uid : undefined;
+    let adminsByRt: Record<string, string[]> = {};
+
+    const [regSnap, lockSnap] = await Promise.all([
+      getDoc(doc(db, 'rtRegistry', `rw_${rw}`)).catch(() => null),
+      !serverUid ? getDoc(doc(db, 'systemMeta', 'serverLock')).catch(() => null) : Promise.resolve(null),
+    ]);
+
+    if (regSnap && regSnap.exists()) {
       const reg = regSnap.data();
       if (typeof reg.serverUid === 'string' && reg.serverUid) {
         serverUid = reg.serverUid;
@@ -583,44 +658,40 @@ export async function refreshAdminContext(uid: string): Promise<AdminIdentityCon
         adminsByRt = reg.adminsByRt;
       }
     }
-  } catch {
-    // non-fatal if registry hasn't been created yet
-  }
 
-  if (!serverUid) {
-    try {
-      const lockSnap = await getDoc(doc(db, 'systemMeta', 'serverLock'));
-      if (lockSnap.exists()) {
-        const lockData = lockSnap.data();
-        if (typeof lockData.serverUid === 'string' && lockData.serverUid) {
-          serverUid = lockData.serverUid;
-        }
+    if (!serverUid && lockSnap && lockSnap.exists()) {
+      const lockData = lockSnap.data();
+      if (typeof lockData.serverUid === 'string' && lockData.serverUid) {
+        serverUid = lockData.serverUid;
       }
-    } catch {
-      // non-fatal if serverLock doesn't exist yet
     }
-  }
 
-  if (role === 'admin' && rt !== 'SEMUA') {
-    const list = Array.isArray(adminsByRt[rt]) ? adminsByRt[rt] : [];
-    if (!list.includes(uid)) {
-      adminsByRt = { ...adminsByRt, [rt]: [...list, uid] };
+    if (role === 'admin' && rt !== 'SEMUA') {
+      const list = Array.isArray(adminsByRt[rt]) ? adminsByRt[rt] : [];
+      if (!list.includes(uid)) {
+        adminsByRt = { ...adminsByRt, [rt]: [...list, uid] };
+      }
     }
-  }
 
-  const ctx: AdminIdentityContext = {
-    uid,
-    role,
-    rw,
-    rt,
-    email: String(adminData.email || currentUser.email || ''),
-    username: String(adminData.username || currentUser.email || 'Admin'),
-    displayName: String(adminData.displayName || adminData.username || 'Admin'),
-    serverUid,
-    adminsByRt,
-  };
-  activeAdminContext = ctx;
-  return ctx;
+    const ctx: AdminIdentityContext = {
+      uid,
+      role,
+      rw,
+      rt,
+      email: String(adminData.email || currentUser.email || ''),
+      username: String(adminData.username || currentUser.email || 'Admin'),
+      displayName: String(adminData.displayName || adminData.username || 'Admin'),
+      serverUid,
+      adminsByRt,
+    };
+    activeAdminContext = ctx;
+    return ctx;
+  })().finally(() => {
+    inFlightAdminContext.delete(uid);
+  });
+
+  inFlightAdminContext.set(uid, task);
+  return task;
 }
 
 async function upsertRtRegistry(params: {
@@ -818,198 +889,350 @@ const CLAIM_ABLE_COLLECTIONS: EntityBucket[] = [
   'settings',
 ];
 
-export async function claimAndSyncManifestDocs(): Promise<number> {
+const VALID_DOC_ID_RE = /^[a-zA-Z0-9_\-]+$/;
+
+function isNonEmptyStrClient(val: unknown, maxLen: number): val is string {
+  return typeof val === 'string' && val.length >= 1 && val.length <= maxLen;
+}
+
+function isPatchableEntityDoc(
+  colName: EntityBucket,
+  id: string,
+  data: any,
+  ctx: AdminIdentityContext
+): boolean {
+  if (!data || typeof data !== 'object') return false;
+  if (data.id !== id || !VALID_DOC_ID_RE.test(id) || id.length > 128) return false;
+  if (typeof data.ownerUid !== 'string' || !VALID_DOC_ID_RE.test(data.ownerUid) || data.ownerUid.length > 128) {
+    return false;
+  }
+  if (data.createdAt == null) return false;
+
+  const rawRw = typeof data.rw === 'string' ? data.rw : '';
+  const rawRt = typeof data.rt === 'string' ? data.rt : '';
+  if (!isNonEmptyStrClient(rawRw, 10) || !isNonEmptyStrClient(rawRt, 10)) return false;
+
+  // Enforce exact rw match against immutable existing().rw unless bootstrapped server email
+  const isBootstrappedEmail =
+    ctx.role === 'server' && ctx.email.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL;
+  if (!isBootstrappedEmail && rawRw !== ctx.rw) {
+    return false;
+  }
+
+  if (ctx.role === 'admin') {
+    // Firestore isAssignedAdmin requires exact adminDoc().rw == existing().rw && adminDoc().rt == existing().rt && rt != 'SEMUA'
+    if (rawRt === 'SEMUA' || rawRt !== ctx.rt || rawRw !== ctx.rw) return false;
+    if (colName === 'adminAccounts' && data.authUid !== ctx.uid) return false;
+  }
+
+  // Validate required collection fields before patching so rules never reject malformed legacy docs
+  switch (colName) {
+    case 'warga':
+      return (
+        isNonEmptyStrClient(data.nama, 160) &&
+        (data.jenisKelamin === 'Laki-laki' || data.jenisKelamin === 'Perempuan') &&
+        (data.statusIuran === 'Sudah' || data.statusIuran === 'Belum')
+      );
+    case 'transactions':
+      return (
+        isNonEmptyStrClient(data.tanggal, 32) &&
+        isNonEmptyStrClient(data.kategori, 120) &&
+        typeof data.nominal === 'number' &&
+        Number.isFinite(data.nominal) &&
+        (data.tipe === 'masuk' || data.tipe === 'keluar' || data.tipe === 'kematian')
+      );
+    case 'bantuan':
+      return (
+        isNonEmptyStrClient(data.jenisBantuan, 160) &&
+        isNonEmptyStrClient(data.namaPenerima, 160) &&
+        ['Sudah Disalurkan', 'Proses Verifikasi', 'Baru Diusulkan', 'Ditolak'].includes(data.status)
+      );
+    case 'pengumuman':
+      return (
+        isNonEmptyStrClient(data.judul, 200) &&
+        isNonEmptyStrClient(data.isi, 4000) &&
+        isNonEmptyStrClient(data.tanggal, 32) &&
+        ['Kegiatan', 'Iuran', 'Keamanan', 'Sosial', 'Umum'].includes(data.kategori)
+      );
+    case 'dokumen':
+      return (
+        isNonEmptyStrClient(data.judul, 200) &&
+        isNonEmptyStrClient(data.namaFile, 200) &&
+        isNonEmptyStrClient(data.kategori, 80)
+      );
+    case 'adminAccounts':
+      return (
+        isNonEmptyStrClient(data.username, 80) &&
+        isNonEmptyStrClient(data.passwordHash, 128) &&
+        isNonEmptyStrClient(data.nama, 160) &&
+        (data.status === 'aktif' || data.status === 'nonaktif')
+      );
+    case 'laporanBulanan':
+      return (
+        isNonEmptyStrClient(data.bulanTahun, 64) &&
+        ['Diterima', 'Menunggu Verifikasi', 'Perlu Klarifikasi'].includes(data.statusVerifikasi)
+      );
+    case 'settings':
+      return typeof data.tahunAktif === 'number' && Number.isFinite(data.tahunAktif);
+    default:
+      return false;
+  }
+}
+
+function buildAclSyncPatch(params: {
+  colName: EntityBucket;
+  data: any;
+  ctx: AdminIdentityContext;
+  effectiveServerUid?: string;
+  adminsByRt: Record<string, string[]>;
+  includeRtAdminUid: boolean;
+}): Record<string, any> | null {
+  const { colName, data, ctx, effectiveServerUid, adminsByRt, includeRtAdminUid } = params;
+  const rawRw = String(data.rw);
+  const rawRt = String(data.rt);
+  const normalizedRt =
+    rawRt === 'SEMUA' ? 'SEMUA' : extractRTFromScope(rawRt, DEFAULT_RT, true);
+
+  // Only server may normalize mismatched `rt` (e.g. '8' -> '08'); admin RT keeps exact `rawRt`
+  const canNormalizeRt = ctx.role === 'server' && normalizedRt !== rawRt;
+  const targetRt = canNormalizeRt ? normalizedRt : rawRt;
+
+  // rwId MUST always derive from immutable existing `rw` so isValidRwScope(incoming()) passes
+  const expectedRwId = `rw_${rawRw}`;
+  const expectedRtId = targetRt === 'SEMUA' ? 'SEMUA' : `rt_${targetRt}`;
+
+  const scopeRtForAdmins =
+    normalizedRt === 'SEMUA' ? 'SEMUA' : extractRTFromScope(targetRt, DEFAULT_RT, true);
+  const assignedRtUids =
+    scopeRtForAdmins === 'SEMUA'
+      ? Object.values(adminsByRt || {}).flat()
+      : Array.isArray(adminsByRt?.[scopeRtForAdmins])
+      ? adminsByRt[scopeRtForAdmins]
+      : [];
+
+  const desiredUids = [
+    ctx.uid,
+    ...(effectiveServerUid ? [effectiveServerUid] : []),
+    ...assignedRtUids,
+  ].filter(Boolean);
+
+  const currentAccessUids: string[] = Array.isArray(data.accessUids) ? data.accessUids : [];
+  const missingUid = desiredUids.some((u) => !currentAccessUids.includes(u));
+  const needsServerUid = Boolean(effectiveServerUid && data.serverUid !== effectiveServerUid);
+  const needsRtUid =
+    includeRtAdminUid &&
+    ctx.role === 'admin' &&
+    colName !== 'adminAccounts' &&
+    colName !== 'settings' &&
+    data.rtAdminUid !== ctx.uid;
+  const needsScopeIds = data.rwId !== expectedRwId || data.rtId !== expectedRtId || canNormalizeRt;
+
+  if (!missingUid && !needsServerUid && !needsRtUid && !needsScopeIds) {
+    return null;
+  }
+
+  const nextUids = Array.from(
+    new Set([
+      ...desiredUids,
+      ...(typeof data.ownerUid === 'string' ? [data.ownerUid] : []),
+      ...currentAccessUids,
+    ])
+  )
+    .filter((u): u is string => typeof u === 'string' && u.length > 0)
+    .slice(0, 15);
+
+  if (nextUids.length === 0) return null;
+
+  const patch: Record<string, any> = {
+    rwId: expectedRwId,
+    rtId: expectedRtId,
+    accessUids: nextUids,
+    updatedAt: serverTimestamp(),
+  };
+
+  if (canNormalizeRt) {
+    patch.rt = targetRt;
+  }
+  if (effectiveServerUid) {
+    patch.serverUid = effectiveServerUid;
+  }
+  if (includeRtAdminUid && ctx.role === 'admin' && colName !== 'adminAccounts' && colName !== 'settings') {
+    patch.rtAdminUid = ctx.uid;
+  }
+
+  return patch;
+}
+
+let claimInFlightPromise: Promise<number> | null = null;
+let lastClaimCompletedAt = 0;
+const CLAIM_COOLDOWN_MS = 30000;
+
+export async function claimAndSyncManifestDocs(options?: { force?: boolean }): Promise<number> {
   const ctx = activeAdminContext;
   if (!ctx || !auth.currentUser) return 0;
 
-  let updatedCount = 0;
-  try {
-    const regRef = doc(db, 'rtRegistry', `rw_${ctx.rw}`);
-    const regSnap = await getDoc(regRef).catch(() => null);
-    const regData = regSnap && regSnap.exists() ? regSnap.data() : null;
-
-    if (ctx.role === 'server' && regData && regData.serverUid !== ctx.uid) {
-      await updateDoc(regRef, {
-        serverUid: ctx.uid,
-        updatedAt: serverTimestamp(),
-      }).catch(() => {});
-    } else if (ctx.role === 'admin' && ctx.rt !== 'SEMUA') {
-      const regAdmins = regData?.adminsByRt?.[ctx.rt];
-      if (!regData || !Array.isArray(regAdmins) || !regAdmins.includes(ctx.uid)) {
-        await upsertRtRegistry({
-          rw: ctx.rw,
-          ownerUid: ctx.uid,
-          serverUid: ctx.serverUid,
-          addRt: ctx.rt,
-          addAdminUid: ctx.uid,
-        });
-      }
-    }
-
-    const effectiveAdminsByRt: Record<string, string[]> = {
-      ...(regData?.adminsByRt || ctx.adminsByRt || {}),
-    };
-    const effectiveServerUid =
-      (typeof regData?.serverUid === 'string' && regData.serverUid) || ctx.serverUid;
-
-    const rtsToCheck: string[] =
-      ctx.role === 'server'
-        ? Array.from(
-            new Set([
-              ...RW05_RT_CODES,
-              ...(Array.isArray(regData?.registeredRts) ? regData.registeredRts : []),
-              ...Object.keys(effectiveAdminsByRt),
-              DEFAULT_RT,
-            ])
-          )
-        : [ctx.rt];
-
-    const updates: Array<{
-      ref: ReturnType<typeof doc>;
-      path: string;
-      patch: Record<string, any>;
-    }> = [];
-    const seenPaths = new Set<string>();
-
-    const evaluateDocForClaim = (colName: EntityBucket, id: string, data: any) => {
-      const docPath = `${colName}/${id}`;
-      if (seenPaths.has(docPath)) return;
-      seenPaths.add(docPath);
-      recordMeta(docPath, { ...data, localCreated: true });
-
-      const docRw = normalizeRWCode(data.rw, ctx.rw);
-      const docRt =
-        data.rt === 'SEMUA' ? 'SEMUA' : extractRTFromScope(data.rt, DEFAULT_RT, true);
-
-      if (docRw !== ctx.rw) return;
-      if (ctx.role === 'admin') {
-        if (docRt === 'SEMUA' && colName === 'settings') return;
-        if (docRt !== ctx.rt && docRt !== 'SEMUA') return;
-        if (colName === 'adminAccounts' && data.authUid !== ctx.uid) return;
-      }
-
-      const assignedRtUids =
-        docRt === 'SEMUA'
-          ? Object.values(effectiveAdminsByRt).flat()
-          : Array.isArray(effectiveAdminsByRt[docRt])
-          ? effectiveAdminsByRt[docRt]
-          : [];
-
-      const desiredUids = [
-        ctx.uid,
-        ...(effectiveServerUid ? [effectiveServerUid] : []),
-        ...assignedRtUids,
-      ].filter(Boolean);
-
-      const { rwId: expectedRwId, rtId: expectedRtId } = buildScopeIds(docRt, docRw);
-      const currentAccessUids: string[] = Array.isArray(data.accessUids) ? data.accessUids : [];
-      const missingUid = desiredUids.some((u) => !currentAccessUids.includes(u));
-      const needsServerUid = Boolean(effectiveServerUid && data.serverUid !== effectiveServerUid);
-      const needsRtUid =
-        ctx.role === 'admin' &&
-        colName !== 'adminAccounts' &&
-        colName !== 'settings' &&
-        data.rtAdminUid !== ctx.uid;
-      const needsScopeIds = data.rwId !== expectedRwId || data.rtId !== expectedRtId;
-
-      if (missingUid || needsServerUid || needsRtUid || needsScopeIds) {
-        const nextUids = Array.from(
-          new Set([
-            ...desiredUids,
-            ...(typeof data.ownerUid === 'string' ? [data.ownerUid] : []),
-            ...currentAccessUids,
-          ])
-        )
-          .filter(Boolean)
-          .slice(0, 15);
-
-        const patch: Record<string, any> = {
-          rwId: expectedRwId,
-          rtId: expectedRtId,
-          accessUids: nextUids,
-          updatedAt: serverTimestamp(),
-        };
-        if (effectiveServerUid) patch.serverUid = effectiveServerUid;
-        if (ctx.role === 'admin' && colName !== 'adminAccounts') {
-          patch.rtAdminUid = ctx.uid;
-        }
-        updates.push({ ref: doc(db, colName, id), path: docPath, patch });
-      }
-    };
-
-    // 1. Read every doc listed in rtManifest for the assigned RW/RT scope
-    for (const rtCode of rtsToCheck) {
-      if (!rtCode || rtCode === 'SEMUA') continue;
-      const scopeId = `rt_${rtCode}_rw_${ctx.rw}`;
-      const manifestSnap = await getDoc(doc(db, 'rtManifest', scopeId)).catch(() => null);
-      if (!manifestSnap || !manifestSnap.exists()) continue;
-
-      const docIdsMap: Record<string, string[]> = manifestSnap.data().docIds || {};
-      const fetches: Promise<void>[] = [];
-
-      for (const [colNameRaw, ids] of Object.entries(docIdsMap)) {
-        const colName = colNameRaw as EntityBucket;
-        if (!Array.isArray(ids) || !CLAIM_ABLE_COLLECTIONS.includes(colName)) continue;
-        for (const id of ids) {
-          if (!id) continue;
-          fetches.push(
-            getDoc(doc(db, colName, id))
-              .then((snap) => {
-                if (snap.exists()) evaluateDocForClaim(colName, id, snap.data());
-              })
-              .catch(() => {})
-          );
-        }
-      }
-      await Promise.all(fetches);
-    }
-
-    // 2. Orphan repair: catch docs owned/managed by this UID that may have missed rtManifest or accessUids
-    const orphanEntries = new Map<string, Partial<Record<EntityBucket, string[]>>>();
-    const recordOrphanManifest = (rtCode: string, colName: EntityBucket, id: string) => {
-      if (!rtCode || rtCode === 'SEMUA') return;
-      const bucket = orphanEntries.get(rtCode) || {};
-      const list = bucket[colName] || [];
-      if (!list.includes(id)) list.push(id);
-      bucket[colName] = list;
-      orphanEntries.set(rtCode, bucket);
-    };
-
-    const ownerField = ctx.role === 'server' ? 'serverUid' : 'rtAdminUid';
-    await Promise.all(
-      CLAIM_ABLE_COLLECTIONS.map(async (colName) => {
-        const queries = [
-          query(collection(db, colName), where('ownerUid', '==', ctx.uid)),
-          query(collection(db, colName), where(ownerField, '==', ctx.uid)),
-        ];
-        for (const qRef of queries) {
-          try {
-            const snap = await getDocs(qRef);
-            snap.forEach((docSnap) => {
-              const d = docSnap.data();
-              evaluateDocForClaim(colName, docSnap.id, d);
-              const dRw = normalizeRWCode(d.rw, ctx.rw);
-              const dRt = extractRTFromScope(d.rt, '', true);
-              if (dRw === ctx.rw && dRt && dRt !== 'SEMUA') {
-                recordOrphanManifest(dRt, colName, docSnap.id);
-              }
-            });
-          } catch {
-            // non-fatal per collection
-          }
-        }
-      })
-    );
-
-    updatedCount = await commitDocAccessPatches(updates);
-
-    for (const [rtCode, bucket] of orphanEntries.entries()) {
-      await appendDocIdsToManifest(ctx.rw, rtCode, bucket);
-    }
-  } catch (err) {
-    console.warn('claimAndSyncManifestDocs warning:', err);
+  if (!options?.force) {
+    if (claimInFlightPromise) return claimInFlightPromise;
+    if (Date.now() - lastClaimCompletedAt < CLAIM_COOLDOWN_MS) return 0;
   }
-  return updatedCount;
+
+  const promise = (async () => {
+    let updatedCount = 0;
+    try {
+      const regRef = doc(db, 'rtRegistry', `rw_${ctx.rw}`);
+      const regSnap = await getDoc(regRef).catch(() => null);
+      const regData = regSnap && regSnap.exists() ? regSnap.data() : null;
+
+      if (ctx.role === 'server' && regData && regData.serverUid !== ctx.uid) {
+        await updateDoc(regRef, {
+          serverUid: ctx.uid,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      } else if (ctx.role === 'admin' && ctx.rt !== 'SEMUA') {
+        const regAdmins = regData?.adminsByRt?.[ctx.rt];
+        if (!regData || !Array.isArray(regAdmins) || !regAdmins.includes(ctx.uid)) {
+          await upsertRtRegistry({
+            rw: ctx.rw,
+            ownerUid: ctx.uid,
+            serverUid: ctx.serverUid,
+            addRt: ctx.rt,
+            addAdminUid: ctx.uid,
+          });
+        }
+      }
+
+      const effectiveAdminsByRt: Record<string, string[]> = {
+        ...(regData?.adminsByRt || ctx.adminsByRt || {}),
+      };
+      const effectiveServerUid =
+        (typeof regData?.serverUid === 'string' && regData.serverUid) || ctx.serverUid;
+
+      const rtsToCheck: string[] =
+        ctx.role === 'server'
+          ? Array.from(
+              new Set([
+                ...RW05_RT_CODES,
+                ...(Array.isArray(regData?.registeredRts) ? regData.registeredRts : []),
+                ...Object.keys(effectiveAdminsByRt),
+                DEFAULT_RT,
+              ])
+            )
+          : [ctx.rt];
+
+      const updates: Array<{
+        ref: ReturnType<typeof doc>;
+        path: string;
+        patch: Record<string, any>;
+      }> = [];
+      const seenPaths = new Set<string>();
+
+      const evaluateDocForClaim = (colName: EntityBucket, id: string, data: any) => {
+        const docPath = `${colName}/${id}`;
+        if (seenPaths.has(docPath)) return;
+        seenPaths.add(docPath);
+        recordMeta(docPath, { ...data, localCreated: true });
+
+        if (!isPatchableEntityDoc(colName, id, data, ctx)) return;
+
+        const patch = buildAclSyncPatch({
+          colName,
+          data,
+          ctx,
+          effectiveServerUid,
+          adminsByRt: effectiveAdminsByRt,
+          includeRtAdminUid: true,
+        });
+
+        if (patch) {
+          updates.push({ ref: doc(db, colName, id), path: docPath, patch });
+        }
+      };
+
+      // 1. Read every doc listed in rtManifest for the assigned RW/RT scope (in parallel per RT)
+      await Promise.all(
+        rtsToCheck
+          .filter((rtCode) => Boolean(rtCode && rtCode !== 'SEMUA'))
+          .map(async (rtCode) => {
+            const scopeId = `rt_${rtCode}_rw_${ctx.rw}`;
+            const manifestSnap = await getDoc(doc(db, 'rtManifest', scopeId)).catch(() => null);
+            if (!manifestSnap || !manifestSnap.exists()) return;
+
+            const docIdsMap: Record<string, string[]> = manifestSnap.data().docIds || {};
+            const fetches: Promise<void>[] = [];
+
+            for (const [colNameRaw, ids] of Object.entries(docIdsMap)) {
+              const colName = colNameRaw as EntityBucket;
+              if (!Array.isArray(ids) || !CLAIM_ABLE_COLLECTIONS.includes(colName)) continue;
+              for (const id of ids) {
+                if (!id) continue;
+                fetches.push(
+                  getDoc(doc(db, colName, id))
+                    .then((snap) => {
+                      if (snap.exists()) evaluateDocForClaim(colName, id, snap.data());
+                    })
+                    .catch(() => {})
+                );
+              }
+            }
+            await Promise.all(fetches);
+          })
+      );
+
+      // 2. Orphan repair: catch docs owned/managed by this UID that may have missed rtManifest or accessUids
+      const orphanEntries = new Map<string, Partial<Record<EntityBucket, string[]>>>();
+      const recordOrphanManifest = (rtCode: string, colName: EntityBucket, id: string) => {
+        if (!rtCode || rtCode === 'SEMUA') return;
+        const bucket = orphanEntries.get(rtCode) || {};
+        const list = bucket[colName] || [];
+        if (!list.includes(id)) list.push(id);
+        bucket[colName] = list;
+        orphanEntries.set(rtCode, bucket);
+      };
+
+      await Promise.all(
+        CLAIM_ABLE_COLLECTIONS.map(async (colName) => {
+          const queries = [
+            query(collection(db, colName), where('ownerUid', '==', ctx.uid)),
+            query(collection(db, colName), where('accessUids', 'array-contains', ctx.uid)),
+          ];
+          for (const qRef of queries) {
+            try {
+              const snap = await getDocs(qRef);
+              snap.forEach((docSnap) => {
+                const d = docSnap.data();
+                evaluateDocForClaim(colName, docSnap.id, d);
+                const dRw = normalizeRWCode(d.rw, ctx.rw);
+                const dRt = extractRTFromScope(d.rt, '', true);
+                if (dRw === ctx.rw && dRt && dRt !== 'SEMUA') {
+                  recordOrphanManifest(dRt, colName, docSnap.id);
+                }
+              });
+            } catch {
+              // non-fatal per collection
+            }
+          }
+        })
+      );
+
+      updatedCount = await commitDocAccessPatches(updates);
+
+      for (const [rtCode, bucket] of orphanEntries.entries()) {
+        await appendDocIdsToManifest(ctx.rw, rtCode, bucket);
+      }
+      lastClaimCompletedAt = Date.now();
+    } catch (err) {
+      console.warn('claimAndSyncManifestDocs warning:', err);
+    }
+    return updatedCount;
+  })();
+
+  claimInFlightPromise = promise;
+  void promise.finally(() => {
+    if (claimInFlightPromise === promise) {
+      claimInFlightPromise = null;
+    }
+  });
+  return promise;
 }
 
 const reconciledPathsThisSession = new Set<string>();
@@ -1041,51 +1264,22 @@ async function reconcileLoadedDocsWithManifestAndAcls(
       byRt.set(rt, list);
     }
 
-    if (ctx.role === 'admin') {
-      if (colName === 'settings' && rt === 'SEMUA') continue;
-      if (colName === 'adminAccounts' && data.authUid !== ctx.uid) continue;
-      if (rt !== ctx.rt && rt !== 'SEMUA') continue;
-    }
+    if (!isPatchableEntityDoc(colName, id, data, ctx)) continue;
 
-    const assignedRtUids =
-      rt === 'SEMUA'
-        ? Object.values(ctx.adminsByRt || {}).flat()
-        : Array.isArray(ctx.adminsByRt?.[rt])
-        ? ctx.adminsByRt[rt]
-        : [];
-    const desiredUids = [
-      ctx.uid,
-      ...(ctx.serverUid ? [ctx.serverUid] : []),
-      ...assignedRtUids,
-    ].filter(Boolean);
-
-    const { rwId: expectedRwId, rtId: expectedRtId } = buildScopeIds(rt, rw);
-    const reconcileKey = `${docPath}:${desiredUids.join(',')}:${data.rwId || ''}:${data.rtId || ''}:${data.serverUid || ''}`;
+    const reconcileKey = `${docPath}:${ctx.uid}:${ctx.serverUid || ''}:${data.rwId || ''}:${data.rtId || ''}:${data.serverUid || ''}:${Array.isArray(data.accessUids) ? data.accessUids.length : 0}`;
     if (reconciledPathsThisSession.has(reconcileKey)) continue;
     reconciledPathsThisSession.add(reconcileKey);
 
-    const existingUids: string[] = Array.isArray(data.accessUids) ? data.accessUids : [];
-    const missing = desiredUids.some((u) => !existingUids.includes(u));
-    const needsServer = Boolean(ctx.serverUid && data.serverUid !== ctx.serverUid);
-    const needsScopeIds = data.rwId !== expectedRwId || data.rtId !== expectedRtId;
+    const patch = buildAclSyncPatch({
+      colName,
+      data,
+      ctx,
+      effectiveServerUid: ctx.serverUid,
+      adminsByRt: ctx.adminsByRt || {},
+      includeRtAdminUid: false,
+    });
 
-    if (missing || needsServer || needsScopeIds) {
-      const nextUids = Array.from(
-        new Set([
-          ...desiredUids,
-          ...(typeof data.ownerUid === 'string' ? [data.ownerUid] : []),
-          ...existingUids,
-        ])
-      )
-        .filter(Boolean)
-        .slice(0, 15);
-      const patch: Record<string, any> = {
-        rwId: expectedRwId,
-        rtId: expectedRtId,
-        accessUids: nextUids,
-        updatedAt: serverTimestamp(),
-      };
-      if (ctx.serverUid) patch.serverUid = ctx.serverUid;
+    if (patch) {
       aclPatches.push({ ref: doc(db, colName, id), path: docPath, patch });
     }
   }
@@ -1162,18 +1356,21 @@ export async function loginWithGoogleServer(): Promise<{
       return { ok: false, message: 'Akses admin Google tidak aktif atau ditolak.' };
     }
 
-    await claimAndSyncManifestDocs();
+    void claimAndSyncManifestDocs().catch(() => {});
+
+    const loggedUser: AuthUser = {
+      role: ctx.role,
+      username: ctx.username,
+      nama: ctx.displayName,
+      rtScope:
+        ctx.role === 'server' ? 'Semua RT se-RW 05 Glempang' : `RT ${ctx.rt} RW ${ctx.rw}`,
+      isPinAuthenticated: true,
+    };
+    saveAuthSessionHint(fbUser.uid, loggedUser);
 
     return {
       ok: true,
-      user: {
-        role: ctx.role,
-        username: ctx.username,
-        nama: ctx.displayName,
-        rtScope:
-          ctx.role === 'server' ? 'Semua RT se-RW 05 Glempang' : `RT ${ctx.rt} RW ${ctx.rw}`,
-        isPinAuthenticated: true,
-      },
+      user: loggedUser,
     };
   } catch (err: any) {
     return {
@@ -1316,17 +1513,20 @@ export async function loginWithFirebase(params: {
         return { ok: false, message: 'Akses Server Pusat ditolak atau belum aktif.' };
       }
 
-      await claimAndSyncManifestDocs();
+      void claimAndSyncManifestDocs().catch(() => {});
+
+      const serverUser: AuthUser = {
+        role: 'server',
+        username: ctx.username,
+        nama: ctx.displayName,
+        rtScope: 'Semua RT se-RW 05 Glempang',
+        isPinAuthenticated: false,
+      };
+      saveAuthSessionHint(fbUser.uid, serverUser);
 
       return {
         ok: true,
-        user: {
-          role: 'server',
-          username: ctx.username,
-          nama: ctx.displayName,
-          rtScope: 'Semua RT se-RW 05 Glempang',
-          isPinAuthenticated: false,
-        },
+        user: serverUser,
       };
     }
 
@@ -1431,37 +1631,42 @@ export async function loginWithFirebase(params: {
         };
       }
 
-      await claimAndSyncManifestDocs();
+      void claimAndSyncManifestDocs().catch(() => {});
 
-      // Update last login timestamp on own adminAccounts record if present
+      // Update last login timestamp on own adminAccounts record if present in background
       const nowLabel = formatWaktuSyncID();
-      try {
-        const ownAccSnap = await getDocs(
-          query(collection(db, 'adminAccounts'), where('accessUids', 'array-contains', fbUser.uid))
-        );
-        for (const docSnap of ownAccSnap.docs) {
-          const d = docSnap.data();
-          if (d.authUid === fbUser.uid) {
-            await updateDoc(docSnap.ref, {
-              terakhirLogin: nowLabel,
-              terakhirSinkronisasi: `Tersinkron ${nowLabel}`,
-              updatedAt: serverTimestamp(),
-            }).catch(() => {});
+      void (async () => {
+        try {
+          const ownAccSnap = await getDocs(
+            query(collection(db, 'adminAccounts'), where('accessUids', 'array-contains', fbUser.uid))
+          );
+          for (const docSnap of ownAccSnap.docs) {
+            const d = docSnap.data();
+            if (d.authUid === fbUser.uid) {
+              await updateDoc(docSnap.ref, {
+                terakhirLogin: nowLabel,
+                terakhirSinkronisasi: `Tersinkron ${nowLabel}`,
+                updatedAt: serverTimestamp(),
+              }).catch(() => {});
+            }
           }
+        } catch {
+          // non-fatal
         }
-      } catch {
-        // non-fatal
-      }
+      })();
+
+      const adminUser: AuthUser = {
+        role: ctx.role,
+        username: ctx.username,
+        nama: ctx.displayName,
+        rtScope: `RT ${ctx.rt} RW ${ctx.rw}`,
+        isPinAuthenticated: false,
+      };
+      saveAuthSessionHint(fbUser.uid, adminUser);
 
       return {
         ok: true,
-        user: {
-          role: ctx.role,
-          username: ctx.username,
-          nama: ctx.displayName,
-          rtScope: `RT ${ctx.rt} RW ${ctx.rw}`,
-          isPinAuthenticated: false,
-        },
+        user: adminUser,
       };
     }
 
@@ -1519,17 +1724,20 @@ export async function loginWithFirebase(params: {
     const rt = normalizeRTCode(matchedDoc.rt) || DEFAULT_RT;
     const rw = normalizeRWCode(matchedDoc.rw, DEFAULT_RW);
 
+    const wargaUser: AuthUser = {
+      role: 'warga',
+      username: matchedDoc.nama,
+      nama: matchedDoc.nama,
+      noKK: matchedDoc.noKK,
+      wargaId: matchedDoc.id,
+      rtScope: `RT ${rt} RW ${rw}`,
+      isPinAuthenticated: false,
+    };
+    saveAuthSessionHint(fbUser.uid, wargaUser);
+
     return {
       ok: true,
-      user: {
-        role: 'warga',
-        username: matchedDoc.nama,
-        nama: matchedDoc.nama,
-        noKK: matchedDoc.noKK,
-        wargaId: matchedDoc.id,
-        rtScope: `RT ${rt} RW ${rw}`,
-        isPinAuthenticated: false,
-      },
+      user: wargaUser,
     };
   } catch (err: any) {
     return {
@@ -1653,19 +1861,22 @@ export async function registerAndSyncAdminWithFirebase(params: {
       migrationOk = migRes.ok;
     }
 
-    await claimAndSyncManifestDocs();
+    void claimAndSyncManifestDocs().catch(() => {});
+
+    const regUser: AuthUser = {
+      role: 'admin',
+      username: savedAccount.username,
+      nama: savedAccount.nama,
+      rtScope: `RT ${rt} RW ${rw}`,
+      isPinAuthenticated: false,
+    };
+    saveAuthSessionHint(fbUser.uid, regUser);
 
     return {
       ok: true,
       migrationOk,
       account: savedAccount,
-      user: {
-        role: 'admin',
-        username: savedAccount.username,
-        nama: savedAccount.nama,
-        rtScope: `RT ${rt} RW ${rw}`,
-        isPinAuthenticated: false,
-      },
+      user: regUser,
     };
   } catch (err: any) {
     return {
@@ -1683,15 +1894,16 @@ export async function resolveCurrentFirebaseUser(
 ): Promise<AuthUser | null> {
   if (!fbUser) {
     activeAdminContext = null;
+    clearAuthSessionHint();
     return null;
   }
 
   // 1. Check /admins/{uid}
   const ctx = await refreshAdminContext(fbUser.uid);
   if (ctx) {
-    // Ensure session recovery claims all RT/RW docs for this device immediately
-    await claimAndSyncManifestDocs().catch(() => {});
-    return {
+    // Claim RT/RW docs asynchronously in background so boot & login never stall
+    void claimAndSyncManifestDocs().catch(() => {});
+    const resolved: AuthUser = {
       role: ctx.role,
       username: ctx.username,
       nama: ctx.displayName,
@@ -1699,6 +1911,8 @@ export async function resolveCurrentFirebaseUser(
         ctx.role === 'server' ? 'Semua RT se-RW 05 Glempang' : `RT ${ctx.rt} RW ${ctx.rw}`,
       isPinAuthenticated: false,
     };
+    saveAuthSessionHint(fbUser.uid, resolved);
+    return resolved;
   }
 
   // 2. Check /wargaProfiles/{uid} + /warga
@@ -1706,7 +1920,7 @@ export async function resolveCurrentFirebaseUser(
     const profSnap = await getDoc(doc(db, 'wargaProfiles', fbUser.uid));
     if (profSnap.exists()) {
       const p = profSnap.data();
-      return {
+      const resolvedWarga: AuthUser = {
         role: 'warga',
         username: String(p.nama || 'Warga'),
         nama: String(p.nama || 'Warga'),
@@ -1715,13 +1929,15 @@ export async function resolveCurrentFirebaseUser(
         rtScope: `RT ${normalizeRTCode(p.rt) || DEFAULT_RT} RW ${normalizeRWCode(p.rw, DEFAULT_RW)}`,
         isPinAuthenticated: false,
       };
+      saveAuthSessionHint(fbUser.uid, resolvedWarga);
+      return resolvedWarga;
     }
 
     const q = query(collection(db, 'warga'), where('linkedUid', '==', fbUser.uid));
     const wSnap = await getDocs(q);
     if (!wSnap.empty) {
       const w = wSnap.docs[0].data() as Warga;
-      return {
+      const resolvedWarga: AuthUser = {
         role: 'warga',
         username: w.nama,
         nama: w.nama,
@@ -1730,11 +1946,14 @@ export async function resolveCurrentFirebaseUser(
         rtScope: `RT ${normalizeRTCode(w.rt) || DEFAULT_RT} RW ${normalizeRWCode(w.rw, DEFAULT_RW)}`,
         isPinAuthenticated: false,
       };
+      saveAuthSessionHint(fbUser.uid, resolvedWarga);
+      return resolvedWarga;
     }
   } catch {
     // ignore unresolved profile
   }
 
+  clearAuthSessionHint();
   return null;
 }
 
@@ -1746,6 +1965,9 @@ export async function logoutFromFirebase(): Promise<void> {
   activeAdminContext = null;
   activePendingWriteCount = 0;
   latestAsyncWriteError = null;
+  claimInFlightPromise = null;
+  lastClaimCompletedAt = 0;
+  clearAuthSessionHint();
   docMetaCache.clear();
   reconciledPathsThisSession.clear();
   try {
@@ -2043,6 +2265,7 @@ export function buildTransactionFirestorePayload(
     keterangan: String(tx.keterangan || '-').slice(0, 500),
     nominal: toFiniteNumberOrDefault(tx.nominal, 0),
     tipe: tx.tipe === 'keluar' || tx.tipe === 'kematian' ? tx.tipe : 'masuk',
+    residentId: tx.residentId ? String(tx.residentId).slice(0, 128) : undefined,
     namaWarga: tx.namaWarga ? String(tx.namaWarga).slice(0, 160) : undefined,
     nomorRumah: tx.nomorRumah ? String(tx.nomorRumah).slice(0, 32) : undefined,
     noKK: tx.noKK ? String(tx.noKK).slice(0, 32) : undefined,
@@ -2324,17 +2547,85 @@ async function saveScopedEntityDoc(
 ): Promise<FirestoreWriteResult> {
   const path = `${colName}/${id}`;
   const docRef = doc(db, colName, id);
-  const isUpdate = Boolean(existing && (existing.ownerUid || existing.localCreated));
+  const isUpdate = Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated));
+  const prevMeta = docMetaCache.get(path);
 
   // Optimistically cache metadata so offline follow-up edits update cleanly instead of re-creating
   recordMeta(path, { ...payload, localCreated: true });
 
-  const writePromise = isUpdate
-    ? updateDoc(docRef, buildEntityUpdatePatch(colName, payload, activeAdminContext))
-    : setDoc(docRef, payload);
+  const executeWrite = async () => {
+    if (!isUpdate) {
+      try {
+        await setDoc(docRef, payload);
+        recordMeta(path, { ...payload, localCreated: true }, { serverConfirmed: isOnlineBrowser() });
+        return;
+      } catch (err) {
+        if (prevMeta) docMetaCache.set(path, prevMeta);
+        else docMetaCache.delete(path);
+        throw err;
+      }
+    }
+
+    try {
+      await updateDoc(docRef, buildEntityUpdatePatch(colName, payload, activeAdminContext, existing));
+      recordMeta(path, { ...payload, localCreated: true }, { serverConfirmed: isOnlineBrowser() });
+    } catch (err: any) {
+      const code = String(err?.code || '');
+      const msg = String(err?.message || '');
+      if (
+        isOnlineBrowser() &&
+        (code === 'not-found' ||
+          code === 'permission-denied' ||
+          /missing or insufficient permissions/i.test(msg))
+      ) {
+        const serverSnap = await getDocFromServer(docRef).catch(() => null);
+        if (serverSnap && !serverSnap.exists()) {
+          // Stale local cache or deleted doc on server: create cleanly via setDoc
+          const currentUid = auth.currentUser?.uid || activeAdminContext?.uid || payload.ownerUid;
+          const createPayload = {
+            ...payload,
+            ownerUid: currentUid,
+            accessUids: Array.from(
+              new Set([
+                currentUid,
+                ...(Array.isArray(payload.accessUids) ? payload.accessUids : []),
+              ])
+            ).slice(0, 15),
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          };
+          await setDoc(docRef, createPayload);
+          recordMeta(path, { ...createPayload, localCreated: true }, { serverConfirmed: true });
+          return;
+        }
+        if (serverSnap && serverSnap.exists()) {
+          const serverData = serverSnap.data();
+          recordMeta(path, { ...serverData, localCreated: true }, { serverConfirmed: true });
+          const refreshedMeta = docMetaCache.get(path) || null;
+          const refreshedPatch = buildEntityUpdatePatch(
+            colName,
+            payload,
+            activeAdminContext,
+            refreshedMeta
+          );
+          await updateDoc(docRef, refreshedPatch);
+          recordMeta(
+            path,
+            { ...serverData, ...refreshedPatch, localCreated: true },
+            { serverConfirmed: true }
+          );
+          return;
+        }
+      }
+
+      if (prevMeta) docMetaCache.set(path, prevMeta);
+      else docMetaCache.delete(path);
+      throw err;
+    }
+  };
 
   return commitTrackedWrite(
-    writePromise,
+    executeWrite(),
     isUpdate ? OperationType.UPDATE : OperationType.CREATE,
     path,
     onAcked
@@ -2425,8 +2716,8 @@ export async function bulkSaveWargaAndBantuanDocs(
       const existing = docMetaCache.get(path) || null;
       const payload = buildWargaFirestorePayload({ ...w, id }, existing, activeAdminContext);
       const ref = doc(db, 'warga', id);
-      if (existing && (existing.ownerUid || existing.localCreated)) {
-        batch.update(ref, buildEntityUpdatePatch('warga', payload, activeAdminContext));
+      if (existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated)) {
+        batch.update(ref, buildEntityUpdatePatch('warga', payload, activeAdminContext, existing));
       } else {
         batch.set(ref, payload);
       }
@@ -2446,8 +2737,8 @@ export async function bulkSaveWargaAndBantuanDocs(
       const existing = docMetaCache.get(path) || null;
       const payload = buildBantuanFirestorePayload({ ...b, id }, existing, activeAdminContext);
       const ref = doc(db, 'bantuan', id);
-      if (existing && (existing.ownerUid || existing.localCreated)) {
-        batch.update(ref, buildEntityUpdatePatch('bantuan', payload, activeAdminContext));
+      if (existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated)) {
+        batch.update(ref, buildEntityUpdatePatch('bantuan', payload, activeAdminContext, existing));
       } else {
         batch.set(ref, payload);
       }
@@ -2755,25 +3046,60 @@ export async function syncRtPublicSummary(params: {
     updatedAt: serverTimestamp(),
   });
 
+  const updateSummaryPatch = stripUndefinedDeep({
+    rwId,
+    rtId,
+    tahunAktif: payload.tahunAktif,
+    pengaturanKas: payload.pengaturanKas,
+    transactions: payload.transactions,
+    pengumuman: payload.pengumuman,
+    serverUid: payload.serverUid,
+    updatedAt: serverTimestamp(),
+  });
+
+  const ref = doc(db, 'rtPublicSummaries', scopeId);
+  const isUpdate = Boolean(existing && (existing.ownerUid || existing.localCreated || existing.serverConfirmed));
+  recordMeta(path, { ...payload, localCreated: true });
+
   try {
-    const ref = doc(db, 'rtPublicSummaries', scopeId);
-    const isUpdate = Boolean(existing && (existing.ownerUid || existing.localCreated));
-    recordMeta(path, { ...payload, localCreated: true });
     if (isUpdate) {
-      await updateDoc(ref, stripUndefinedDeep({
-        rwId,
-        rtId,
-        tahunAktif: payload.tahunAktif,
-        pengaturanKas: payload.pengaturanKas,
-        transactions: payload.transactions,
-        pengumuman: payload.pengumuman,
-        serverUid: payload.serverUid,
-        updatedAt: serverTimestamp(),
-      }));
+      await updateDoc(ref, updateSummaryPatch);
     } else {
       await setDoc(ref, payload);
     }
-  } catch (err) {
+    recordMeta(path, { ...payload, localCreated: true }, { serverConfirmed: isOnlineBrowser() });
+  } catch (err: any) {
+    const code = String(err?.code || '');
+    const msg = String(err?.message || '');
+    if (
+      isOnlineBrowser() &&
+      (code === 'not-found' ||
+        code === 'permission-denied' ||
+        /missing or insufficient permissions/i.test(msg))
+    ) {
+      try {
+        const serverSnap = await getDocFromServer(ref);
+        if (serverSnap.exists()) {
+          const sData = serverSnap.data();
+          const actualRw = String(sData.rw || rw);
+          const actualRt = String(sData.rt || rt);
+          await updateDoc(ref, {
+            ...updateSummaryPatch,
+            rwId: `rw_${actualRw}`,
+            rtId: actualRt === 'SEMUA' ? 'SEMUA' : `rt_${actualRt}`,
+          });
+          recordMeta(path, { ...sData, ...updateSummaryPatch, localCreated: true }, { serverConfirmed: true });
+          return;
+        } else {
+          await setDoc(ref, payload);
+          recordMeta(path, { ...payload, localCreated: true }, { serverConfirmed: true });
+          return;
+        }
+      } catch (retryErr) {
+        console.warn('syncRtPublicSummary retry warning:', retryErr);
+        return;
+      }
+    }
     console.warn('syncRtPublicSummary warning:', err);
   }
 }
@@ -2813,28 +3139,58 @@ async function executeResilientWrites(
       const batch = writeBatch(db);
       for (const w of chunk) {
         const ref = doc(db, w.colName, w.id);
+        const existing = docMetaCache.get(`${w.colName}/${w.id}`) || null;
         if (w.isUpdate) {
-          batch.update(ref, buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext));
+          batch.update(ref, buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext, existing));
         } else {
           batch.set(ref, w.payload);
         }
       }
       await batch.commit();
-      chunk.forEach((w) => recordMeta(`${w.colName}/${w.id}`, { ...w.payload, localCreated: true }));
+      chunk.forEach((w) =>
+        recordMeta(`${w.colName}/${w.id}`, { ...w.payload, localCreated: true }, { serverConfirmed: isOnlineBrowser() })
+      );
       succeeded.push(...chunk);
     } catch {
       const settled = await Promise.allSettled(
-        chunk.map((w) => {
+        chunk.map(async (w) => {
+          const path = `${w.colName}/${w.id}`;
           const ref = doc(db, w.colName, w.id);
-          return w.isUpdate
-            ? updateDoc(ref, buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext))
-            : setDoc(ref, w.payload);
+          const existing = docMetaCache.get(path) || null;
+          if (!w.isUpdate) {
+            return setDoc(ref, w.payload);
+          }
+          try {
+            return await updateDoc(ref, buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext, existing));
+          } catch (err: any) {
+            if (isOnlineBrowser()) {
+              const serverSnap = await getDocFromServer(ref).catch(() => null);
+              if (serverSnap && !serverSnap.exists()) {
+                const currentUid = auth.currentUser?.uid || activeAdminContext?.uid || w.payload.ownerUid;
+                return setDoc(ref, {
+                  ...w.payload,
+                  ownerUid: currentUid,
+                  createdAt: serverTimestamp(),
+                  updatedAt: serverTimestamp(),
+                });
+              }
+              if (serverSnap && serverSnap.exists()) {
+                const sData = serverSnap.data();
+                recordMeta(path, { ...sData, localCreated: true }, { serverConfirmed: true });
+                return updateDoc(
+                  ref,
+                  buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext, docMetaCache.get(path) || null)
+                );
+              }
+            }
+            throw err;
+          }
         })
       );
       settled.forEach((res, idx) => {
         if (res.status === 'fulfilled') {
           const w = chunk[idx];
-          recordMeta(`${w.colName}/${w.id}`, { ...w.payload, localCreated: true });
+          recordMeta(`${w.colName}/${w.id}`, { ...w.payload, localCreated: true }, { serverConfirmed: isOnlineBrowser() });
           succeeded.push(w);
         } else {
           const msg = res.reason?.message || String(res.reason || 'Unknown write error');
@@ -3314,7 +3670,6 @@ export function subscribeFirestoreState(
 
   const unsubs: Unsubscribe[] = [];
   let disposed = false;
-  let initialClaimDone = user.role === 'warga';
   let firstReadyEmitted = false;
   let lastListenerError: string | null = null;
 
@@ -3360,7 +3715,7 @@ export function subscribeFirestoreState(
       onStatusChange?.(true, null, 'pending');
       return;
     }
-    if (allListenersReady && initialClaimDone) {
+    if (allListenersReady) {
       onStatusChange?.(true, null, 'synced');
     } else {
       onStatusChange?.(true, null, 'connecting');
@@ -3372,11 +3727,18 @@ export function subscribeFirestoreState(
   const onPendingWriteUpdate = () => computeAndNotifyStatus();
   pendingWriteListeners.add(onPendingWriteUpdate);
 
+  // Safety fallback so UI never stalls in connecting state on degraded connections
+  const readinessFailsafeTimer = setTimeout(() => {
+    if (disposed || firstReadyEmitted) return;
+    firstReadyEmitted = true;
+    onUpdate({}, true);
+  }, 3500);
+
   const handleOnline = () => {
     lastListenerError = null;
     computeAndNotifyStatus();
     if (user.role !== 'warga') {
-      claimAndSyncManifestDocs().catch(() => {});
+      void claimAndSyncManifestDocs().catch(() => {});
     }
   };
   const handleOffline = () => computeAndNotifyStatus();
@@ -3403,9 +3765,10 @@ export function subscribeFirestoreState(
     readyFlags.add(key);
     pendingSnapshotsByKey.set(key, hasPendingWrites);
     const allListenersReady = expectedKeys.every((k) => readyFlags.has(k));
-    const isFirstReady = allListenersReady && initialClaimDone && !firstReadyEmitted;
+    const isFirstReady = allListenersReady && !firstReadyEmitted;
     if (isFirstReady) {
       firstReadyEmitted = true;
+      clearTimeout(readinessFailsafeTimer);
     }
     computeAndNotifyStatus();
     if (emitDataUpdate || isFirstReady) {
@@ -3415,6 +3778,7 @@ export function subscribeFirestoreState(
 
   const cleanup = () => {
     disposed = true;
+    clearTimeout(readinessFailsafeTimer);
     pendingWriteListeners.delete(onPendingWriteUpdate);
     if (typeof window !== 'undefined') {
       window.removeEventListener('online', handleOnline);
@@ -3449,7 +3813,7 @@ export function subscribeFirestoreState(
           const list: Warga[] = [];
           snap.forEach((docSnap) => {
             const d = docSnap.data();
-            recordMeta(`warga/${docSnap.id}`, d);
+            recordMeta(`warga/${docSnap.id}`, d, { serverConfirmed: !snap.metadata.fromCache });
             list.push({
               ...(d as unknown as Warga),
               id: docSnap.id,
@@ -3506,8 +3870,8 @@ export function subscribeFirestoreState(
     return cleanup;
   }
 
-  // ADMIN RT or SERVER PUSAT: Ensure activeAdminContext & initial manifest claim before declaring firstReady
-  (async () => {
+  // ADMIN RT or SERVER PUSAT: Refresh admin context if needed & claim manifest docs in background (non-blocking)
+  void (async () => {
     try {
       if (!activeAdminContext || activeAdminContext.uid !== fbUser.uid) {
         await refreshAdminContext(fbUser.uid);
@@ -3515,17 +3879,6 @@ export function subscribeFirestoreState(
       await claimAndSyncManifestDocs();
     } catch {
       // non-fatal, listeners stay active
-    } finally {
-      if (!disposed) {
-        initialClaimDone = true;
-        const allListenersReady = expectedKeys.every((k) => readyFlags.has(k));
-        const isFirstReady = allListenersReady && !firstReadyEmitted;
-        if (isFirstReady) {
-          firstReadyEmitted = true;
-          onUpdate({}, true);
-        }
-        computeAndNotifyStatus();
-      }
     }
   })();
 
@@ -3561,7 +3914,7 @@ export function subscribeFirestoreState(
           const rawForReconcile: Array<{ id: string; data: Record<string, any> }> = [];
           snap.forEach((docSnap) => {
             const d = docSnap.data();
-            recordMeta(`${colName}/${docSnap.id}`, d);
+            recordMeta(`${colName}/${docSnap.id}`, d, { serverConfirmed: !snap.metadata.fromCache });
             if (!isDocInScope(colName, d)) return;
             rawForReconcile.push({ id: docSnap.id, data: d });
             items.push({
@@ -3608,7 +3961,7 @@ export function subscribeFirestoreState(
         lastListenerError = null;
         const docs = snap.docs.map((d) => {
           const data = d.data();
-          recordMeta(`settings/${d.id}`, data);
+          recordMeta(`settings/${d.id}`, data, { serverConfirmed: !snap.metadata.fromCache });
           return data;
         });
 
@@ -3673,26 +4026,41 @@ export function subscribeFirestoreState(
     )
   );
 
-  // Watch rtRegistry & systemMeta/serverLock changes -> propagate serverUid & new RT admin UIDs immediately
+  // Watch rtRegistry & systemMeta/serverLock changes -> only run background claim when serverUid or scoped RT admins actually change
   const rw = activeAdminContext?.rw || DEFAULT_RW;
+  let lastRegSig = '';
   unsubs.push(
     onSnapshot(
       doc(db, 'rtRegistry', `rw_${rw}`),
-      async (regSnap) => {
-        if (!regSnap.exists()) return;
+      (regSnap) => {
+        if (!regSnap.exists() || !activeAdminContext) return;
         const reg = regSnap.data();
-        if (activeAdminContext) {
-          activeAdminContext = {
-            ...activeAdminContext,
-            serverUid: typeof reg.serverUid === 'string' ? reg.serverUid : activeAdminContext.serverUid,
-            adminsByRt:
-              reg.adminsByRt && typeof reg.adminsByRt === 'object'
-                ? reg.adminsByRt
-                : activeAdminContext.adminsByRt,
-          };
+        const nextServerUid =
+          typeof reg.serverUid === 'string' && reg.serverUid
+            ? reg.serverUid
+            : activeAdminContext.serverUid;
+        const nextAdminsByRt =
+          reg.adminsByRt && typeof reg.adminsByRt === 'object'
+            ? reg.adminsByRt
+            : activeAdminContext.adminsByRt;
+
+        const relevantScopeAdmins =
+          activeAdminContext.role === 'server'
+            ? nextAdminsByRt
+            : nextAdminsByRt?.[activeAdminContext.rt] || [];
+        const sig = `${nextServerUid || ''}|${JSON.stringify(relevantScopeAdmins)}`;
+
+        activeAdminContext = {
+          ...activeAdminContext,
+          serverUid: nextServerUid,
+          adminsByRt: nextAdminsByRt,
+        };
+
+        if (lastRegSig && sig !== lastRegSig) {
           reconciledPathsThisSession.clear();
-          await claimAndSyncManifestDocs();
+          void claimAndSyncManifestDocs({ force: true }).catch(() => {});
         }
+        lastRegSig = sig;
       },
       () => {
         // ignore if rtRegistry not created yet
@@ -3703,16 +4071,21 @@ export function subscribeFirestoreState(
   unsubs.push(
     onSnapshot(
       doc(db, 'systemMeta', 'serverLock'),
-      async (lockSnap) => {
+      (lockSnap) => {
         if (!lockSnap.exists()) return;
         const lock = lockSnap.data();
-        if (activeAdminContext && typeof lock.serverUid === 'string' && lock.serverUid && activeAdminContext.serverUid !== lock.serverUid) {
+        if (
+          activeAdminContext &&
+          typeof lock.serverUid === 'string' &&
+          lock.serverUid &&
+          activeAdminContext.serverUid !== lock.serverUid
+        ) {
           activeAdminContext = {
             ...activeAdminContext,
             serverUid: lock.serverUid,
           };
           reconciledPathsThisSession.clear();
-          await claimAndSyncManifestDocs();
+          void claimAndSyncManifestDocs({ force: true }).catch(() => {});
         }
       },
       () => {

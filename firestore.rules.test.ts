@@ -7,10 +7,12 @@ import {
 import {
   buildServerFilteredViewData,
   collectRegisteredRTs,
+  getSelectableResidentsForRT,
   getTransactionRTCode,
   getWargaRTCode,
   normalizeRTCode,
   normalizeRWCode,
+  resolveTransactionWargaName,
 } from './src/utils/rtFilter';
 import { dedupeEntityList } from './src/utils/cloudSync';
 import type { PengaturanKas, Transaction, Warga } from './src/types';
@@ -242,6 +244,194 @@ const unitLogicChecks: { name: string; assertFn: () => void }[] = [
       const merged = dedupeEntityList([older, newer], [], (a, b) => a.noKK === b.noKK);
       assert.equal(merged.length, 1);
       assert.equal(merged[0].statusIuran, 'Sudah');
+    },
+  },
+  {
+    name: '17. Optional field helpers safely tolerate legacy null values on existing doc updates',
+    assertFn: () => {
+      assert.match(rules, /function isOptStr\(data, key, maxLen\)[\s\S]*data\[key\] == null/);
+      assert.match(rules, /function isOptNum\(data, key\)[\s\S]*data\[key\] == null/);
+      assert.match(rules, /function isOptBool\(data, key\)[\s\S]*data\[key\] == null/);
+      assert.match(rules, /function isOptMap\(data, key\)[\s\S]*data\[key\] == null/);
+    },
+  },
+  {
+    name: '18. Allow list predicates support array-contains accessUids and ownerUid queries for RT Admins',
+    assertFn: () => {
+      assert.match(rules, /function canListOwnOrScoped\(\)[\s\S]*request\.auth\.uid in resource\.data\.accessUids/);
+      assert.match(rules, /function canListOwnOrScoped\(\)[\s\S]*resource\.data\.ownerUid == request\.auth\.uid/);
+      assert.equal(/\('accessUids' in data\) && data\.accessUids is list/.test(rules), false);
+    },
+  },
+  {
+    name: '19. Transaction rules allow optional bounded residentId on create/update while preserving hasOnly shadow-field guard',
+    assertFn: () => {
+      assert.match(
+        rules,
+        /function isValidTransaction\(data\)[\s\S]*data\.keys\(\)\.hasOnly\([\s\S]*'residentId'[\s\S]*isOptStr\(data, 'residentId', 128\)/
+      );
+      assert.match(
+        rules,
+        /match \/transactions\/\{txId\}[\s\S]*affectedKeys\(\)\.hasOnly\([\s\S]*'residentId'[\s\S]*\)/
+      );
+    },
+  },
+  {
+    name: '20. getSelectableResidentsForRT strictly isolates RT, blocks SEMUA/empty for admin role, includes KK + anggotaKeluarga, and has zero mock data',
+    assertFn: () => {
+      const wargaSample: Warga[] = [
+        {
+          id: 'w_rt01_a',
+          no: 1,
+          nama: 'Ahmad RT01',
+          noKK: '3302010101010001',
+          noRumah: '01',
+          rt: '01',
+          rw: '05',
+          alamat: 'Kotayasa RT 01',
+          jenisKelamin: 'Laki-laki',
+          jumlahJiwa: 2,
+          statusIuran: 'Belum',
+          anggotaKeluarga: [
+            { nama: 'Ahmad RT01', nik: '3302010101010001', hubungan: 'Kepala Keluarga', jenisKelamin: 'Laki-laki' },
+            { nama: 'Siti RT01', nik: '3302010101010002', hubungan: 'Istri', jenisKelamin: 'Perempuan' },
+          ],
+        },
+        {
+          id: 'w_rt08_b',
+          no: 1,
+          nama: 'Budi RT08',
+          noKK: '3302010101010008',
+          noRumah: '08',
+          rt: '08',
+          rw: '05',
+          alamat: 'Kotayasa RT 08',
+          jenisKelamin: 'Laki-laki',
+          jumlahJiwa: 1,
+          statusIuran: 'Sudah',
+        },
+      ];
+
+      const rt01Options = getSelectableResidentsForRT({
+        wargaList: wargaSample,
+        targetRT: '01',
+        activeRole: 'admin',
+      });
+      assert.equal(rt01Options.length, 2);
+      assert.deepEqual(
+        rt01Options.map((o) => o.nama),
+        ['Ahmad RT01', 'Siti RT01']
+      );
+      assert.equal(rt01Options.some((o) => o.nama.includes('RT08')), false);
+
+      // Admin must NEVER see cross-RT data if targetRT is SEMUA or empty
+      assert.deepEqual(
+        getSelectableResidentsForRT({ wargaList: wargaSample, targetRT: 'SEMUA', activeRole: 'admin' }),
+        []
+      );
+      assert.deepEqual(
+        getSelectableResidentsForRT({ wargaList: wargaSample, targetRT: '', activeRole: 'admin' }),
+        []
+      );
+
+      // Empty RT with zero residents must return [] (zero mock fallback)
+      assert.deepEqual(
+        getSelectableResidentsForRT({ wargaList: wargaSample, targetRT: '03', activeRole: 'admin' }),
+        []
+      );
+      assert.deepEqual(
+        getSelectableResidentsForRT({ wargaList: [], targetRT: '08', activeRole: 'server' }),
+        []
+      );
+    },
+  },
+  {
+    name: '21. resolveTransactionWargaName resolves KK rename dynamically, preserves anggotaKeluarga selection, and falls back for legacy tx',
+    assertFn: () => {
+      const updatedWargaList: Warga[] = [
+        {
+          id: 'w_kk_01',
+          no: 1,
+          nama: 'Slamet Raharjo (Diperbarui)',
+          noKK: '3302050000000001',
+          noRumah: '12',
+          rt: '08',
+          rw: '05',
+          alamat: 'Kotayasa RT 08',
+          jenisKelamin: 'Laki-laki',
+          jumlahJiwa: 2,
+          statusIuran: 'Sudah',
+          anggotaKeluarga: [
+            { nama: 'Slamet Raharjo (Diperbarui)', nik: '3302050000000001', hubungan: 'Kepala Keluarga', jenisKelamin: 'Laki-laki' },
+            { nama: 'Rina Raharjo', nik: '3302050000000002', hubungan: 'Istri', jenisKelamin: 'Perempuan' },
+          ],
+        },
+      ];
+
+      const kkTx: Transaction = {
+        id: 'tx_kk',
+        tanggal: '2026-10-05',
+        kategori: 'Iuran Warga',
+        keterangan: 'Iuran bulanan',
+        nominal: 25000,
+        tipe: 'masuk',
+        residentId: 'w_kk_01',
+        namaWarga: 'Slamet Raharjo',
+      };
+      assert.equal(resolveTransactionWargaName(kkTx, updatedWargaList), 'Slamet Raharjo (Diperbarui)');
+
+      const memberTx: Transaction = {
+        id: 'tx_member',
+        tanggal: '2026-10-05',
+        kategori: 'Iuran Warga',
+        keterangan: 'Iuran bulanan',
+        nominal: 25000,
+        tipe: 'masuk',
+        residentId: 'w_kk_01',
+        namaWarga: 'Rina Raharjo',
+      };
+      assert.equal(resolveTransactionWargaName(memberTx, updatedWargaList), 'Rina Raharjo');
+
+      const legacyTx: Transaction = {
+        id: 'tx_legacy',
+        tanggal: '2026-09-01',
+        kategori: 'Iuran Warga',
+        keterangan: 'Data lama tanpa residentId',
+        nominal: 25000,
+        tipe: 'masuk',
+        namaWarga: 'Warga Lama Manual',
+      };
+      assert.equal(resolveTransactionWargaName(legacyTx, updatedWargaList), 'Warga Lama Manual');
+    },
+  },
+  {
+    name: '22. getTransactionRTCode resolves RT via tx.residentId when rtScope is absent',
+    assertFn: () => {
+      const wargaList: Warga[] = [
+        {
+          id: 'w_rt04_99',
+          no: 1,
+          nama: 'Hendra',
+          noKK: '3302040000000099',
+          noRumah: '04',
+          rt: '04',
+          rw: '05',
+          alamat: 'Kotayasa RT 04',
+          jenisKelamin: 'Laki-laki',
+          jumlahJiwa: 1,
+          statusIuran: 'Belum',
+        },
+      ];
+      const txWithoutScope: Transaction = {
+        id: 'tx_no_scope',
+        tanggal: '2026-10-06',
+        kategori: 'Iuran Warga',
+        keterangan: 'Tanpa rtScope',
+        nominal: 15000,
+        tipe: 'masuk',
+        residentId: 'w_rt04_99',
+      };
+      assert.equal(getTransactionRTCode(txWithoutScope, wargaList, '08'), '04');
     },
   },
 ];

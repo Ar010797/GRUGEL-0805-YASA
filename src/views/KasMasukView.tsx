@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { ArrowLeft, ArrowUp, Calendar, Plus, Search, Receipt } from 'lucide-react';
-import { Transaction, PengaturanKas } from '../types';
+import { Transaction, PengaturanKas, Warga } from '../types';
+import { resolveTransactionWargaName } from '../utils/rtFilter';
 
 interface KasMasukViewProps {
   transactions: Transaction[];
+  wargaList?: Warga[];
   pengaturanKas?: PengaturanKas;
   onOpenTxModal: () => void;
   onBack: () => void;
@@ -11,6 +13,7 @@ interface KasMasukViewProps {
 
 export const KasMasukView: React.FC<KasMasukViewProps> = ({
   transactions,
+  wargaList = [],
   pengaturanKas,
   onOpenTxModal,
   onBack,
@@ -22,11 +25,12 @@ export const KasMasukView: React.FC<KasMasukViewProps> = ({
   const masukList = transactions.filter((t) => t.tipe === 'masuk');
   const totalMasuk = masukList.reduce((acc, t) => acc + t.nominal, 0);
 
-  const filtered = masukList.filter(
-    (t) =>
-      t.keterangan.toLowerCase().includes(search.toLowerCase()) ||
-      t.namaWarga?.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = masukList.filter((t) => {
+    const q = search.toLowerCase();
+    if (!q) return true;
+    const resolvedName = resolveTransactionWargaName(t, wargaList).toLowerCase();
+    return t.keterangan.toLowerCase().includes(q) || resolvedName.includes(q);
+  });
 
   const formatRupiah = (val: number) => 'Rp ' + val.toLocaleString('id-ID');
 
@@ -148,7 +152,7 @@ export const KasMasukView: React.FC<KasMasukViewProps> = ({
                   {filtered.map((t) => (
                     <tr key={t.id} className="hover:bg-slate-50 transition-colors">
                       <td className="py-3.5 px-4 sm:px-6 text-slate-500 whitespace-nowrap">{t.tanggal}</td>
-                      <td className="py-3.5 px-4 sm:px-6 font-bold text-slate-800">{t.namaWarga || `Warga RT ${rtStr}`}</td>
+                      <td className="py-3.5 px-4 sm:px-6 font-bold text-slate-800">{resolveTransactionWargaName(t, wargaList) || `Warga RT ${rtStr}`}</td>
                       <td className="py-3.5 px-4 sm:px-6">
                         <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-200 whitespace-nowrap">
                           {t.kategori}

@@ -58,8 +58,142 @@ export function normalizeRWCode(value?: string | null, fallback = '05'): string 
   return cleaned.toUpperCase();
 }
 
+export interface ResidentOption {
+  optionKey: string;
+  residentId: string;
+  nama: string;
+  hubungan: string;
+  isKepalaKeluarga: boolean;
+  kkHeadName: string;
+  noKK: string;
+  noRumah: string;
+  rt: string;
+  rw: string;
+  rtScope: string;
+}
+
 export function getWargaRTCode(warga: Warga, defaultRT = '08'): string {
   return normalizeRTCode(warga.rt) || normalizeRTCode(defaultRT) || '08';
+}
+
+export function getSelectableResidentsForRT(params: {
+  wargaList: Warga[];
+  targetRT?: string | null;
+  activeRole?: 'server' | 'admin' | 'warga';
+  defaultRW?: string;
+}): ResidentOption[] {
+  const { wargaList, targetRT, activeRole, defaultRW = '05' } = params;
+  const normalizedTarget = normalizeRTCode(targetRT);
+
+  // Admin RT MUST always be restricted to a single concrete RT; never leak cross-RT records
+  if (activeRole === 'admin' && (!normalizedTarget || normalizedTarget === 'SEMUA')) {
+    return [];
+  }
+
+  const scopedWarga =
+    normalizedTarget && normalizedTarget !== 'SEMUA'
+      ? wargaList.filter((w) => getWargaRTCode(w, '') === normalizedTarget)
+      : wargaList;
+
+  const sortedWarga = [...scopedWarga].sort((a, b) => {
+    const rtCmp = getWargaRTCode(a, '08').localeCompare(getWargaRTCode(b, '08'), 'id', {
+      numeric: true,
+    });
+    if (rtCmp !== 0) return rtCmp;
+    const noA = Number(a.no) || 0;
+    const noB = Number(b.no) || 0;
+    if (noA !== noB) return noA - noB;
+    return String(a.nama || '').localeCompare(String(b.nama || ''), 'id');
+  });
+
+  const options: ResidentOption[] = [];
+
+  for (const w of sortedWarga) {
+    const headName = String(w.nama || '').trim();
+    if (!headName) continue;
+    const rt = getWargaRTCode(w, normalizedTarget || '08');
+    const rw = normalizeRWCode(w.rw, defaultRW);
+    const rtScope = `RT ${rt} RW ${rw}`;
+
+    options.push({
+      optionKey: `${w.id}::kk`,
+      residentId: w.id,
+      nama: headName,
+      hubungan: 'Kepala Keluarga',
+      isKepalaKeluarga: true,
+      kkHeadName: headName,
+      noKK: String(w.noKK || '').trim(),
+      noRumah: String(w.noRumah || '-').trim(),
+      rt,
+      rw,
+      rtScope,
+    });
+
+    const seenNames = new Set<string>([headName.toLowerCase()]);
+    if (Array.isArray(w.anggotaKeluarga)) {
+      w.anggotaKeluarga.forEach((member, idx) => {
+        const mName = String(member?.nama || '').trim();
+        if (!mName) return;
+        const lower = mName.toLowerCase();
+        if (seenNames.has(lower)) return;
+        seenNames.add(lower);
+        options.push({
+          optionKey: `${w.id}::m_${idx}`,
+          residentId: w.id,
+          nama: mName,
+          hubungan: String(member?.hubungan || 'Anggota Keluarga').trim(),
+          isKepalaKeluarga: false,
+          kkHeadName: headName,
+          noKK: String(w.noKK || '').trim(),
+          noRumah: String(w.noRumah || '-').trim(),
+          rt,
+          rw,
+          rtScope,
+        });
+      });
+    }
+  }
+
+  return options;
+}
+
+export function resolveTransactionWargaName(
+  tx: Transaction,
+  wargaList: Warga[] = []
+): string {
+  if (tx.residentId && wargaList.length > 0) {
+    const matched = wargaList.find((w) => w.id === tx.residentId);
+    if (matched) {
+      const storedLower = String(tx.namaWarga || '').trim().toLowerCase();
+      if (storedLower && Array.isArray(matched.anggotaKeluarga)) {
+        const matchedMember = matched.anggotaKeluarga.find(
+          (m) =>
+            m?.hubungan !== 'Kepala Keluarga' &&
+            String(m?.nama || '').trim().toLowerCase() === storedLower
+        );
+        if (matchedMember?.nama) {
+          return matchedMember.nama;
+        }
+      }
+      if (matched.nama) {
+        return matched.nama;
+      }
+    }
+  }
+
+  if (tx.namaWarga && tx.namaWarga.trim()) {
+    return tx.namaWarga.trim();
+  }
+
+  if (tx.noKK && wargaList.length > 0) {
+    const cleanKK = tx.noKK.replace(/\s+/g, '');
+    const matchedByKK = wargaList.find(
+      (w) => (w.noKK || '').replace(/\s+/g, '') === cleanKK
+    );
+    if (matchedByKK?.nama) return matchedByKK.nama;
+  }
+
+  return '';
 }
 
 export function getTransactionRTCode(
@@ -69,6 +203,11 @@ export function getTransactionRTCode(
 ): string {
   const explicit = normalizeRTCode(tx.rtScope);
   if (explicit) return explicit;
+
+  if (tx.residentId) {
+    const matchedById = wargaList.find((w) => w.id === tx.residentId);
+    if (matchedById) return getWargaRTCode(matchedById, defaultRT);
+  }
 
   if (tx.noKK) {
     const cleanKK = tx.noKK.replace(/\s+/g, '');

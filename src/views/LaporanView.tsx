@@ -2,6 +2,7 @@ import React from 'react';
 import { ArrowLeft, FileText, Download, Printer, ShieldCheck, CheckCircle2, ArrowDown, Users } from 'lucide-react';
 import { Transaction, Warga, BantuanPemerintah } from '../types';
 import { exportRekapTahunanPDF, exportPengeluaranPDF, exportDataWargaPerKK_PDF } from '../utils/pdfExport';
+import { resolveTransactionWargaName } from '../utils/rtFilter';
 
 interface LaporanViewProps {
   transactions: Transaction[];
@@ -186,7 +187,7 @@ export const LaporanView: React.FC<LaporanViewProps> = ({
                   <tr key={t.id}>
                     <td className="py-2 px-4 text-slate-500">{t.tanggal}</td>
                     <td className="py-2 px-4 font-bold text-slate-800">{t.keterangan}</td>
-                    <td className="py-2 px-4 text-slate-600">{t.namaWarga || '—'}</td>
+                    <td className="py-2 px-4 text-slate-600">{resolveTransactionWargaName(t, wargaList) || '—'}</td>
                     <td className="py-2 px-4 capitalize">{t.tipe}</td>
                     <td className="py-2 px-4 text-right font-bold">
                       <span className={t.tipe === 'masuk' ? 'text-emerald-700' : 'text-rose-600'}>
