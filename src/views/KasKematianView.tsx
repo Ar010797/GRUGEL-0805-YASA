@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { ArrowLeft, Heart, Plus, Search, History, ArrowUp, ArrowDown } from 'lucide-react';
+import { ArrowLeft, Heart, Plus, Search, History, ArrowUp, ArrowDown, Pencil, Trash2 } from 'lucide-react';
+import { ConfirmationModal } from '../components/ConfirmationModal';
 import { Transaction, PengaturanKas, Warga } from '../types';
 import {
   getKasKematianBalanceSummary,
@@ -12,6 +13,8 @@ interface KasKematianViewProps {
   wargaList?: Warga[];
   pengaturanKas?: PengaturanKas;
   onOpenTxModal: () => void;
+  onEditTransaction?: (tx: Transaction) => void;
+  onDeleteTransaction?: (id: string) => void;
   onOpenSaldoAwalModal?: () => void;
   onBack: () => void;
 }
@@ -21,11 +24,15 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
   wargaList = [],
   pengaturanKas,
   onOpenTxModal,
+  onEditTransaction,
+  onDeleteTransaction,
   onOpenSaldoAwalModal,
   onBack,
 }) => {
   const [filterMode, setFilterMode] = useState<'semua' | 'masuk' | 'keluar'>('semua');
   const [search, setSearch] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<Transaction | null>(null);
+  const showActions = Boolean(onEditTransaction || onDeleteTransaction);
 
   const kematianList = transactions.filter((t) => t.tipe === 'kematian');
   const {
@@ -231,7 +238,7 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
             </div>
 
             <div className="overflow-x-auto touch-pan-x scrollbar-thin">
-              <table className="w-full text-left text-xs min-w-[620px]">
+              <table className="w-full text-left text-xs min-w-[680px]">
                 <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200/80">
                   <tr>
                     <th className="py-3.5 px-4 sm:px-6">Tanggal</th>
@@ -239,6 +246,7 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
                     <th className="py-3.5 px-4 sm:px-6">Jenis</th>
                     <th className="py-3.5 px-4 sm:px-6">Keterangan</th>
                     <th className="py-3.5 px-4 sm:px-6 text-right">Nominal</th>
+                    {showActions && <th className="py-3.5 px-4 sm:px-6 text-right">Aksi</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -272,6 +280,32 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
                           {outflow ? '-' : '+'}
                           {formatRupiah(t.nominal)}
                         </td>
+                        {showActions && (
+                          <td className="py-3.5 px-4 sm:px-6 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center justify-end gap-1">
+                              {onEditTransaction && (
+                                <button
+                                  type="button"
+                                  onClick={() => onEditTransaction(t)}
+                                  className="rounded-lg p-1.5 text-slate-400 hover:bg-emerald-50 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                                  title="Edit catatan kas kematian"
+                                >
+                                  <Pencil size={15} />
+                                </button>
+                              )}
+                              {onDeleteTransaction && (
+                                <button
+                                  type="button"
+                                  onClick={() => setDeleteTarget(t)}
+                                  className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600 transition-colors cursor-pointer"
+                                  title="Hapus catatan kas kematian"
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
@@ -281,6 +315,34 @@ export const KasKematianView: React.FC<KasKematianViewProps> = ({
           </div>
         )}
       </div>
+
+      <ConfirmationModal
+        isOpen={Boolean(deleteTarget)}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget && onDeleteTransaction) {
+            onDeleteTransaction(deleteTarget.id);
+          }
+          setDeleteTarget(null);
+        }}
+        title="Hapus Catatan Kas Kematian"
+        targetName={
+          deleteTarget
+            ? `${deleteTarget.keterangan} (${isKasKematianOutflow(deleteTarget) ? '-' : '+'}${formatRupiah(deleteTarget.nominal)})`
+            : undefined
+        }
+        message={
+          deleteTarget
+            ? `Apakah Anda yakin ingin menghapus catatan kas kematian${
+                resolveTransactionWargaName(deleteTarget, wargaList)
+                  ? ` atas nama ${resolveTransactionWargaName(deleteTarget, wargaList)}`
+                  : ''
+              } pada tanggal ${deleteTarget.tanggal}? Saldo kas kematian akan dihitung ulang otomatis.`
+            : ''
+        }
+        confirmText="Ya, Hapus Catatan"
+        variant="danger"
+      />
     </div>
   );
 };

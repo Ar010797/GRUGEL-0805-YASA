@@ -502,6 +502,84 @@ const unitLogicChecks: { name: string; assertFn: () => void }[] = [
       assert.equal(summary.keluarCount, 1);
     },
   },
+  {
+    name: '24. Bantuan & Transaction resident picker includes NIK per KK head & family members and isolates RT scope',
+    assertFn: () => {
+      const wargaList: Warga[] = [
+        {
+          id: 'w_rt08_kk1',
+          no: 1,
+          nama: 'Slamet Riyadi',
+          noKK: '3302140101800001',
+          nik: '3302140101800010',
+          noRumah: '12',
+          rt: '08',
+          rw: '05',
+          jenisKelamin: 'Laki-laki',
+          jumlahJiwa: 3,
+          statusIuran: 'Sudah',
+          anggotaKeluarga: [
+            {
+              nik: '3302140101800010',
+              nama: 'Slamet Riyadi',
+              hubungan: 'Kepala Keluarga',
+              jenisKelamin: 'Laki-laki',
+            },
+            {
+              nik: '3302145205850002',
+              nama: 'Sri Rahayu',
+              hubungan: 'Istri',
+              jenisKelamin: 'Perempuan',
+            },
+            {
+              nik: '3302141203100003',
+              nama: 'Bagas Pratama',
+              hubungan: 'Anak',
+              jenisKelamin: 'Laki-laki',
+            },
+          ],
+        },
+        {
+          id: 'w_rt03_kk1',
+          no: 1,
+          nama: 'Warga RT 03',
+          noKK: '3302140202900009',
+          nik: '3302140202900099',
+          noRumah: '04',
+          rt: '03',
+          rw: '05',
+          jenisKelamin: 'Laki-laki',
+          jumlahJiwa: 1,
+          statusIuran: 'Belum',
+        },
+      ];
+
+      const optionsRT08 = getSelectableResidentsForRT({
+        wargaList,
+        targetRT: '08',
+        activeRole: 'admin',
+        defaultRW: '05',
+      });
+
+      assert.equal(optionsRT08.length, 3);
+      assert.equal(optionsRT08[0].nama, 'Slamet Riyadi');
+      assert.equal(optionsRT08[0].nik, '3302140101800010');
+      assert.equal(optionsRT08[0].noKK, '3302140101800001');
+      assert.equal(optionsRT08[1].nama, 'Sri Rahayu');
+      assert.equal(optionsRT08[1].hubungan, 'Istri');
+      assert.equal(optionsRT08[1].nik, '3302145205850002');
+      assert.equal(optionsRT08[2].nama, 'Bagas Pratama');
+      assert.equal(optionsRT08[2].nik, '3302141203100003');
+      assert.equal(
+        optionsRT08.some((o) => o.rt === '03'),
+        false,
+        'Admin RT 08 must never see RT 03 residents in Bantuan or Transaction picker'
+      );
+
+      // Verify firestore.rules permits update & delete for transactions by assigned admin
+      assert.match(rules, /match \/transactions\/\{txId\}[\s\S]*allow update:[\s\S]*allow delete:/);
+    },
+  },
 ];
 
 for (const check of [...dirtyDozenChecks, ...unitLogicChecks]) {

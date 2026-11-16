@@ -66,6 +66,7 @@ export interface ResidentOption {
   isKepalaKeluarga: boolean;
   kkHeadName: string;
   noKK: string;
+  nik?: string;
   noRumah: string;
   rt: string;
   rw: string;
@@ -114,6 +115,14 @@ export function getSelectableResidentsForRT(params: {
     const rt = getWargaRTCode(w, normalizedTarget || '08');
     const rw = normalizeRWCode(w.rw, defaultRW);
     const rtScope = `RT ${rt} RW ${rw}`;
+    const matchedHeadMemberNik = Array.isArray(w.anggotaKeluarga)
+      ? w.anggotaKeluarga.find(
+          (m) =>
+            m?.hubungan === 'Kepala Keluarga' ||
+            String(m?.nama || '').trim().toLowerCase() === headName.toLowerCase()
+        )?.nik
+      : undefined;
+    const headNik = String(w.nik || matchedHeadMemberNik || '').trim();
 
     options.push({
       optionKey: `${w.id}::kk`,
@@ -123,6 +132,7 @@ export function getSelectableResidentsForRT(params: {
       isKepalaKeluarga: true,
       kkHeadName: headName,
       noKK: String(w.noKK || '').trim(),
+      nik: headNik,
       noRumah: String(w.noRumah || '-').trim(),
       rt,
       rw,
@@ -145,6 +155,7 @@ export function getSelectableResidentsForRT(params: {
           isKepalaKeluarga: false,
           kkHeadName: headName,
           noKK: String(w.noKK || '').trim(),
+          nik: String(member?.nik || '').trim(),
           noRumah: String(w.noRumah || '-').trim(),
           rt,
           rw,

@@ -10,8 +10,11 @@ import {
   Inbox,
   ArrowLeft,
   History,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import { LeafIcon } from '../components/HouseLogo';
+import { ConfirmationModal } from '../components/ConfirmationModal';
 import { Transaction, PengaturanKas, Warga } from '../types';
 import {
   getKasKematianBalanceSummary,
@@ -24,6 +27,8 @@ interface KasWargaViewProps {
   wargaList?: Warga[];
   pengaturanKas?: PengaturanKas;
   onOpenTxModal: (type?: 'masuk' | 'keluar' | 'kematian') => void;
+  onEditTransaction?: (tx: Transaction) => void;
+  onDeleteTransaction?: (id: string) => void;
   onOpenSaldoAwalModal?: () => void;
   onBack: () => void;
 }
@@ -33,6 +38,8 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
   wargaList = [],
   pengaturanKas,
   onOpenTxModal,
+  onEditTransaction,
+  onDeleteTransaction,
   onOpenSaldoAwalModal,
   onBack,
 }) => {
@@ -44,6 +51,8 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
   const desaStr = profilRT?.desa || 'Desa Kotayasa';
   const [activeTab, setActiveTab] = useState<'semua' | 'masuk' | 'keluar' | 'kematian'>('semua');
   const [search, setSearch] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<Transaction | null>(null);
+  const showActions = Boolean(onEditTransaction || onDeleteTransaction);
 
   const totalMasuk = transactions
     .filter((t) => t.tipe === 'masuk')
@@ -211,7 +220,7 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
+            <table className="w-full text-left text-xs min-w-[680px]">
               <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200/80">
                 <tr>
                   <th className="py-3.5 px-6">Tanggal</th>
@@ -219,17 +228,18 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
                   <th className="py-3.5 px-6">Warga / Pihak</th>
                   <th className="py-3.5 px-6">Kategori</th>
                   <th className="py-3.5 px-6 text-right">Nominal</th>
+                  {showActions && <th className="py-3.5 px-6 text-right">Aksi</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {filtered.map((tx) => (
                   <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="py-3.5 px-6 text-slate-500">{tx.tanggal}</td>
+                    <td className="py-3.5 px-6 text-slate-500 whitespace-nowrap">{tx.tanggal}</td>
                     <td className="py-3.5 px-6 font-bold text-slate-800">{tx.keterangan}</td>
                     <td className="py-3.5 px-6 text-slate-600">{resolveTransactionWargaName(tx, wargaList) || '—'}</td>
                     <td className="py-3.5 px-6">
                       <span
-                        className={`inline-flex rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
+                        className={`inline-flex rounded-full px-2.5 py-0.5 text-[10px] font-bold whitespace-nowrap ${
                           tx.tipe === 'masuk'
                             ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                             : tx.tipe === 'keluar'
@@ -240,7 +250,7 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
                         {tx.kategori}
                       </span>
                     </td>
-                    <td className="py-3.5 px-6 text-right font-extrabold">
+                    <td className="py-3.5 px-6 text-right font-extrabold whitespace-nowrap">
                       {(() => {
                         const inflow = isTransactionInflow(tx);
                         return (
@@ -250,6 +260,32 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
                         );
                       })()}
                     </td>
+                    {showActions && (
+                      <td className="py-3.5 px-6 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center justify-end gap-1">
+                          {onEditTransaction && (
+                            <button
+                              type="button"
+                              onClick={() => onEditTransaction(tx)}
+                              className="rounded-lg p-1.5 text-slate-400 hover:bg-emerald-50 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                              title="Edit transaksi"
+                            >
+                              <Pencil size={15} />
+                            </button>
+                          )}
+                          {onDeleteTransaction && (
+                            <button
+                              type="button"
+                              onClick={() => setDeleteTarget(tx)}
+                              className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600 transition-colors cursor-pointer"
+                              title="Hapus transaksi"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -267,6 +303,34 @@ export const KasWargaView: React.FC<KasWargaViewProps> = ({
           <LeafIcon size={16} />
         </div>
       </div>
+
+      <ConfirmationModal
+        isOpen={Boolean(deleteTarget)}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget && onDeleteTransaction) {
+            onDeleteTransaction(deleteTarget.id);
+          }
+          setDeleteTarget(null);
+        }}
+        title="Hapus Transaksi Kas"
+        targetName={
+          deleteTarget
+            ? `${deleteTarget.keterangan} (${formatRupiah(deleteTarget.nominal)})`
+            : undefined
+        }
+        message={
+          deleteTarget
+            ? `Apakah Anda yakin ingin menghapus catatan transaksi${
+                resolveTransactionWargaName(deleteTarget, wargaList)
+                  ? ` atas nama ${resolveTransactionWargaName(deleteTarget, wargaList)}`
+                  : ''
+              } pada tanggal ${deleteTarget.tanggal}? Saldo kas akan dihitung ulang otomatis dan data dihapus dari Cloud Firestore.`
+            : ''
+        }
+        confirmText="Ya, Hapus Transaksi"
+        variant="danger"
+      />
     </div>
   );
 };

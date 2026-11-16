@@ -15,7 +15,9 @@ import {
 import { Transaction, TransactionType, PengaturanKas, Warga } from '../types';
 import {
   getSelectableResidentsForRT,
+  isKasKematianOutflow,
   normalizeRTCode,
+  normalizeRWCode,
   type ResidentOption,
 } from '../utils/rtFilter';
 
@@ -26,6 +28,8 @@ interface TransactionModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (tx: Omit<Transaction, 'id'> | Omit<Transaction, 'id'>[]) => Promise<void> | void;
+  onUpdate?: (tx: Transaction) => Promise<void> | void;
+  editingTransaction?: Transaction | null;
   defaultType?: TransactionType;
   pengaturanKas?: PengaturanKas;
   wargaList?: Warga[];
@@ -41,6 +45,8 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   isOpen,
   onClose,
   onSave,
+  onUpdate,
+  editingTransaction = null,
   defaultType = 'masuk',
   pengaturanKas,
   wargaList = [],
@@ -48,6 +54,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   activeRole = 'admin',
   onGoToDataWarga,
 }) => {
+  const isEditing = Boolean(editingTransaction);
   const [tipe, setTipe] = useState<TransactionType>(defaultType);
   const [kematianFlow, setKematianFlow] = useState<KematianFlowMode>('setoran');
   const [kematianPeriod, setKematianPeriod] = useState<KematianPeriodMode>('bulanan');
@@ -70,31 +77,127 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   const dropdownRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
+  const effectiveTargetRT = useMemo(() => {
+    const raw = targetRT || pengaturanKas?.profilRT?.namaRT || '08';
+    return normalizeRTCode(raw) || '08';
+  }, [targetRT, pengaturanKas?.profilRT?.namaRT]);
+
+  const residentOptions = useMemo(() => {
+    return getSelectableResidentsForRT({
+      wargaList,
+      targetRT: effectiveTargetRT,
+      activeRole,
+      defaultRW: pengaturanKas?.profilRT?.namaRW || '05',
+    });
+  }, [wargaList, effectiveTargetRT, activeRole, pengaturanKas?.profilRT?.namaRW]);
+
   const defaultCategoryForState = (t: TransactionType, flow: KematianFlowMode) => {
     if (t === 'masuk') return 'Iuran Warga';
     if (t === 'keluar') return 'Kegiatan RT';
     return flow === 'setoran' ? 'Iuran Kas Kematian' : 'Santunan Kematian';
   };
 
-  // Reset form cleanly whenever modal opens or defaultType changes
+  // Reset or populate form cleanly whenever modal opens or editingTransaction changes
   useEffect(() => {
     if (!isOpen) return;
-    setTipe(defaultType);
-    setKematianFlow('setoran');
-    setKematianPeriod('bulanan');
-    setKategori(defaultCategoryForState(defaultType, 'setoran'));
-    setKeterangan('');
-    setNominal('');
-    setIncludeKasKematian(false);
-    setPairedKematianPeriod('bulanan');
-    setPairedKematianNominal('');
-    setTanggal(new Date().toISOString().split('T')[0]);
-    setSelectedOption(null);
+
+    if (editingTransaction) {
+      const flow: KematianFlowMode = isKasKematianOutflow(editingTransaction)
+        ? 'santunan'
+        : 'setoran';
+      const ketLower = (editingTransaction.keterangan || '').toLowerCase();
+      const period: KematianPeriodMode = ketLower.includes('tahunan')
+        ? 'tahunan'
+        : ketLower.includes('bulanan')
+        ? 'bulanan'
+        : 'bebas';
+
+      setTipe(editingTransaction.tipe);
+      setKematianFlow(flow);
+      setKematianPeriod(period);
+      setKategori(
+        editingTransaction.kategori || defaultCategoryForState(editingTransaction.tipe, flow)
+      );
+      setKeterangan(editingTransaction.keterangan || '');
+      setNominal(
+        typeof editingTransaction.nominal === 'number'
+          ? String(editingTransaction.nominal)
+          : ''
+      );
+      setTanggal(editingTransaction.tanggal || new Date().toISOString().split('T')[0]);
+      setIncludeKasKematian(false);
+      setPairedKematianPeriod('bulanan');
+      setPairedKematianNominal('');
+
+      const txNameLower = (editingTransaction.namaWarga || '').trim().toLowerCase();
+      const txCleanKK = (editingTransaction.noKK || '').replace(/\s+/g, '');
+      const matchedOpt =
+        (editingTransaction.residentId
+          ? residentOptions.find(
+              (o) =>
+                o.residentId === editingTransaction.residentId &&
+                (!txNameLower || o.nama.toLowerCase() === txNameLower)
+            ) || residentOptions.find((o) => o.residentId === editingTransaction.residentId)
+          : undefined) ||
+        (txCleanKK
+          ? residentOptions.find(
+              (o) =>
+                o.noKK.replace(/\s+/g, '') === txCleanKK &&
+                (!txNameLower || o.nama.toLowerCase() === txNameLower)
+            ) || residentOptions.find((o) => o.noKK.replace(/\s+/g, '') === txCleanKK)
+          : undefined) ||
+        (txNameLower
+          ? residentOptions.find((o) => o.nama.toLowerCase() === txNameLower)
+          : undefined) ||
+        null;
+
+      if (matchedOpt) {
+        setSelectedOption(matchedOpt);
+      } else {
+        const rwFallback = normalizeRWCode(pengaturanKas?.profilRT?.namaRW, '05');
+        const rtFallback =
+          normalizeRTCode(editingTransaction.rtScope) ||
+          (effectiveTargetRT !== 'SEMUA' ? effectiveTargetRT : '08');
+        const legacyLabel =
+          editingTransaction.namaWarga?.trim() ||
+          (editingTransaction.isSaldoAwal
+            ? 'Pindahan Kas Masa Lalu'
+            : editingTransaction.tipe === 'keluar'
+            ? 'Operasional / Pihak Luar'
+            : 'Data Transaksi Lama');
+        setSelectedOption({
+          optionKey: `legacy::${editingTransaction.id}`,
+          residentId: editingTransaction.residentId || '',
+          nama: legacyLabel,
+          hubungan: editingTransaction.isSaldoAwal ? 'Saldo Awal' : 'Data Tercatat',
+          isKepalaKeluarga: false,
+          kkHeadName: legacyLabel,
+          noKK: editingTransaction.noKK || '',
+          noRumah: editingTransaction.nomorRumah || '-',
+          rt: rtFallback,
+          rw: rwFallback,
+          rtScope: editingTransaction.rtScope || `RT ${rtFallback} RW ${rwFallback}`,
+        });
+      }
+    } else {
+      setTipe(defaultType);
+      setKematianFlow('setoran');
+      setKematianPeriod('bulanan');
+      setKategori(defaultCategoryForState(defaultType, 'setoran'));
+      setKeterangan('');
+      setNominal('');
+      setIncludeKasKematian(false);
+      setPairedKematianPeriod('bulanan');
+      setPairedKematianNominal('');
+      setTanggal(new Date().toISOString().split('T')[0]);
+      setSelectedOption(null);
+    }
+
     setSearchQuery('');
     setIsDropdownOpen(false);
     setIsSubmitting(false);
     setFormError(null);
-  }, [isOpen, defaultType]);
+  }, [isOpen, defaultType, editingTransaction]);
 
   // Close dropdown on outside click or Escape key
   useEffect(() => {
@@ -120,20 +223,6 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [isOpen, isDropdownOpen, isSubmitting, onClose]);
-
-  const effectiveTargetRT = useMemo(() => {
-    const raw = targetRT || pengaturanKas?.profilRT?.namaRT || '08';
-    return normalizeRTCode(raw) || '08';
-  }, [targetRT, pengaturanKas?.profilRT?.namaRT]);
-
-  const residentOptions = useMemo(() => {
-    return getSelectableResidentsForRT({
-      wargaList,
-      targetRT: effectiveTargetRT,
-      activeRole,
-      defaultRW: pengaturanKas?.profilRT?.namaRW || '05',
-    });
-  }, [wargaList, effectiveTargetRT, activeRole, pengaturanKas?.profilRT?.namaRW]);
 
   const filteredOptions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -206,6 +295,72 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       return;
     }
 
+    if (isEditing && editingTransaction && onUpdate) {
+      if (numPrimary < 100) {
+        setFormError('Masukkan nominal transaksi yang valid (minimal Rp 100).');
+        return;
+      }
+
+      setFormError(null);
+      setIsSubmitting(true);
+      try {
+        const isLegacySynthetic = selectedOption?.optionKey.startsWith('legacy::');
+        const resolvedKategori =
+          tipe === 'kematian'
+            ? kematianFlow === 'setoran'
+              ? editingTransaction.isSaldoAwal
+                ? editingTransaction.kategori || 'Kas Kematian'
+                : 'Iuran Kas Kematian'
+              : 'Santunan Kematian'
+            : kategori || (tipe === 'masuk' ? 'Iuran Warga' : 'Kegiatan RT');
+
+        const periodLabel = buildPeriodSuffix(kematianPeriod);
+        const resolvedKeterangan =
+          keterangan.trim() ||
+          (tipe === 'masuk'
+            ? 'Setoran Iuran Kas Warga'
+            : tipe === 'keluar'
+            ? 'Pengeluaran Kegiatan RT'
+            : kematianFlow === 'setoran'
+            ? `Setoran Iuran Kas Kematian (${periodLabel})`
+            : 'Pengeluaran / Santunan Kas Kematian');
+
+        const updatedTx: Transaction = {
+          ...editingTransaction,
+          tanggal,
+          kategori: resolvedKategori,
+          keterangan: resolvedKeterangan,
+          nominal: numPrimary,
+          tipe,
+          residentId: isLegacySynthetic
+            ? editingTransaction.residentId
+            : selectedOption.residentId || editingTransaction.residentId,
+          namaWarga: isLegacySynthetic
+            ? editingTransaction.namaWarga
+            : selectedOption.nama,
+          nomorRumah: isLegacySynthetic
+            ? editingTransaction.nomorRumah
+            : selectedOption.noRumah !== '-'
+            ? selectedOption.noRumah
+            : undefined,
+          noKK: isLegacySynthetic
+            ? editingTransaction.noKK
+            : selectedOption.noKK || undefined,
+          rtScope: isLegacySynthetic
+            ? editingTransaction.rtScope || selectedOption.rtScope
+            : selectedOption.rtScope || editingTransaction.rtScope,
+        };
+
+        await onUpdate(updatedTx);
+        onClose();
+      } catch (err: any) {
+        setFormError(err?.message || 'Gagal memperbarui transaksi ke database.');
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
     if (tipe === 'masuk') {
       if (numPrimary <= 0 && numPairedKematian <= 0) {
         setFormError('Masukkan nominal Kas Warga atau Kas Kematian yang valid (minimal Rp 100).');
@@ -229,7 +384,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     try {
       const baseResidentFields = {
         tanggal,
-        residentId: selectedOption.residentId,
+        residentId: selectedOption.residentId || undefined,
         namaWarga: selectedOption.nama,
         nomorRumah: selectedOption.noRumah !== '-' ? selectedOption.noRumah : undefined,
         noKK: selectedOption.noKK || undefined,
@@ -298,7 +453,9 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       <div className="w-full max-w-md max-h-[92vh] overflow-y-auto rounded-3xl bg-white shadow-2xl border border-emerald-900/10 animate-in fade-in zoom-in-95 duration-150">
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-100 bg-[#E8F5EE] px-5 sm:px-6 py-4">
           <div>
-            <h3 className="text-base font-bold text-[#0B5D3F]">Catat Transaksi Kas</h3>
+            <h3 className="text-base font-bold text-[#0B5D3F]">
+              {isEditing ? 'Edit Transaksi Kas' : 'Catat Transaksi Kas'}
+            </h3>
             <p className="text-xs text-slate-600">
               {rtLabel} • {pengaturanKas?.profilRT?.desa || 'Desa Kotayasa'}
             </p>
@@ -544,8 +701,8 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
             </div>
           </div>
 
-          {/* Sekalian Setor Kas Kematian (Khusus Tab Kas Masuk) */}
-          {tipe === 'masuk' && (
+          {/* Sekalian Setor Kas Kematian (Khusus Tab Kas Masuk saat tambah baru) */}
+          {tipe === 'masuk' && !isEditing && (
             <div className="rounded-2xl border border-rose-200/80 bg-rose-50/50 p-3.5 space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
@@ -689,7 +846,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
               </span>
             </div>
 
-            {residentOptions.length === 0 ? (
+            {residentOptions.length === 0 && !selectedOption ? (
               <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 space-y-2">
                 <div className="flex items-start gap-2">
                   <Users size={15} className="shrink-0 mt-0.5 text-amber-700" />
@@ -882,7 +1039,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting || residentOptions.length === 0}
+              disabled={isSubmitting || (residentOptions.length === 0 && !selectedOption)}
               className="flex items-center gap-1.5 rounded-xl bg-[#0B5D3F] px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#084831] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSubmitting ? (
@@ -894,7 +1051,9 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                 <>
                   <Check size={14} strokeWidth={2.5} />
                   <span>
-                    {tipe === 'masuk' && includeKasKematian && numPrimary > 0 && numPairedKematian > 0
+                    {isEditing
+                      ? 'Simpan Perubahan'
+                      : tipe === 'masuk' && includeKasKematian && numPrimary > 0 && numPairedKematian > 0
                       ? 'Simpan Kas & Kematian'
                       : 'Simpan Transaksi'}
                   </span>

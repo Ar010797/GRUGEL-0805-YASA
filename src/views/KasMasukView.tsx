@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { ArrowLeft, ArrowUp, Calendar, Plus, Search, Receipt } from 'lucide-react';
+import { ArrowLeft, ArrowUp, Calendar, Plus, Search, Receipt, Pencil, Trash2 } from 'lucide-react';
+import { ConfirmationModal } from '../components/ConfirmationModal';
 import { Transaction, PengaturanKas, Warga } from '../types';
 import { resolveTransactionWargaName } from '../utils/rtFilter';
 
@@ -8,6 +9,8 @@ interface KasMasukViewProps {
   wargaList?: Warga[];
   pengaturanKas?: PengaturanKas;
   onOpenTxModal: () => void;
+  onEditTransaction?: (tx: Transaction) => void;
+  onDeleteTransaction?: (id: string) => void;
   onBack: () => void;
 }
 
@@ -16,11 +19,15 @@ export const KasMasukView: React.FC<KasMasukViewProps> = ({
   wargaList = [],
   pengaturanKas,
   onOpenTxModal,
+  onEditTransaction,
+  onDeleteTransaction,
   onBack,
 }) => {
   const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
   const [search, setSearch] = useState('');
   const [selectedMonth, setSelectedMonth] = useState('Oktober 2026');
+  const [deleteTarget, setDeleteTarget] = useState<Transaction | null>(null);
+  const showActions = Boolean(onEditTransaction || onDeleteTransaction);
 
   const masukList = transactions.filter((t) => t.tipe === 'masuk');
   const totalMasuk = masukList.reduce((acc, t) => acc + t.nominal, 0);
@@ -138,7 +145,7 @@ export const KasMasukView: React.FC<KasMasukViewProps> = ({
             </div>
 
             <div className="overflow-x-auto touch-pan-x scrollbar-thin">
-              <table className="w-full text-left text-xs min-w-[620px]">
+              <table className="w-full text-left text-xs min-w-[680px]">
                 <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200/80">
                   <tr>
                     <th className="py-3.5 px-4 sm:px-6">Tanggal</th>
@@ -146,6 +153,7 @@ export const KasMasukView: React.FC<KasMasukViewProps> = ({
                     <th className="py-3.5 px-4 sm:px-6">Kategori</th>
                     <th className="py-3.5 px-4 sm:px-6">Keterangan</th>
                     <th className="py-3.5 px-4 sm:px-6 text-right">Nominal</th>
+                    {showActions && <th className="py-3.5 px-4 sm:px-6 text-right">Aksi</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -162,6 +170,32 @@ export const KasMasukView: React.FC<KasMasukViewProps> = ({
                       <td className="py-3.5 px-4 sm:px-6 text-right font-extrabold text-emerald-700 whitespace-nowrap">
                         +{formatRupiah(t.nominal)}
                       </td>
+                      {showActions && (
+                        <td className="py-3.5 px-4 sm:px-6 text-right whitespace-nowrap">
+                          <div className="inline-flex items-center justify-end gap-1">
+                            {onEditTransaction && (
+                              <button
+                                type="button"
+                                onClick={() => onEditTransaction(t)}
+                                className="rounded-lg p-1.5 text-slate-400 hover:bg-emerald-50 hover:text-[#0B5D3F] transition-colors cursor-pointer"
+                                title="Edit transaksi pemasukan"
+                              >
+                                <Pencil size={15} />
+                              </button>
+                            )}
+                            {onDeleteTransaction && (
+                              <button
+                                type="button"
+                                onClick={() => setDeleteTarget(t)}
+                                className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600 transition-colors cursor-pointer"
+                                title="Hapus transaksi pemasukan"
+                              >
+                                <Trash2 size={15} />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -170,6 +204,34 @@ export const KasMasukView: React.FC<KasMasukViewProps> = ({
           </div>
         )}
       </div>
+
+      <ConfirmationModal
+        isOpen={Boolean(deleteTarget)}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget && onDeleteTransaction) {
+            onDeleteTransaction(deleteTarget.id);
+          }
+          setDeleteTarget(null);
+        }}
+        title="Hapus Transaksi Kas Masuk"
+        targetName={
+          deleteTarget
+            ? `${deleteTarget.keterangan} (+${formatRupiah(deleteTarget.nominal)})`
+            : undefined
+        }
+        message={
+          deleteTarget
+            ? `Apakah Anda yakin ingin menghapus pemasukan${
+                resolveTransactionWargaName(deleteTarget, wargaList)
+                  ? ` dari ${resolveTransactionWargaName(deleteTarget, wargaList)}`
+                  : ''
+              } pada tanggal ${deleteTarget.tanggal}? Saldo kas akan disesuaikan otomatis.`
+            : ''
+        }
+        confirmText="Ya, Hapus Pemasukan"
+        variant="danger"
+      />
     </div>
   );
 };

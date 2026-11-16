@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   HandHeart,
   Plus,
@@ -15,18 +15,30 @@ import {
   ShieldCheck,
   Eye,
   Trash2,
+  ChevronDown,
+  Check,
+  Users,
 } from 'lucide-react';
 import { BantuanPemerintah, Warga, PengaturanKas } from '../types';
 import { downloadTemplateExcelWargaBansos } from '../utils/excelWargaImport';
+import { ConfirmationModal } from '../components/ConfirmationModal';
+import {
+  getSelectableResidentsForRT,
+  normalizeRTCode,
+  type ResidentOption,
+} from '../utils/rtFilter';
 
 interface BantuanPemerintahViewProps {
   bantuanList: BantuanPemerintah[];
   wargaList: Warga[];
   pengaturanKas?: PengaturanKas;
+  activeRole?: 'server' | 'admin' | 'warga';
+  targetRT?: string;
   onAddBantuan: (data: Omit<BantuanPemerintah, 'id'>) => void;
   onUpdateStatus: (id: string, newStatus: BantuanPemerintah['status']) => void;
   onDeleteBantuan: (id: string) => void;
   onOpenImportExcel?: () => void;
+  onGoToDataWarga?: () => void;
   onBack: () => void;
 }
 
@@ -34,10 +46,13 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
   bantuanList,
   wargaList,
   pengaturanKas,
+  activeRole = 'admin',
+  targetRT,
   onAddBantuan,
   onUpdateStatus,
   onDeleteBantuan,
   onOpenImportExcel,
+  onGoToDataWarga,
   onBack,
 }) => {
   const rtStr = pengaturanKas?.profilRT?.namaRT || '08';
@@ -47,11 +62,16 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
   const [filterJenis, setFilterJenis] = useState<string>('semua');
   const [filterStatus, setFilterStatus] = useState<string>('semua');
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<BantuanPemerintah | null>(null);
 
   // Form State
   const [jenisBantuan, setJenisBantuan] = useState<string>('BPNT (Bantuan Pangan Non Tunai)');
   const [isCustomJenis, setIsCustomJenis] = useState(false);
   const [customJenisText, setCustomJenisText] = useState('');
+  const [selectedResident, setSelectedResident] = useState<ResidentOption | null>(null);
+  const [residentSearch, setResidentSearch] = useState('');
+  const [isResidentDropdownOpen, setIsResidentDropdownOpen] = useState(false);
+  const [bantuanFormError, setBantuanFormError] = useState<string | null>(null);
   const [namaPenerima, setNamaPenerima] = useState('');
   const [noKK, setNoKK] = useState('');
   const [nik, setNik] = useState('');
@@ -61,47 +81,127 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
   const [sumberDana, setSumberDana] = useState('Kemensos RI & Pemerintah Desa');
   const [keterangan, setKeterangan] = useState('Penyaluran resmi melalui Kantor Pos / Balai Desa Kotayasa');
 
-  // When resident name is chosen from registered list
-  const handleSelectWarga = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const val = e.target.value;
-    setNamaPenerima(val);
-    const found = wargaList.find((w) => w.nama === val);
-    if (found) {
-      setNoKK(found.noKK || '');
-      if (found.anggotaKeluarga && found.anggotaKeluarga.length > 0) {
-        setNik(found.anggotaKeluarga[0].nik || '');
+  const dropdownRef = useRef<HTMLDivElement | null>(null);
+  const residentSearchInputRef = useRef<HTMLInputElement | null>(null);
+
+  const effectiveTargetRT = useMemo(() => {
+    const raw = targetRT || rtStr || '08';
+    return normalizeRTCode(raw) || '08';
+  }, [targetRT, rtStr]);
+
+  const isSemuaRT = effectiveTargetRT === 'SEMUA';
+  const rtLabel = isSemuaRT ? `Semua RT RW ${rwStr}` : `RT ${effectiveTargetRT} RW ${rwStr}`;
+
+  const residentOptions = useMemo(() => {
+    return getSelectableResidentsForRT({
+      wargaList,
+      targetRT: effectiveTargetRT,
+      activeRole,
+      defaultRW: rwStr,
+    });
+  }, [wargaList, effectiveTargetRT, activeRole, rwStr]);
+
+  const filteredResidentOptions = useMemo(() => {
+    const q = residentSearch.trim().toLowerCase();
+    if (!q) return residentOptions;
+    return residentOptions.filter(
+      (opt) =>
+        opt.nama.toLowerCase().includes(q) ||
+        opt.kkHeadName.toLowerCase().includes(q) ||
+        opt.noKK.toLowerCase().includes(q) ||
+        (opt.nik || '').toLowerCase().includes(q) ||
+        opt.noRumah.toLowerCase().includes(q) ||
+        opt.hubungan.toLowerCase().includes(q) ||
+        `rt ${opt.rt}`.includes(q)
+    );
+  }, [residentOptions, residentSearch]);
+
+  const resetModalForm = () => {
+    setSelectedResident(null);
+    setResidentSearch('');
+    setIsResidentDropdownOpen(false);
+    setBantuanFormError(null);
+    setNamaPenerima('');
+    setNoKK('');
+    setNik('');
+    setIsCustomJenis(false);
+    setCustomJenisText('');
+  };
+
+  useEffect(() => {
+    if (!isModalOpen) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsResidentDropdownOpen(false);
       }
-    }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (isResidentDropdownOpen) {
+          setIsResidentDropdownOpen(false);
+        } else {
+          setIsModalOpen(false);
+        }
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isModalOpen, isResidentDropdownOpen]);
+
+  const handleSelectResident = (opt: ResidentOption) => {
+    setSelectedResident(opt);
+    setNamaPenerima(opt.nama);
+    setNoKK(opt.noKK || '');
+    setNik(opt.nik || '');
+    setIsResidentDropdownOpen(false);
+    setBantuanFormError(null);
+  };
+
+  const handleOpenResidentDropdown = () => {
+    if (residentOptions.length === 0) return;
+    setIsResidentDropdownOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setTimeout(() => residentSearchInputRef.current?.focus(), 20);
+      }
+      return next;
+    });
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!namaPenerima) return;
+    if (!selectedResident || !namaPenerima.trim()) {
+      setBantuanFormError(
+        residentOptions.length === 0
+          ? `Belum ada data KK / warga terdaftar di ${rtLabel}. Tambahkan warga di Data Warga terlebih dahulu.`
+          : 'Pilih nama warga / anggota KK dari daftar warga terdaftar terlebih dahulu.'
+      );
+      return;
+    }
 
-    // Use custom manual name if selected or entered
     const finalJenis = (isCustomJenis && customJenisText.trim())
       ? customJenisText.trim()
       : jenisBantuan;
 
     onAddBantuan({
       jenisBantuan: finalJenis,
-      namaPenerima,
-      noKK: noKK || '3302140805120001',
-      nik,
+      namaPenerima: namaPenerima.trim(),
+      noKK: noKK.trim() || selectedResident.noKK,
+      nik: nik.trim(),
       nominalAtauBarang,
       tanggal,
       status,
       sumberDana,
       keterangan,
+      rtScope: selectedResident.rtScope,
     });
 
     setIsModalOpen(false);
-    // Reset form
-    setNamaPenerima('');
-    setNoKK('');
-    setNik('');
-    setIsCustomJenis(false);
-    setCustomJenisText('');
+    resetModalForm();
   };
 
   // Collect all unique bantuan types (presets + custom ones present in dataset)
@@ -184,7 +284,10 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
           )}
 
           <button
-            onClick={() => setIsModalOpen(true)}
+            onClick={() => {
+              resetModalForm();
+              setIsModalOpen(true);
+            }}
             className="flex items-center gap-2 rounded-2xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"
           >
             <Plus size={16} strokeWidth={2.5} />
@@ -352,7 +455,8 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
                     </td>
                     <td className="px-4 py-3.5 text-right">
                       <button
-                        onClick={() => onDeleteBantuan(item.id)}
+                        type="button"
+                        onClick={() => setDeleteTarget(item)}
                         className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600 transition-colors cursor-pointer"
                         title="Hapus data bantuan"
                       >
@@ -382,7 +486,11 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
                 </div>
               </div>
               <button
-                onClick={() => setIsModalOpen(false)}
+                type="button"
+                onClick={() => {
+                  setIsModalOpen(false);
+                  resetModalForm();
+                }}
                 className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-white text-slate-500 transition-colors cursor-pointer"
               >
                 <X size={18} />
@@ -390,42 +498,179 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
             </div>
 
             <form onSubmit={handleSubmit} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Pilih Nama Warga / Kepala Keluarga
-                </label>
-                <select
-                  value={namaPenerima}
-                  onChange={handleSelectWarga}
-                  required
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-800 focus:border-[#0B5D3F] outline-hidden cursor-pointer"
-                >
-                  <option value="">-- Pilih dari Daftar Warga RT {rtStr} --</option>
-                  {Array.from(new Map(wargaList.map((w) => [w.id, w])).values()).map((w) => (
-                    <option key={w.id} value={w.nama}>
-                      {w.nama} (No Rumah: {w.noRumah}, KK: {w.noKK})
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1 text-[11px] text-slate-400">
-                  Atau ketik langsung jika belum terdaftar di bawah.
-                </p>
-              </div>
-
-              {!namaPenerima && (
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Nama Penerima Manual
+              {/* Searchable Resident & KK Member Picker */}
+              <div ref={dropdownRef} className="relative">
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Pilih Nama Warga Terdaftar per KK ({isSemuaRT ? 'Semua RT' : `RT ${effectiveTargetRT}`})
                   </label>
-                  <input
-                    type="text"
-                    value={namaPenerima}
-                    onChange={(e) => setNamaPenerima(e.target.value)}
-                    placeholder="Nama lengkap warga penerima"
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-[#0B5D3F] outline-hidden"
-                  />
+                  <span className="text-[10px] font-semibold text-emerald-700">
+                    {residentOptions.length} Jiwa Terdaftar
+                  </span>
                 </div>
-              )}
+
+                {residentOptions.length === 0 ? (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <Users size={15} className="shrink-0 mt-0.5 text-amber-700" />
+                      <div>
+                        <p className="font-bold">
+                          Belum ada data KK / warga terdaftar di {isSemuaRT ? 'RW ini' : `RT ${effectiveTargetRT}`}
+                        </p>
+                        <p className="text-[11px] text-amber-800/90 mt-0.5 leading-relaxed">
+                          Daftarkan warga beserta anggota KK di menu Data Warga terlebih dahulu agar penerima bantuan otomatis terhubung dengan No. KK dan NIK.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {onGoToDataWarga && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsModalOpen(false);
+                            onGoToDataWarga();
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B5D3F] px-3 py-1.5 text-[11px] font-bold text-white hover:bg-[#084831] transition-colors cursor-pointer"
+                        >
+                          <Users size={12} />
+                          <span>Buka Data Warga</span>
+                        </button>
+                      )}
+                      {onOpenImportExcel && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsModalOpen(false);
+                            onOpenImportExcel();
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-[11px] font-bold text-amber-900 hover:bg-amber-100/60 transition-colors cursor-pointer"
+                        >
+                          <FileSpreadsheet size={12} />
+                          <span>Import Excel</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleOpenResidentDropdown}
+                      aria-expanded={isResidentDropdownOpen}
+                      className={`w-full flex items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-xs transition-all cursor-pointer ${
+                        isResidentDropdownOpen
+                          ? 'border-[#0B5D3F] ring-1 ring-[#0B5D3F] bg-white'
+                          : selectedResident
+                          ? 'border-emerald-300 bg-emerald-50/40'
+                          : 'border-slate-200 bg-white hover:border-slate-300'
+                      }`}
+                    >
+                      {selectedResident ? (
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <p className="font-bold text-slate-900 truncate">{selectedResident.nama}</p>
+                            <span
+                              className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-bold ${
+                                selectedResident.isKepalaKeluarga
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-slate-100 text-slate-600'
+                              }`}
+                            >
+                              {selectedResident.hubungan}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-500 truncate mt-0.5">
+                            KK: {selectedResident.noKK || '-'}
+                            {!selectedResident.isKepalaKeluarga ? ` (${selectedResident.kkHeadName})` : ''}
+                            {selectedResident.noRumah && selectedResident.noRumah !== '-'
+                              ? ` • Rumah No. ${selectedResident.noRumah}`
+                              : ''}
+                            {` • RT ${selectedResident.rt}`}
+                          </p>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400">
+                          Cari &amp; pilih warga / anggota KK {isSemuaRT ? '' : `RT ${effectiveTargetRT}`}...
+                        </span>
+                      )}
+                      <ChevronDown
+                        size={16}
+                        className={`shrink-0 text-slate-400 transition-transform ${
+                          isResidentDropdownOpen ? 'rotate-180 text-[#0B5D3F]' : ''
+                        }`}
+                      />
+                    </button>
+
+                    {isResidentDropdownOpen && (
+                      <div className="mt-1.5 rounded-2xl border border-slate-200 bg-white shadow-xl overflow-hidden z-20">
+                        <div className="p-2 border-b border-slate-100 bg-slate-50/80">
+                          <div className="relative">
+                            <Search
+                              size={14}
+                              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+                            />
+                            <input
+                              ref={residentSearchInputRef}
+                              type="text"
+                              value={residentSearch}
+                              onChange={(e) => setResidentSearch(e.target.value)}
+                              placeholder="Cari nama warga, Kepala Keluarga, No. KK, NIK, atau No. Rumah..."
+                              className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-3 text-xs text-slate-800 focus:border-[#0B5D3F] focus:outline-hidden"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="max-h-56 overflow-y-auto divide-y divide-slate-100">
+                          {filteredResidentOptions.length === 0 ? (
+                            <div className="px-4 py-5 text-center text-xs text-slate-500">
+                              Warga &ldquo;{residentSearch}&rdquo; tidak ditemukan di daftar KK {rtLabel}.
+                            </div>
+                          ) : (
+                            filteredResidentOptions.map((opt) => {
+                              const isSelected = selectedResident?.optionKey === opt.optionKey;
+                              return (
+                                <button
+                                  key={opt.optionKey}
+                                  type="button"
+                                  onClick={() => handleSelectResident(opt)}
+                                  className={`w-full flex items-center justify-between gap-2 px-3.5 py-2.5 text-left text-xs transition-colors cursor-pointer ${
+                                    isSelected
+                                      ? 'bg-[#E8F5EE] text-[#0B5D3F]'
+                                      : 'hover:bg-slate-50 text-slate-800'
+                                  }`}
+                                >
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="font-bold truncate">{opt.nama}</span>
+                                      <span
+                                        className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-bold ${
+                                          opt.isKepalaKeluarga
+                                            ? 'bg-emerald-100 text-emerald-800'
+                                            : 'bg-slate-100 text-slate-600'
+                                        }`}
+                                      >
+                                        {opt.hubungan}
+                                      </span>
+                                    </div>
+                                    <p className="text-[10px] text-slate-500 truncate mt-0.5">
+                                      KK: {opt.noKK || '-'}
+                                      {!opt.isKepalaKeluarga ? ` (${opt.kkHeadName})` : ''}
+                                      {opt.nik ? ` • NIK: ${opt.nik}` : ''}
+                                      {opt.noRumah && opt.noRumah !== '-' ? ` • No. ${opt.noRumah}` : ''}
+                                      {` • RT ${opt.rt}`}
+                                    </p>
+                                  </div>
+                                  {isSelected && <Check size={15} className="shrink-0 text-[#0B5D3F]" />}
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -590,17 +835,28 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
                 />
               </div>
 
+              {bantuanFormError && (
+                <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] font-semibold text-rose-700">
+                  <AlertCircle size={14} className="shrink-0 mt-0.5" />
+                  <span>{bantuanFormError}</span>
+                </div>
+              )}
+
               <div className="pt-2 flex items-center justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={() => {
+                    setIsModalOpen(false);
+                    resetModalForm();
+                  }}
                   className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
-                  className="rounded-xl bg-[#0B5D3F] px-5 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#084831] cursor-pointer"
+                  disabled={residentOptions.length === 0}
+                  className="rounded-xl bg-[#0B5D3F] px-5 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#084831] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Simpan Bantuan
                 </button>
@@ -609,6 +865,30 @@ export const BantuanPemerintahView: React.FC<BantuanPemerintahViewProps> = ({
           </div>
         </div>
       )}
+
+      <ConfirmationModal
+        isOpen={Boolean(deleteTarget)}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) {
+            onDeleteBantuan(deleteTarget.id);
+          }
+          setDeleteTarget(null);
+        }}
+        title="Hapus Data Bantuan Pemerintah"
+        targetName={
+          deleteTarget
+            ? `${deleteTarget.namaPenerima} — ${deleteTarget.jenisBantuan}`
+            : undefined
+        }
+        message={
+          deleteTarget
+            ? `Apakah Anda yakin ingin menghapus data bantuan ${deleteTarget.jenisBantuan} untuk ${deleteTarget.namaPenerima} (No. KK: ${deleteTarget.noKK || '-'})? Data akan dihapus dari Cloud Firestore.`
+            : ''
+        }
+        confirmText="Ya, Hapus Data"
+        variant="danger"
+      />
     </div>
   );
 };

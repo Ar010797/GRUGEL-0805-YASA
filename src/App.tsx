@@ -216,6 +216,7 @@ export default function App() {
   // Modals
   const [isTxModalOpen, setIsTxModalOpen] = useState<boolean>(false);
   const [txModalType, setTxModalType] = useState<'masuk' | 'keluar' | 'kematian'>('masuk');
+  const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [isWargaModalOpen, setIsWargaModalOpen] = useState<boolean>(false);
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState<boolean>(false);
   const [upgradeTargetWarga, setUpgradeTargetWarga] = useState<Warga | null>(null);
@@ -1696,6 +1697,75 @@ export default function App() {
     }
   };
 
+  const handleOpenNewTransaction = (type: 'masuk' | 'keluar' | 'kematian' = 'masuk') => {
+    setEditingTransaction(null);
+    setTxModalType(type);
+    setIsTxModalOpen(true);
+  };
+
+  const handleOpenEditTransaction = (tx: Transaction) => {
+    setEditingTransaction(tx);
+    setTxModalType(tx.tipe);
+    setIsTxModalOpen(true);
+  };
+
+  const handleUpdateTransaction = async (updatedTx: Transaction) => {
+    if (txSubmitLockRef.current) return;
+    txSubmitLockRef.current = true;
+    try {
+      const nowIso = new Date().toISOString();
+      const resolvedRtScope =
+        updatedTx.rtScope ||
+        (currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
+          ? `RT ${selectedServerRT}`
+          : currentUser?.rtScope ||
+            `RT ${pengaturanKas.profilRT?.namaRT || '08'} RW ${pengaturanKas.profilRT?.namaRW || '05'}`);
+
+      const stampedTx: Transaction = {
+        ...updatedTx,
+        tahun: updatedTx.tahun ?? tahunAktif,
+        rtScope: resolvedRtScope,
+        updatedAt: nowIso,
+      };
+
+      const nextTransactions = latestStateRef.current.transactions.map((t) =>
+        t.id === stampedTx.id ? stampedTx : t
+      );
+      setTransactions(nextTransactions);
+      setSyncStatus('connecting');
+
+      const res = await saveTransactionDoc(stampedTx);
+      if (!res.ok) {
+        setSyncStatus('error');
+        setCloudError(res.message || 'Gagal memperbarui transaksi di Cloud Firestore.');
+      } else {
+        applyWriteSuccessStatus(res.pending);
+        if (!res.pending) {
+          await triggerPublicSummarySync({ transactions: nextTransactions });
+        }
+      }
+    } finally {
+      txSubmitLockRef.current = false;
+    }
+  };
+
+  const handleDeleteTransaction = async (id: string) => {
+    const nextTransactions = latestStateRef.current.transactions.filter((t) => t.id !== id);
+    setTransactions(nextTransactions);
+    setSyncStatus('connecting');
+
+    const res = await deleteTransactionDoc(id);
+    if (!res.ok) {
+      setSyncStatus('error');
+      setCloudError(res.message || 'Gagal menghapus transaksi dari Cloud Firestore.');
+    } else {
+      applyWriteSuccessStatus(res.pending);
+      if (!res.pending) {
+        await triggerPublicSummarySync({ transactions: nextTransactions });
+      }
+    }
+  };
+
   // Add Resident
   const handleSaveWarga = async (w: Omit<Warga, 'id' | 'no'>) => {
     const nowIso = new Date().toISOString();
@@ -3125,10 +3195,13 @@ export default function App() {
                   bantuanList={serverViewData.bantuanList}
                   wargaList={serverViewData.wargaList}
                   pengaturanKas={serverViewData.pengaturanKas}
+                  activeRole={currentUser?.role}
+                  targetRT={selectedServerRT}
                   onAddBantuan={handleAddBantuan}
                   onUpdateStatus={handleUpdateStatusBantuan}
                   onDeleteBantuan={handleDeleteBantuan}
                   onOpenImportExcel={() => setIsWargaModalOpen(true)}
+                  onGoToDataWarga={() => setCurrentView('data-warga')}
                   onBack={() => setCurrentView('server-kontrol')}
                 />
               ) : currentView === 'beranda' ? (
@@ -3137,10 +3210,7 @@ export default function App() {
                   wargaList={serverViewData.wargaList}
                   pengaturanKas={serverViewData.pengaturanKas}
                   onNavigate={(view) => setCurrentView(view)}
-                  onOpenTxModal={(type) => {
-                    setTxModalType(type || 'masuk');
-                    setIsTxModalOpen(true);
-                  }}
+                  onOpenTxModal={(type) => handleOpenNewTransaction(type || 'masuk')}
                   onOpenWargaModal={() => setIsWargaModalOpen(true)}
                   onOpenPengumumanModal={() => setIsPengumumanModalOpen(true)}
                   onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
@@ -3150,10 +3220,9 @@ export default function App() {
                   transactions={serverViewData.transactions}
                   wargaList={serverViewData.wargaList}
                   pengaturanKas={serverViewData.pengaturanKas}
-                  onOpenTxModal={(type) => {
-                    setTxModalType(type || 'masuk');
-                    setIsTxModalOpen(true);
-                  }}
+                  onOpenTxModal={(type) => handleOpenNewTransaction(type || 'masuk')}
+                  onEditTransaction={handleOpenEditTransaction}
+                  onDeleteTransaction={handleDeleteTransaction}
                   onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
                   onBack={() => setCurrentView('beranda')}
                 />
@@ -3162,10 +3231,9 @@ export default function App() {
                   transactions={serverViewData.transactions}
                   wargaList={serverViewData.wargaList}
                   pengaturanKas={serverViewData.pengaturanKas}
-                  onOpenTxModal={() => {
-                    setTxModalType('masuk');
-                    setIsTxModalOpen(true);
-                  }}
+                  onOpenTxModal={() => handleOpenNewTransaction('masuk')}
+                  onEditTransaction={handleOpenEditTransaction}
+                  onDeleteTransaction={handleDeleteTransaction}
                   onBack={() => setCurrentView('beranda')}
                 />
               ) : currentView === 'kas-keluar' ? (
@@ -3173,10 +3241,9 @@ export default function App() {
                   transactions={serverViewData.transactions}
                   wargaList={serverViewData.wargaList}
                   pengaturanKas={serverViewData.pengaturanKas}
-                  onOpenTxModal={() => {
-                    setTxModalType('keluar');
-                    setIsTxModalOpen(true);
-                  }}
+                  onOpenTxModal={() => handleOpenNewTransaction('keluar')}
+                  onEditTransaction={handleOpenEditTransaction}
+                  onDeleteTransaction={handleDeleteTransaction}
                   onBack={() => setCurrentView('beranda')}
                 />
               ) : currentView === 'kas-kematian' ? (
@@ -3184,10 +3251,9 @@ export default function App() {
                   transactions={serverViewData.transactions}
                   wargaList={serverViewData.wargaList}
                   pengaturanKas={serverViewData.pengaturanKas}
-                  onOpenTxModal={() => {
-                    setTxModalType('kematian');
-                    setIsTxModalOpen(true);
-                  }}
+                  onOpenTxModal={() => handleOpenNewTransaction('kematian')}
+                  onEditTransaction={handleOpenEditTransaction}
+                  onDeleteTransaction={handleDeleteTransaction}
                   onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
                   onBack={() => setCurrentView('beranda')}
                 />
@@ -3297,10 +3363,7 @@ export default function App() {
                     wargaList={wargaList}
                     pengaturanKas={pengaturanKas}
                     onNavigate={(view) => setCurrentView(view)}
-                    onOpenTxModal={(type) => {
-                      setTxModalType(type || 'masuk');
-                      setIsTxModalOpen(true);
-                    }}
+                    onOpenTxModal={(type) => handleOpenNewTransaction(type || 'masuk')}
                     onOpenWargaModal={() => setIsWargaModalOpen(true)}
                     onOpenPengumumanModal={() => setIsPengumumanModalOpen(true)}
                     onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
@@ -3312,10 +3375,9 @@ export default function App() {
                     transactions={transactions}
                     wargaList={wargaList}
                     pengaturanKas={pengaturanKas}
-                    onOpenTxModal={(type) => {
-                      setTxModalType(type || 'masuk');
-                      setIsTxModalOpen(true);
-                    }}
+                    onOpenTxModal={(type) => handleOpenNewTransaction(type || 'masuk')}
+                    onEditTransaction={handleOpenEditTransaction}
+                    onDeleteTransaction={handleDeleteTransaction}
                     onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
                     onBack={() => setCurrentView('beranda')}
                   />
@@ -3326,10 +3388,9 @@ export default function App() {
                     transactions={transactions}
                     wargaList={wargaList}
                     pengaturanKas={pengaturanKas}
-                    onOpenTxModal={() => {
-                      setTxModalType('masuk');
-                      setIsTxModalOpen(true);
-                    }}
+                    onOpenTxModal={() => handleOpenNewTransaction('masuk')}
+                    onEditTransaction={handleOpenEditTransaction}
+                    onDeleteTransaction={handleDeleteTransaction}
                     onBack={() => setCurrentView('beranda')}
                   />
                 )}
@@ -3339,10 +3400,9 @@ export default function App() {
                     transactions={transactions}
                     wargaList={wargaList}
                     pengaturanKas={pengaturanKas}
-                    onOpenTxModal={() => {
-                      setTxModalType('keluar');
-                      setIsTxModalOpen(true);
-                    }}
+                    onOpenTxModal={() => handleOpenNewTransaction('keluar')}
+                    onEditTransaction={handleOpenEditTransaction}
+                    onDeleteTransaction={handleDeleteTransaction}
                     onBack={() => setCurrentView('beranda')}
                   />
                 )}
@@ -3352,10 +3412,9 @@ export default function App() {
                     transactions={transactions}
                     wargaList={wargaList}
                     pengaturanKas={pengaturanKas}
-                    onOpenTxModal={() => {
-                      setTxModalType('kematian');
-                      setIsTxModalOpen(true);
-                    }}
+                    onOpenTxModal={() => handleOpenNewTransaction('kematian')}
+                    onEditTransaction={handleOpenEditTransaction}
+                    onDeleteTransaction={handleDeleteTransaction}
                     onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
                     onBack={() => setCurrentView('beranda')}
                   />
@@ -3393,10 +3452,17 @@ export default function App() {
                     bantuanList={bantuanList}
                     wargaList={wargaList}
                     pengaturanKas={pengaturanKas}
+                    activeRole={currentUser?.role}
+                    targetRT={
+                      normalizeRTCode(currentUser?.rtScope) ||
+                      normalizeRTCode(pengaturanKas.profilRT?.namaRT) ||
+                      '08'
+                    }
                     onAddBantuan={handleAddBantuan}
                     onUpdateStatus={handleUpdateStatusBantuan}
                     onDeleteBantuan={handleDeleteBantuan}
                     onOpenImportExcel={() => setIsWargaModalOpen(true)}
+                    onGoToDataWarga={() => setCurrentView('data-warga')}
                     onBack={() => setCurrentView('beranda')}
                   />
                 )}
@@ -3493,8 +3559,13 @@ export default function App() {
       {(isAdminRT || isServer) && (
         <TransactionModal
           isOpen={isTxModalOpen}
-          onClose={() => setIsTxModalOpen(false)}
+          onClose={() => {
+            setIsTxModalOpen(false);
+            setEditingTransaction(null);
+          }}
           onSave={handleSaveTransaction}
+          onUpdate={handleUpdateTransaction}
+          editingTransaction={editingTransaction}
           defaultType={txModalType}
           pengaturanKas={isServer && selectedServerRT !== 'SEMUA' ? serverViewData.pengaturanKas : pengaturanKas}
           wargaList={isServer ? serverViewData.wargaList : wargaList}
@@ -3506,6 +3577,7 @@ export default function App() {
           }
           onGoToDataWarga={() => {
             setIsTxModalOpen(false);
+            setEditingTransaction(null);
             setCurrentView('data-warga');
           }}
         />
