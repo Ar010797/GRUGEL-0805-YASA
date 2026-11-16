@@ -122,6 +122,11 @@ import {
   buildServerFilteredViewData,
   getKasKematianBalanceSummary,
   normalizeRTCode,
+  doesTransactionBelongToWarga,
+  getTransactionRTCode,
+  hasWargaCashDiff,
+  reconcileWargaCashFromTransactions,
+  resolveTransactionResidentId,
 } from './utils/rtFilter';
 
 // Eager primary dashboard views for instant first paint; lazy-load secondary views
@@ -465,6 +470,10 @@ export default function App() {
       effectiveWarga.forEach((w) => {
         const c = normalizeRTCode(w.rt);
         if (c) rtSet.add(c);
+      });
+      effectiveTxs.forEach((t) => {
+        const c = normalizeRTCode(getTransactionRTCode(t, effectiveWarga, ''));
+        if (c && c !== 'SEMUA') rtSet.add(c);
       });
       for (const rtCode of rtSet) {
         await syncRtPublicSummary({
@@ -853,6 +862,56 @@ export default function App() {
 
     return () => clearTimeout(timer);
   }, [dataLoadedReady, currentUser?.role, wargaList]);
+
+  // 4. Safe one-time reconciliation for pre-existing transactions -> Warga accounts (non-destructive)
+  const lastTxWargaBackfillSigRef = useRef<string>('');
+  useEffect(() => {
+    if (!dataLoadedReady || !currentUser || !auth.currentUser) return;
+    if (currentUser.role !== 'admin' && currentUser.role !== 'server') return;
+    if (wargaList.length === 0 || transactions.length === 0) return;
+
+    const sig = `${tahunAktif}:${wargaList.length}:${transactions.length}:${transactions[0]?.id || ''}`;
+    if (lastTxWargaBackfillSigRef.current === sig) return;
+    lastTxWargaBackfillSigRef.current = sig;
+
+    const nowIso = new Date().toISOString();
+    const changedWarga: Warga[] = [];
+    const nextWargaList = wargaList.map((w) => {
+      const reconciled = reconcileWargaCashFromTransactions({
+        warga: w,
+        transactions,
+        tahunAktif,
+        pengaturanKas,
+        allWarga: wargaList,
+        nowIso,
+        forceClearIfZero: false,
+      });
+      const hasAnyTxPayment =
+        (reconciled.iuranUmumTerbayar || 0) > 0 || (reconciled.iuranKematianTerbayar || 0) > 0;
+      if (hasAnyTxPayment && hasWargaCashDiff(w, reconciled, tahunAktif)) {
+        changedWarga.push(reconciled);
+        return reconciled;
+      }
+      return w;
+    });
+
+    if (changedWarga.length === 0) return;
+
+    setWargaList(nextWargaList);
+    latestStateRef.current = { ...latestStateRef.current, wargaList: nextWargaList };
+
+    const timer = setTimeout(() => {
+      void bulkSaveWargaAndBantuanDocs(changedWarga, [])
+        .then(async (res) => {
+          if (res.ok && !res.pending) {
+            await triggerPublicSummarySync({ wargaList: nextWargaList });
+          }
+        })
+        .catch(() => {});
+    }, 350);
+
+    return () => clearTimeout(timer);
+  }, [dataLoadedReady, currentUser?.role, tahunAktif, wargaList.length, transactions.length]);
 
   const handleForceSyncNow = async () => {
     setCloudSyncBusy(true);
@@ -1645,6 +1704,77 @@ export default function App() {
     }
   };
 
+  // Helper: Reconcile affected Warga cash/dues totals & monthly maps from current transactions
+  const syncAffectedWargaAfterTxMutation = async (
+    nextTransactions: Transaction[],
+    affectedTxs: Transaction[],
+    forceClearIfZero: boolean
+  ): Promise<{ wargaList: Warga[]; pending: boolean; errorMessage?: string }> => {
+    const currentWarga = latestStateRef.current.wargaList || [];
+    if (currentWarga.length === 0 || affectedTxs.length === 0) {
+      return { wargaList: currentWarga, pending: false };
+    }
+
+    const nowIso = new Date().toISOString();
+    const matchedIds = new Set<string>();
+    for (const tx of affectedTxs) {
+      if (!tx || tx.isSaldoAwal) continue;
+      if (tx.residentId) matchedIds.add(tx.residentId);
+      for (const w of currentWarga) {
+        if (doesTransactionBelongToWarga(tx, w, currentWarga)) {
+          matchedIds.add(w.id);
+        }
+      }
+    }
+
+    if (matchedIds.size === 0) {
+      return { wargaList: currentWarga, pending: false };
+    }
+
+    const changedWarga: Warga[] = [];
+    const nextWargaList = currentWarga.map((w) => {
+      if (!matchedIds.has(w.id)) return w;
+      const reconciled = reconcileWargaCashFromTransactions({
+        warga: w,
+        transactions: nextTransactions,
+        tahunAktif,
+        pengaturanKas,
+        allWarga: currentWarga,
+        nowIso,
+        forceClearIfZero,
+      });
+      if (hasWargaCashDiff(w, reconciled, tahunAktif)) {
+        changedWarga.push(reconciled);
+        return reconciled;
+      }
+      return w;
+    });
+
+    if (changedWarga.length === 0) {
+      return { wargaList: currentWarga, pending: false };
+    }
+
+    setWargaList(nextWargaList);
+    latestStateRef.current = { ...latestStateRef.current, wargaList: nextWargaList };
+
+    if (changedWarga.length <= 3) {
+      const wargaResults = await Promise.all(changedWarga.map((w) => saveWargaDoc(w)));
+      const wargaFailed = wargaResults.find((r) => !r.ok);
+      return {
+        wargaList: nextWargaList,
+        pending: wargaResults.some((r) => r.pending),
+        errorMessage: wargaFailed?.message,
+      };
+    }
+
+    const bulkRes = await bulkSaveWargaAndBantuanDocs(changedWarga, []);
+    return {
+      wargaList: nextWargaList,
+      pending: Boolean(bulkRes.pending),
+      errorMessage: bulkRes.ok ? undefined : bulkRes.message,
+    };
+  };
+
   // Add Transaction or Paired Kas Warga + Kas Kematian Batch (with double-submit guard)
   const handleSaveTransaction = async (
     txInput: Omit<Transaction, 'id'> | Omit<Transaction, 'id'>[]
@@ -1657,6 +1787,7 @@ export default function App() {
 
       const nowIso = new Date().toISOString();
       const baseTime = Date.now();
+      const currentWarga = latestStateRef.current.wargaList || [];
       const newTxs: Transaction[] = inputs.map((tx, idx) => {
         const resolvedRtScope =
           tx.rtScope ||
@@ -1664,7 +1795,7 @@ export default function App() {
             ? `RT ${selectedServerRT}`
             : currentUser?.rtScope ||
               `RT ${pengaturanKas.profilRT?.namaRT || '08'} RW ${pengaturanKas.profilRT?.namaRW || '05'}`);
-        return {
+        const tempTx: Transaction = {
           ...tx,
           id: toValidDocId(
             `tx_${baseTime + idx}_${Math.random().toString(36).slice(2, 6)}`,
@@ -1674,10 +1805,14 @@ export default function App() {
           rtScope: resolvedRtScope,
           updatedAt: nowIso,
         };
+        const resolvedResidentId =
+          tempTx.residentId || resolveTransactionResidentId(tempTx, currentWarga, resolvedRtScope);
+        return resolvedResidentId ? { ...tempTx, residentId: resolvedResidentId } : tempTx;
       });
 
       const nextTransactions = [...newTxs, ...latestStateRef.current.transactions];
       setTransactions(nextTransactions);
+      latestStateRef.current = { ...latestStateRef.current, transactions: nextTransactions };
       setSyncStatus('connecting');
 
       const results = await Promise.all(newTxs.map((item) => saveTransactionDoc(item)));
@@ -1686,10 +1821,19 @@ export default function App() {
         setSyncStatus('error');
         setCloudError(failed.message || 'Gagal menyinkronkan transaksi ke Cloud Firestore.');
       } else {
-        const anyPending = results.some((r) => r.pending);
-        applyWriteSuccessStatus(anyPending);
-        if (!anyPending) {
-          await triggerPublicSummarySync({ transactions: nextTransactions });
+        const wargaSync = await syncAffectedWargaAfterTxMutation(nextTransactions, newTxs, false);
+        if (wargaSync.errorMessage) {
+          setSyncStatus('error');
+          setCloudError(wargaSync.errorMessage);
+        } else {
+          const anyPending = results.some((r) => r.pending) || wargaSync.pending;
+          applyWriteSuccessStatus(anyPending);
+          if (!anyPending) {
+            await triggerPublicSummarySync({
+              transactions: nextTransactions,
+              wargaList: wargaSync.wargaList,
+            });
+          }
         }
       }
     } finally {
@@ -1714,6 +1858,8 @@ export default function App() {
     txSubmitLockRef.current = true;
     try {
       const nowIso = new Date().toISOString();
+      const currentWarga = latestStateRef.current.wargaList || [];
+      const oldTx = latestStateRef.current.transactions.find((t) => t.id === updatedTx.id);
       const resolvedRtScope =
         updatedTx.rtScope ||
         (currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
@@ -1721,17 +1867,23 @@ export default function App() {
           : currentUser?.rtScope ||
             `RT ${pengaturanKas.profilRT?.namaRT || '08'} RW ${pengaturanKas.profilRT?.namaRW || '05'}`);
 
-      const stampedTx: Transaction = {
+      const preStamped: Transaction = {
         ...updatedTx,
         tahun: updatedTx.tahun ?? tahunAktif,
         rtScope: resolvedRtScope,
         updatedAt: nowIso,
       };
+      const resolvedResidentId =
+        preStamped.residentId || resolveTransactionResidentId(preStamped, currentWarga, resolvedRtScope);
+      const stampedTx: Transaction = resolvedResidentId
+        ? { ...preStamped, residentId: resolvedResidentId }
+        : preStamped;
 
       const nextTransactions = latestStateRef.current.transactions.map((t) =>
         t.id === stampedTx.id ? stampedTx : t
       );
       setTransactions(nextTransactions);
+      latestStateRef.current = { ...latestStateRef.current, transactions: nextTransactions };
       setSyncStatus('connecting');
 
       const res = await saveTransactionDoc(stampedTx);
@@ -1739,9 +1891,20 @@ export default function App() {
         setSyncStatus('error');
         setCloudError(res.message || 'Gagal memperbarui transaksi di Cloud Firestore.');
       } else {
-        applyWriteSuccessStatus(res.pending);
-        if (!res.pending) {
-          await triggerPublicSummarySync({ transactions: nextTransactions });
+        const affected = oldTx ? [oldTx, stampedTx] : [stampedTx];
+        const wargaSync = await syncAffectedWargaAfterTxMutation(nextTransactions, affected, true);
+        if (wargaSync.errorMessage) {
+          setSyncStatus('error');
+          setCloudError(wargaSync.errorMessage);
+        } else {
+          const anyPending = Boolean(res.pending || wargaSync.pending);
+          applyWriteSuccessStatus(anyPending);
+          if (!anyPending) {
+            await triggerPublicSummarySync({
+              transactions: nextTransactions,
+              wargaList: wargaSync.wargaList,
+            });
+          }
         }
       }
     } finally {
@@ -1750,8 +1913,10 @@ export default function App() {
   };
 
   const handleDeleteTransaction = async (id: string) => {
+    const deletedTx = latestStateRef.current.transactions.find((t) => t.id === id);
     const nextTransactions = latestStateRef.current.transactions.filter((t) => t.id !== id);
     setTransactions(nextTransactions);
+    latestStateRef.current = { ...latestStateRef.current, transactions: nextTransactions };
     setSyncStatus('connecting');
 
     const res = await deleteTransactionDoc(id);
@@ -1759,9 +1924,23 @@ export default function App() {
       setSyncStatus('error');
       setCloudError(res.message || 'Gagal menghapus transaksi dari Cloud Firestore.');
     } else {
-      applyWriteSuccessStatus(res.pending);
-      if (!res.pending) {
-        await triggerPublicSummarySync({ transactions: nextTransactions });
+      const wargaSync = await syncAffectedWargaAfterTxMutation(
+        nextTransactions,
+        deletedTx ? [deletedTx] : [],
+        true
+      );
+      if (wargaSync.errorMessage) {
+        setSyncStatus('error');
+        setCloudError(wargaSync.errorMessage);
+      } else {
+        const anyPending = Boolean(res.pending || wargaSync.pending);
+        applyWriteSuccessStatus(anyPending);
+        if (!anyPending) {
+          await triggerPublicSummarySync({
+            transactions: nextTransactions,
+            wargaList: wargaSync.wargaList,
+          });
+        }
       }
     }
   };

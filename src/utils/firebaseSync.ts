@@ -52,8 +52,10 @@ import type {
 import {
   normalizeRTCode,
   normalizeRWCode,
+  normalizePersonName,
   getWargaRTCode,
   getTransactionRTCode,
+  resolveTransactionResidentId,
 } from './rtFilter';
 import {
   dedupeEntityList,
@@ -1711,9 +1713,19 @@ export async function loginWithFirebase(params: {
     }
 
     const matchedDoc = wargaSnap.docs[0].data() as Warga & { rt: string; rw: string };
-    const enteredName = u.toLowerCase();
-    const storedName = String(matchedDoc.nama || '').trim().toLowerCase();
-    if (enteredName && storedName && enteredName !== storedName) {
+    const enteredName = normalizePersonName(u);
+    const storedHeadName = normalizePersonName(matchedDoc.nama);
+    const headMemberName = Array.isArray(matchedDoc.anggotaKeluarga)
+      ? normalizePersonName(
+          matchedDoc.anggotaKeluarga.find((m) => m?.hubungan === 'Kepala Keluarga')?.nama
+        )
+      : '';
+    if (
+      enteredName &&
+      storedHeadName &&
+      enteredName !== storedHeadName &&
+      (!headMemberName || enteredName !== headMemberName)
+    ) {
       await signOut(auth);
       return {
         ok: false,
@@ -2085,6 +2097,7 @@ export async function provisionAdminAuthAccount(
 }
 
 let wargaProvisioningActive = false;
+const failedProvisionAttemptIds = new Set<string>();
 
 export async function provisionWargaAuthAccounts(
   wargaList: Array<Warga & { linkedUid?: string }>
@@ -2094,7 +2107,8 @@ export async function provisionWargaAuthAccounts(
 
   const candidates = wargaList.filter((w) => {
     const digits = String(w.noKK || '').replace(/\D/g, '');
-    return digits.length >= 6 && !w.linkedUid;
+    const wId = toValidDocId(w.id, 'w');
+    return digits.length >= 6 && !w.linkedUid && !failedProvisionAttemptIds.has(wId);
   });
 
   if (candidates.length === 0) return 0;
@@ -2103,20 +2117,11 @@ export async function provisionWargaAuthAccounts(
 
   try {
     const secAuth = await getSecondaryAuth();
-    let batch = writeBatch(db);
-    let ops = 0;
-
-    const flush = async () => {
-      if (ops > 0) {
-        await batch.commit();
-        batch = writeBatch(db);
-        ops = 0;
-      }
-    };
 
     for (const w of candidates) {
       const noKKDigits = String(w.noKK || '').replace(/\D/g, '');
       const email = toWargaEmail(noKKDigits);
+      const wargaId = toValidDocId(w.id, 'w');
       let wargaUid = '';
 
       try {
@@ -2134,41 +2139,80 @@ export async function provisionWargaAuthAccounts(
         }
       }
 
-      if (!wargaUid) continue;
+      if (!wargaUid) {
+        failedProvisionAttemptIds.add(wargaId);
+        continue;
+      }
 
       const rt = normalizeRTCode(w.rt) || DEFAULT_RT;
       const rw = normalizeRWCode(w.rw, ctx.rw || DEFAULT_RW);
       const { rwId, rtId } = buildScopeIds(rt, rw);
-      const wargaId = toValidDocId(w.id, 'w');
 
-      batch.set(doc(db, 'wargaProfiles', wargaUid), {
-        uid: wargaUid,
-        wargaId,
-        noKK: w.noKK,
-        nama: w.nama,
-        rt,
-        rw,
-        rtId,
-        rwId,
-        ownerUid: ctx.uid,
-        ...(ctx.serverUid ? { serverUid: ctx.serverUid } : {}),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      batch.update(doc(db, 'warga', wargaId), {
-        linkedUid: wargaUid,
-        updatedAt: serverTimestamp(),
-      });
-      ops += 2;
-      provisionedCount++;
+      try {
+        const profileRef = doc(db, 'wargaProfiles', wargaUid);
+        const existingProfile = await getDoc(profileRef).catch(() => null);
+        if (existingProfile && existingProfile.exists()) {
+          const pData = existingProfile.data();
+          const needsProfileUpdate =
+            pData.wargaId !== wargaId ||
+            pData.noKK !== w.noKK ||
+            pData.nama !== w.nama ||
+            pData.rt !== rt ||
+            pData.rw !== rw ||
+            pData.rtId !== rtId ||
+            pData.rwId !== rwId ||
+            (ctx.serverUid && pData.serverUid !== ctx.serverUid);
+          if (needsProfileUpdate && pData.rw === rw) {
+            await updateDoc(
+              profileRef,
+              stripUndefinedDeep({
+                wargaId,
+                noKK: w.noKK,
+                nama: w.nama,
+                rt,
+                rw,
+                rtId,
+                rwId,
+                ...(ctx.serverUid ? { serverUid: ctx.serverUid } : {}),
+                updatedAt: serverTimestamp(),
+              })
+            );
+          }
+        } else {
+          await setDoc(
+            profileRef,
+            stripUndefinedDeep({
+              uid: wargaUid,
+              wargaId,
+              noKK: w.noKK,
+              nama: w.nama,
+              rt,
+              rw,
+              rtId,
+              rwId,
+              ownerUid: ctx.uid,
+              ...(ctx.serverUid ? { serverUid: ctx.serverUid } : {}),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
 
-      if (ops >= 40) {
-        await flush();
+        const wargaRef = doc(db, 'warga', wargaId);
+        await updateDoc(wargaRef, {
+          linkedUid: wargaUid,
+          updatedAt: serverTimestamp(),
+        });
+        recordMeta(`warga/${wargaId}`, { linkedUid: wargaUid, rt, rw, rwId, rtId });
+        provisionedCount++;
+      } catch (linkErr) {
+        failedProvisionAttemptIds.add(wargaId);
+        console.warn(`provisionWargaAuthAccounts skipped (${wargaId}):`, linkErr);
       }
-      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      await new Promise((resolve) => setTimeout(resolve, 40));
     }
 
-    await flush();
     await signOut(secAuth).catch(() => {});
   } catch (err) {
     console.warn('provisionWargaAuthAccounts warning:', err);
@@ -3015,8 +3059,12 @@ export async function syncRtPublicSummary(params: {
     .filter((t) => getTransactionRTCode(t, params.wargaList, rt) === rt)
     .slice(0, 2000)
     .map((t) => {
+      const resolvedResidentId = resolveTransactionResidentId(t, params.wargaList, rt);
       const { noKK: _stripNoKK, ...publicTx } = t;
-      return stripUndefinedDeep(publicTx);
+      return stripUndefinedDeep({
+        ...publicTx,
+        ...(resolvedResidentId ? { residentId: resolvedResidentId } : {}),
+      });
     });
 
   const rtPengumuman = params.pengumumanList

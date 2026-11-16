@@ -7,14 +7,18 @@ import {
 import {
   buildServerFilteredViewData,
   collectRegisteredRTs,
+  doesTransactionBelongToWarga,
   getKasKematianBalanceSummary,
   getSelectableResidentsForRT,
   getTransactionRTCode,
   getWargaRTCode,
+  hasWargaCashDiff,
   isKasKematianOutflow,
   isTransactionInflow,
   normalizeRTCode,
   normalizeRWCode,
+  reconcileWargaCashFromTransactions,
+  resolveTransactionResidentId,
   resolveTransactionWargaName,
 } from './src/utils/rtFilter';
 import { dedupeEntityList } from './src/utils/cloudSync';
@@ -578,6 +582,192 @@ const unitLogicChecks: { name: string; assertFn: () => void }[] = [
 
       // Verify firestore.rules permits update & delete for transactions by assigned admin
       assert.match(rules, /match \/transactions\/\{txId\}[\s\S]*allow update:[\s\S]*allow delete:/);
+    },
+  },
+  {
+    name: '25. reconcileWargaCashFromTransactions updates & reverts Warga cash/dues on Add/Edit/Delete',
+    assertFn: () => {
+      const targetWarga: Warga = {
+        id: 'w_ali',
+        no: 1,
+        nama: 'Ali Mustofa',
+        noKK: '3302140101010001',
+        noRumah: '01',
+        rt: '08',
+        rw: '05',
+        jenisKelamin: 'Laki-laki',
+        jumlahJiwa: 3,
+        statusIuran: 'Belum',
+        anggotaKeluarga: [
+          {
+            nik: '3302140101010001',
+            nama: 'Ali Mustofa',
+            hubungan: 'Kepala Keluarga',
+            jenisKelamin: 'Laki-laki',
+          },
+          {
+            nik: '3302140202020002',
+            nama: 'Siti Aminah',
+            hubungan: 'Istri',
+            jenisKelamin: 'Perempuan',
+          },
+        ],
+      };
+
+      const settings: PengaturanKas = {
+        nominalJimpitanTahunan: 360000,
+        nominalJimpitanBulanan: 30000,
+        nominalKematianTahunan: 36000,
+        nominalKematianBulanan: 3000,
+        saldoAwalKasUmum: 0,
+        saldoAwalKasKematian: 0,
+        keteranganSaldoAwal: '',
+        tanggalSaldoAwal: '2026-01-01',
+        kontakKetuaRT: { nama: 'Ketua', telp: '0812' },
+        kontakBendahara: { nama: 'Bendahara', telp: '0813' },
+        tahunAktif: 2026,
+      };
+
+      // Add Kas Masuk (Rp 30.000) + Kas Kematian (Rp 3.000) paid by family member Siti Aminah
+      const txsAdded: Transaction[] = [
+        {
+          id: 'tx_1',
+          tanggal: '2026-10-15',
+          kategori: 'Iuran Warga',
+          keterangan: 'Setoran Iuran Kas Warga',
+          nominal: 30000,
+          tipe: 'masuk',
+          residentId: 'w_ali',
+          namaWarga: 'Siti Aminah',
+          noKK: '3302140101010001',
+          tahun: 2026,
+          rtScope: 'RT 08 RW 05',
+        },
+        {
+          id: 'tx_2',
+          tanggal: '2026-10-15',
+          kategori: 'Iuran Kas Kematian',
+          keterangan: 'Setoran Iuran Kas Kematian (Bulanan)',
+          nominal: 3000,
+          tipe: 'kematian',
+          residentId: 'w_ali',
+          namaWarga: 'Siti Aminah',
+          noKK: '3302140101010001',
+          tahun: 2026,
+          rtScope: 'RT 08 RW 05',
+        },
+      ];
+
+      const afterAdd = reconcileWargaCashFromTransactions({
+        warga: targetWarga,
+        transactions: txsAdded,
+        tahunAktif: 2026,
+        pengaturanKas: settings,
+        allWarga: [targetWarga],
+      });
+
+      assert.equal(afterAdd.statusIuran, 'Sudah');
+      assert.equal(afterAdd.iuranUmumTerbayar, 30000);
+      assert.equal(afterAdd.iuranKematianTerbayar, 3000);
+      assert.equal(afterAdd.riwayatIuran?.[10], true);
+      assert.equal(afterAdd.riwayatKematian?.[10], true);
+      assert.equal(hasWargaCashDiff(targetWarga, afterAdd, 2026), true);
+
+      // Edit Kas Masuk to annual lump-sum & change month to 11
+      const txsEdited: Transaction[] = [
+        { ...txsAdded[0], nominal: 360000, tanggal: '2026-11-05' },
+        txsAdded[1],
+      ];
+      const afterEdit = reconcileWargaCashFromTransactions({
+        warga: afterAdd,
+        transactions: txsEdited,
+        tahunAktif: 2026,
+        pengaturanKas: settings,
+        allWarga: [targetWarga],
+        forceClearIfZero: true,
+      });
+      assert.equal(afterEdit.iuranUmumTerbayar, 360000);
+      assert.equal(afterEdit.riwayatIuran?.[1], true);
+      assert.equal(afterEdit.riwayatIuran?.[12], true);
+
+      // Delete all transactions -> reverts cleanly to Belum & 0
+      const afterDelete = reconcileWargaCashFromTransactions({
+        warga: afterEdit,
+        transactions: [],
+        tahunAktif: 2026,
+        pengaturanKas: settings,
+        allWarga: [targetWarga],
+        forceClearIfZero: true,
+      });
+      assert.equal(afterDelete.statusIuran, 'Belum');
+      assert.equal(afterDelete.iuranUmumTerbayar, 0);
+      assert.equal(afterDelete.iuranKematianTerbayar, 0);
+      assert.deepEqual(afterDelete.riwayatIuran, {});
+      assert.deepEqual(afterDelete.riwayatKematian, {});
+    },
+  },
+  {
+    name: '26. doesTransactionBelongToWarga & resolveTransactionResidentId avoid substring false matches',
+    assertFn: () => {
+      const wargaAli: Warga = {
+        id: 'w_ali',
+        no: 1,
+        nama: 'Ali',
+        noKK: '3302140101010001',
+        noRumah: '01',
+        rt: '08',
+        rw: '05',
+        jenisKelamin: 'Laki-laki',
+        jumlahJiwa: 1,
+        statusIuran: 'Belum',
+      };
+      const wargaKhalid: Warga = {
+        id: 'w_khalid',
+        no: 2,
+        nama: 'Khalid Saputra',
+        noKK: '3302140101010002',
+        noRumah: '02',
+        rt: '08',
+        rw: '05',
+        jenisKelamin: 'Laki-laki',
+        jumlahJiwa: 2,
+        statusIuran: 'Belum',
+        anggotaKeluarga: [
+          {
+            nik: '3302140303030003',
+            nama: 'Dewi Sartika',
+            hubungan: 'Istri',
+            jenisKelamin: 'Perempuan',
+          },
+        ],
+      };
+
+      const txKhalid: Transaction = {
+        id: 'tx_khalid',
+        tanggal: '2026-10-15',
+        kategori: 'Iuran Warga',
+        keterangan: 'Setoran Khalid',
+        nominal: 30000,
+        tipe: 'masuk',
+        namaWarga: 'Khalid Saputra',
+        rtScope: 'RT 08 RW 05',
+      };
+      const txDewiLegacy: Transaction = {
+        id: 'tx_dewi',
+        tanggal: '2026-10-16',
+        kategori: 'Iuran Kas Kematian',
+        keterangan: 'Setoran Dewi',
+        nominal: 3000,
+        tipe: 'kematian',
+        namaWarga: 'Dewi Sartika',
+        rtScope: 'RT 08 RW 05',
+      };
+
+      // Must NOT match 'Ali' as substring of 'Khalid Saputra'
+      assert.equal(doesTransactionBelongToWarga(txKhalid, wargaAli, [wargaAli, wargaKhalid]), false);
+      assert.equal(doesTransactionBelongToWarga(txKhalid, wargaKhalid, [wargaAli, wargaKhalid]), true);
+      assert.equal(doesTransactionBelongToWarga(txDewiLegacy, wargaKhalid, [wargaAli, wargaKhalid]), true);
+      assert.equal(resolveTransactionResidentId(txDewiLegacy, [wargaAli, wargaKhalid], '08'), 'w_khalid');
     },
   },
 ];

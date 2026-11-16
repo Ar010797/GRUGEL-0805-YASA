@@ -30,7 +30,13 @@ import { exportRekapTahunanPDF, exportPengeluaranPDF, exportSuratPengumumanPDF, 
 import { kirimWhatsAppPengumuman } from '../utils/whatsappShare';
 import { maskNIK, maskNoKK } from '../utils/security';
 import { ConfirmationModal } from '../components/ConfirmationModal';
-import { resolveTransactionWargaName } from '../utils/rtFilter';
+import {
+  doesTransactionBelongToWarga,
+  getTransactionMonth,
+  getTransactionYear,
+  isKasKematianOutflow,
+  resolveTransactionWargaName,
+} from '../utils/rtFilter';
 
 interface DasborWargaViewProps {
   currentUser: AuthUser;
@@ -118,33 +124,94 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
   const targetTotalTahunan = jimpitanTahunan + kematianTahunan;
   const targetTotalBulanan = jimpitanBulanan + kematianBulanan;
 
-  // Monthly status
-  const isLunasBulanIni = wargaData ? wargaData.statusIuran === 'Sudah' : false;
-
-  // Real paid calculation based on 12-month payment record or status
-  const riwayat = wargaData.riwayatIuran || {};
-  const bulanLunasCount = Object.values(riwayat).filter(Boolean).length || (isLunasBulanIni ? 10 : 0);
-  const sudahBayarTahunIni = bulanLunasCount * targetTotalBulanan;
-  const sisaKekuranganSetahun = Math.max(0, targetTotalTahunan - sudahBayarTahunIni);
-  const kekuranganBulanIni = isLunasBulanIni ? 0 : targetTotalBulanan;
-
-  const persenTercapaiTahun = targetTotalTahunan > 0
-    ? Math.round((sudahBayarTahunIni / targetTotalTahunan) * 100)
-    : 0;
-
   // Month names for 12-month record
   const namaBulan = [
     'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
     'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
   ];
 
-  // Personal transactions history
-  const personalTx = transactions.filter((t) => {
-    if (t.residentId && t.residentId === wargaData.id) return true;
-    if (t.noKK && t.noKK === wargaData.noKK) return true;
-    const resolvedName = resolveTransactionWargaName(t, wargaList).toLowerCase();
-    return Boolean(resolvedName && resolvedName.includes(wargaData.nama.toLowerCase()));
-  });
+  // Personal transactions history strictly matched to this family (head or members)
+  const personalTx = transactions
+    .filter((t) => doesTransactionBelongToWarga(t, wargaData, wargaList))
+    .sort((a, b) => String(b.tanggal || '').localeCompare(String(a.tanggal || '')));
+
+  const personalTxTahunAktif = personalTx.filter(
+    (t) => getTransactionYear(t, tahunAktif) === tahunAktif
+  );
+
+  const txUmumPaid = personalTxTahunAktif
+    .filter((t) => t.tipe === 'masuk')
+    .reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
+
+  const txKematianPaid = personalTxTahunAktif
+    .filter((t) => t.tipe === 'kematian' && !isKasKematianOutflow(t))
+    .reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
+
+  // Use live transaction totals when present, otherwise fall back to reconciled Warga fields
+  const sudahBayarUmum =
+    txUmumPaid > 0 ? txUmumPaid : Number(wargaData.iuranUmumTerbayar) || 0;
+  const sudahBayarKematian =
+    txKematianPaid > 0 ? txKematianPaid : Number(wargaData.iuranKematianTerbayar) || 0;
+  const sudahBayarTahunIni = sudahBayarUmum + sudahBayarKematian;
+
+  // Build effective monthly maps combining persisted Warga history + live transactions
+  const storedUmumMap: Record<number, boolean> =
+    (wargaData.riwayatIuranPerTahun && wargaData.riwayatIuranPerTahun[tahunAktif]) ||
+    wargaData.riwayatIuran ||
+    {};
+  const storedKematianMap: Record<number, boolean> =
+    (wargaData.riwayatKematianPerTahun && wargaData.riwayatKematianPerTahun[tahunAktif]) ||
+    wargaData.riwayatKematian ||
+    {};
+
+  const effectiveUmumMap: Record<number, boolean> = { ...storedUmumMap };
+  const effectiveKematianMap: Record<number, boolean> = { ...storedKematianMap };
+  for (const t of personalTxTahunAktif) {
+    const m = getTransactionMonth(t);
+    if (m === null) continue;
+    if (t.tipe === 'masuk') effectiveUmumMap[m] = true;
+    else if (t.tipe === 'kematian' && !isKasKematianOutflow(t)) effectiveKematianMap[m] = true;
+  }
+  if (jimpitanTahunan > 0 && sudahBayarUmum >= jimpitanTahunan) {
+    for (let m = 1; m <= 12; m++) effectiveUmumMap[m] = true;
+  }
+  if (kematianTahunan > 0 && sudahBayarKematian >= kematianTahunan) {
+    for (let m = 1; m <= 12; m++) effectiveKematianMap[m] = true;
+  }
+
+  const bulanLunasCount = Array.from({ length: 12 }, (_, idx) => idx + 1).filter(
+    (m) => Boolean(effectiveUmumMap[m] || effectiveKematianMap[m])
+  ).length;
+
+  const currentMonth = new Date().getMonth() + 1;
+  const isLunasBulanIni =
+    Boolean(effectiveUmumMap[currentMonth] || effectiveKematianMap[currentMonth]) ||
+    wargaData.statusIuran === 'Sudah';
+
+  const currentMonthPaidNominal = personalTxTahunAktif
+    .filter(
+      (t) =>
+        getTransactionMonth(t) === currentMonth &&
+        (t.tipe === 'masuk' || (t.tipe === 'kematian' && !isKasKematianOutflow(t)))
+    )
+    .reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
+
+  const sudahBayarBulanIni =
+    currentMonthPaidNominal > 0
+      ? currentMonthPaidNominal
+      : isLunasBulanIni
+      ? targetTotalBulanan
+      : 0;
+
+  const sisaKekuranganSetahun = Math.max(0, targetTotalTahunan - sudahBayarTahunIni);
+  const kekuranganBulanIni = isLunasBulanIni
+    ? 0
+    : Math.max(0, targetTotalBulanan - sudahBayarBulanIni);
+
+  const persenTercapaiTahun =
+    targetTotalTahunan > 0
+      ? Math.min(100, Math.round((sudahBayarTahunIni / targetTotalTahunan) * 100))
+      : 0;
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
@@ -396,16 +463,30 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
             <p className="mt-3 text-2xl font-extrabold text-[#0B5D3F]">
               {viewMode === 'tahunan'
                 ? formatRp(sudahBayarTahunIni)
-                : isLunasBulanIni
-                ? formatRp(targetTotalBulanan)
-                : 'Rp 0'}
+                : formatRp(sudahBayarBulanIni)}
             </p>
-            <div className="mt-2 text-[11px] text-emerald-700 font-semibold border-t border-slate-100 pt-2">
-              {viewMode === 'tahunan'
-                ? `${bulanLunasCount} dari 12 bulan lunas (${persenTercapaiTahun}%)`
-                : isLunasBulanIni
-                ? 'Lunas untuk periode bulan ini'
-                : 'Belum melakukan pembayaran'}
+            <div className="mt-2 space-y-1 text-[11px] border-t border-slate-100 pt-2">
+              {viewMode === 'tahunan' ? (
+                <>
+                  <div className="flex justify-between text-slate-500">
+                    <span>&bull; Kas Warga:</span>
+                    <span className="font-bold text-emerald-700">{formatRp(sudahBayarUmum)}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-500">
+                    <span>&bull; Kas Kematian:</span>
+                    <span className="font-bold text-rose-700">{formatRp(sudahBayarKematian)}</span>
+                  </div>
+                  <div className="text-emerald-700 font-semibold pt-0.5">
+                    {bulanLunasCount} dari 12 bulan tercatat ({persenTercapaiTahun}%)
+                  </div>
+                </>
+              ) : (
+                <div className="text-emerald-700 font-semibold">
+                  {isLunasBulanIni
+                    ? 'Tercatat / lunas untuk periode bulan ini'
+                    : 'Belum melakukan pembayaran bulan ini'}
+                </div>
+              )}
             </div>
           </div>
 
@@ -442,7 +523,9 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
           <div className="grid grid-cols-3 sm:grid-cols-6 lg:grid-cols-12 gap-2 pt-1">
             {namaBulan.map((bln, idx) => {
               const bulanNum = idx + 1;
-              const isPaid = riwayat[bulanNum] ?? (isLunasBulanIni && bulanNum <= 10);
+              const isUmum = Boolean(effectiveUmumMap[bulanNum]);
+              const isKematian = Boolean(effectiveKematianMap[bulanNum]);
+              const isPaid = isUmum || isKematian;
               return (
                 <div
                   key={idx}
@@ -463,10 +546,99 @@ export const DasborWargaView: React.FC<DasborWargaViewProps> = ({
                   <span className="mt-1 block text-[9px] font-bold">
                     {isPaid ? 'LUNAS' : 'BELUM'}
                   </span>
+                  {isPaid && (
+                    <span className="mt-0.5 block text-[8px] font-semibold text-emerald-700">
+                      {isUmum && isKematian ? 'Kas + Kmt' : isKematian ? 'Kas Kmt' : 'Kas Warga'}
+                    </span>
+                  )}
                 </div>
               );
             })}
           </div>
+        </div>
+
+        {/* Riwayat Setoran Kas Masuk & Kas Kematian Tercatat dari Admin RT */}
+        <div className="rounded-3xl bg-white p-6 border border-slate-200 shadow-xs space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[#E8F5EE] text-[#0B5D3F]">
+                <Wallet size={20} />
+              </div>
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-900">
+                  Riwayat Setoran Kas Keluarga Anda (Tahun {tahunAktif})
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Otomatis tersinkronisasi saat Admin RT mencatat pembayaran Kas Warga atau Kas Kematian
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-[11px] font-bold">
+              <span className="rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-1.5 text-emerald-800">
+                Kas Warga: +{formatRp(sudahBayarUmum)}
+              </span>
+              <span className="rounded-xl bg-rose-50 border border-rose-200 px-3 py-1.5 text-rose-800">
+                Kas Kematian: +{formatRp(sudahBayarKematian)}
+              </span>
+            </div>
+          </div>
+
+          {personalTx.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 py-8 px-4 text-center text-xs text-slate-500">
+              Belum ada setoran kas yang tercatat atas nama keluarga Anda di tahun {tahunAktif}.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 text-[10px] font-bold uppercase tracking-wider">
+                  <tr>
+                    <th className="px-4 py-2.5">Tanggal</th>
+                    <th className="px-4 py-2.5">Nama Pembayar</th>
+                    <th className="px-4 py-2.5">Jenis Kas</th>
+                    <th className="px-4 py-2.5">Keterangan</th>
+                    <th className="px-4 py-2.5 text-right">Nominal</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {personalTx.map((t) => {
+                    const isKematian = t.tipe === 'kematian';
+                    const isOutflow = t.tipe === 'keluar' || isKasKematianOutflow(t);
+                    const payerName =
+                      resolveTransactionWargaName(t, wargaList) || wargaData.nama;
+                    return (
+                      <tr key={t.id} className="hover:bg-slate-50/80 transition-colors">
+                        <td className="px-4 py-3 text-slate-500 whitespace-nowrap font-medium">
+                          {t.tanggal}
+                        </td>
+                        <td className="px-4 py-3 font-bold text-slate-800">{payerName}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[10px] font-bold ${
+                              isKematian
+                                ? 'bg-rose-100 text-rose-800'
+                                : isOutflow
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-emerald-100 text-[#0B5D3F]'
+                            }`}
+                          >
+                            {isKematian ? 'Kas Kematian' : t.kategori || 'Kas Warga'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-slate-600">{t.keterangan || '-'}</td>
+                        <td
+                          className={`px-4 py-3 text-right font-extrabold whitespace-nowrap ${
+                            isOutflow ? 'text-rose-600' : 'text-[#0B5D3F]'
+                          }`}
+                        >
+                          {isOutflow ? '-' : '+'} {formatRp(t.nominal)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         {/* Kas Kematian Warga Explanation Banner */}

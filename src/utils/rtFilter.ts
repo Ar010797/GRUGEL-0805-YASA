@@ -550,3 +550,297 @@ export function buildServerFilteredViewData(params: {
     scopeTitle: `RT ${targetRT} RW ${targetRW}${matchedAdmin ? ` • ${matchedAdmin.nama}` : ''}`,
   };
 }
+
+export function normalizePersonName(value?: string | null): string {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+export function getTransactionYear(tx: Transaction, fallbackYear = 2026): number {
+  if (typeof tx.tahun === 'number' && Number.isFinite(tx.tahun) && tx.tahun >= 2000 && tx.tahun <= 2100) {
+    return tx.tahun;
+  }
+  const raw = String(tx.tanggal || '').trim();
+  const isoMatch = raw.match(/^(\d{4})[-/]/);
+  if (isoMatch) {
+    const y = Number(isoMatch[1]);
+    if (y >= 2000 && y <= 2100) return y;
+  }
+  const dmyMatch = raw.match(/[-/](\d{4})$/);
+  if (dmyMatch) {
+    const y = Number(dmyMatch[1]);
+    if (y >= 2000 && y <= 2100) return y;
+  }
+  return fallbackYear;
+}
+
+export function getTransactionMonth(tx: Transaction): number | null {
+  const raw = String(tx.tanggal || '').trim();
+  const isoMatch = raw.match(/^(\d{4})[-/](\d{1,2})(?:[-/]\d{1,2})?/);
+  if (isoMatch) {
+    const m = Number(isoMatch[2]);
+    return m >= 1 && m <= 12 ? m : null;
+  }
+  const dmyMatch = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  if (dmyMatch) {
+    const m = Number(dmyMatch[2]);
+    return m >= 1 && m <= 12 ? m : null;
+  }
+  return null;
+}
+
+function getAllNormalizedNamesForWarga(warga: Warga): Set<string> {
+  const names = new Set<string>();
+  const head = normalizePersonName(warga.nama);
+  if (head) names.add(head);
+  if (Array.isArray(warga.anggotaKeluarga)) {
+    for (const member of warga.anggotaKeluarga) {
+      const mName = normalizePersonName(member?.nama);
+      if (mName) names.add(mName);
+    }
+  }
+  return names;
+}
+
+export function doesTransactionBelongToWarga(
+  tx: Transaction,
+  warga: Warga,
+  _allWarga: Warga[] = []
+): boolean {
+  if (!tx || !warga || tx.isSaldoAwal) return false;
+
+  if (tx.residentId) {
+    return tx.residentId === warga.id;
+  }
+
+  const txKK = String(tx.noKK || '').replace(/\s+/g, '');
+  const wargaKK = String(warga.noKK || '').replace(/\s+/g, '');
+  if (txKK && wargaKK) {
+    return txKK === wargaKK;
+  }
+
+  const txRt = normalizeRTCode(tx.rtScope);
+  const wargaRt = normalizeRTCode(warga.rt);
+  if (txRt && txRt !== 'SEMUA' && wargaRt && txRt !== wargaRt) {
+    return false;
+  }
+
+  const txName = normalizePersonName(tx.namaWarga);
+  if (!txName) return false;
+
+  const familyNames = getAllNormalizedNamesForWarga(warga);
+  return familyNames.has(txName);
+}
+
+export function resolveTransactionResidentId(
+  tx: Transaction,
+  wargaList: Warga[],
+  fallbackRT = '08'
+): string | undefined {
+  if (!tx || tx.isSaldoAwal || wargaList.length === 0) {
+    return tx?.residentId || undefined;
+  }
+
+  if (tx.residentId) {
+    const direct = wargaList.find((w) => w.id === tx.residentId);
+    if (direct) return direct.id;
+  }
+
+  const txKK = String(tx.noKK || '').replace(/\s+/g, '');
+  if (txKK) {
+    const matchedKK = wargaList.find((w) => String(w.noKK || '').replace(/\s+/g, '') === txKK);
+    if (matchedKK) return matchedKK.id;
+  }
+
+  const txName = normalizePersonName(tx.namaWarga);
+  if (txName) {
+    const txRt = normalizeRTCode(tx.rtScope) || normalizeRTCode(fallbackRT);
+    const sameRtCandidates = wargaList.filter(
+      (w) => !txRt || txRt === 'SEMUA' || getWargaRTCode(w, txRt) === txRt
+    );
+    const searchPool = sameRtCandidates.length > 0 ? sameRtCandidates : wargaList;
+
+    const matchedHead = searchPool.find((w) => normalizePersonName(w.nama) === txName);
+    if (matchedHead) return matchedHead.id;
+
+    const matchedMember = searchPool.find((w) =>
+      Array.isArray(w.anggotaKeluarga)
+        ? w.anggotaKeluarga.some((m) => normalizePersonName(m?.nama) === txName)
+        : false
+    );
+    if (matchedMember) return matchedMember.id;
+  }
+
+  return tx.residentId || undefined;
+}
+
+function buildMonthMapFromInflows(
+  inflows: Transaction[],
+  totalNominal: number,
+  annualTarget: number
+): Record<number, boolean> {
+  const map: Record<number, boolean> = {};
+  for (const tx of inflows) {
+    const month = getTransactionMonth(tx);
+    if (month !== null) {
+      map[month] = true;
+    }
+  }
+  if (annualTarget > 0 && totalNominal >= annualTarget) {
+    for (let m = 1; m <= 12; m++) {
+      map[m] = true;
+    }
+  }
+  return map;
+}
+
+function areBooleanMonthMapsEqual(
+  a?: Record<number, boolean>,
+  b?: Record<number, boolean>
+): boolean {
+  const keysA = Object.entries(a || {})
+    .filter(([, v]) => Boolean(v))
+    .map(([k]) => String(k))
+    .sort();
+  const keysB = Object.entries(b || {})
+    .filter(([, v]) => Boolean(v))
+    .map(([k]) => String(k))
+    .sort();
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every((k, idx) => k === keysB[idx]);
+}
+
+export function reconcileWargaCashFromTransactions(params: {
+  warga: Warga;
+  transactions: Transaction[];
+  tahunAktif: number;
+  pengaturanKas?: PengaturanKas;
+  allWarga?: Warga[];
+  nowIso?: string;
+  forceClearIfZero?: boolean;
+}): Warga {
+  const {
+    warga,
+    transactions,
+    tahunAktif,
+    pengaturanKas,
+    allWarga = [],
+    nowIso = new Date().toISOString(),
+    forceClearIfZero = false,
+  } = params;
+
+  const matchingYearTxs = transactions.filter(
+    (t) =>
+      !t.isSaldoAwal &&
+      getTransactionYear(t, tahunAktif) === tahunAktif &&
+      doesTransactionBelongToWarga(t, warga, allWarga)
+  );
+
+  const umumInflows = matchingYearTxs.filter((t) => t.tipe === 'masuk');
+  const kematianInflows = matchingYearTxs.filter(
+    (t) => t.tipe === 'kematian' && !isKasKematianOutflow(t)
+  );
+
+  const iuranUmumTerbayar = umumInflows.reduce(
+    (sum, t) => sum + (Number.isFinite(Number(t.nominal)) ? Number(t.nominal) : 0),
+    0
+  );
+  const iuranKematianTerbayar = kematianInflows.reduce(
+    (sum, t) => sum + (Number.isFinite(Number(t.nominal)) ? Number(t.nominal) : 0),
+    0
+  );
+
+  const annualUmumTarget = Number(pengaturanKas?.nominalJimpitanTahunan) || 0;
+  const annualKematianTarget = Number(pengaturanKas?.nominalKematianTahunan) || 0;
+
+  const hasAnyRecordedPayment = umumInflows.length > 0 || kematianInflows.length > 0;
+  const existingYearUmumMap =
+    (warga.riwayatIuranPerTahun && warga.riwayatIuranPerTahun[tahunAktif]) ||
+    warga.riwayatIuran ||
+    {};
+  const existingYearKematianMap =
+    (warga.riwayatKematianPerTahun && warga.riwayatKematianPerTahun[tahunAktif]) ||
+    warga.riwayatKematian ||
+    {};
+
+  const nextRiwayatIuran =
+    umumInflows.length > 0
+      ? buildMonthMapFromInflows(umumInflows, iuranUmumTerbayar, annualUmumTarget)
+      : forceClearIfZero
+      ? {}
+      : { ...existingYearUmumMap };
+
+  const nextRiwayatKematian =
+    kematianInflows.length > 0
+      ? buildMonthMapFromInflows(kematianInflows, iuranKematianTerbayar, annualKematianTarget)
+      : forceClearIfZero
+      ? {}
+      : { ...existingYearKematianMap };
+
+  const prevYearStatus =
+    (warga.statusIuranPerTahun && warga.statusIuranPerTahun[tahunAktif]) ||
+    warga.statusIuran ||
+    'Belum';
+
+  const nextStatusIuran: 'Sudah' | 'Belum' =
+    iuranUmumTerbayar > 0 || iuranKematianTerbayar > 0
+      ? 'Sudah'
+      : forceClearIfZero
+      ? 'Belum'
+      : prevYearStatus === 'Sudah' && !hasAnyRecordedPayment
+      ? 'Sudah'
+      : 'Belum';
+
+  return {
+    ...warga,
+    statusIuran: nextStatusIuran,
+    iuranUmumTerbayar,
+    iuranKematianTerbayar,
+    riwayatIuran: nextRiwayatIuran,
+    riwayatKematian: nextRiwayatKematian,
+    riwayatIuranPerTahun: {
+      ...(warga.riwayatIuranPerTahun || {}),
+      [tahunAktif]: nextRiwayatIuran,
+    },
+    riwayatKematianPerTahun: {
+      ...(warga.riwayatKematianPerTahun || {}),
+      [tahunAktif]: nextRiwayatKematian,
+    },
+    statusIuranPerTahun: {
+      ...(warga.statusIuranPerTahun || {}),
+      [tahunAktif]: nextStatusIuran,
+    },
+    updatedAt: nowIso,
+  };
+}
+
+export function hasWargaCashDiff(a: Warga, b: Warga, tahunAktif = 2026): boolean {
+  if (a.statusIuran !== b.statusIuran) return true;
+  if ((Number(a.iuranUmumTerbayar) || 0) !== (Number(b.iuranUmumTerbayar) || 0)) return true;
+  if ((Number(a.iuranKematianTerbayar) || 0) !== (Number(b.iuranKematianTerbayar) || 0)) return true;
+  if (!areBooleanMonthMapsEqual(a.riwayatIuran, b.riwayatIuran)) return true;
+  if (!areBooleanMonthMapsEqual(a.riwayatKematian, b.riwayatKematian)) return true;
+  const aStatusYr = a.statusIuranPerTahun?.[tahunAktif] || a.statusIuran;
+  const bStatusYr = b.statusIuranPerTahun?.[tahunAktif] || b.statusIuran;
+  if (aStatusYr !== bStatusYr) return true;
+  if (
+    !areBooleanMonthMapsEqual(
+      a.riwayatIuranPerTahun?.[tahunAktif],
+      b.riwayatIuranPerTahun?.[tahunAktif]
+    )
+  ) {
+    return true;
+  }
+  if (
+    !areBooleanMonthMapsEqual(
+      a.riwayatKematianPerTahun?.[tahunAktif],
+      b.riwayatKematianPerTahun?.[tahunAktif]
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
