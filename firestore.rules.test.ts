@@ -22,6 +22,16 @@ import {
   resolveTransactionWargaName,
 } from './src/utils/rtFilter';
 import { dedupeEntityList } from './src/utils/cloudSync';
+import {
+  computeBackoffDelayMs,
+  formatFriendlyFirestoreError,
+  isTerminalFirestoreError,
+  isTransientFirestoreError,
+  removePendingSyncOpsByKey,
+  SYNC_BACKOFF_STEPS_MS,
+  upsertPendingSyncOp,
+  type PendingSyncOp,
+} from './src/utils/syncQueue';
 import type { PengaturanKas, Transaction, Warga } from './src/types';
 
 /**
@@ -768,6 +778,73 @@ const unitLogicChecks: { name: string; assertFn: () => void }[] = [
       assert.equal(doesTransactionBelongToWarga(txKhalid, wargaKhalid, [wargaAli, wargaKhalid]), true);
       assert.equal(doesTransactionBelongToWarga(txDewiLegacy, wargaKhalid, [wargaAli, wargaKhalid]), true);
       assert.equal(resolveTransactionResidentId(txDewiLegacy, [wargaAli, wargaKhalid], '08'), 'w_khalid');
+    },
+  },
+  {
+    name: '27. Security rules tolerate unpadded legacy codes (sameCode), null-safe deletes, and admin self-linking unset authUid',
+    assertFn: () => {
+      assert.match(rules, /function sameCode\(a, b\)/);
+      assert.match(rules, /function isServerAnyRW\(\)/);
+      const nullSafeDeleteOrGet = (rules.match(/\(resource == null &&/g) || []).length;
+      assert.ok(
+        nullSafeDeleteOrGet >= 24,
+        `Expected >= 24 null-safe resource guards across get & delete rules, got ${nullSafeDeleteOrGet}`
+      );
+      assert.match(
+        rules,
+        /match \/adminAccounts\/\{accountId\}[\s\S]*existing\(\)\.authUid == null[\s\S]*incoming\(\)\.authUid == request\.auth\.uid/
+      );
+    },
+  },
+  {
+    name: '28. syncQueue deduplicates repeated edits/deletes, applies stepped backoff, and separates terminal vs transient errors',
+    assertFn: () => {
+      assert.deepEqual([...SYNC_BACKOFF_STEPS_MS], [2000, 4000, 8000, 16000, 30000]);
+      assert.equal(computeBackoffDelayMs(0), 2000);
+      assert.equal(computeBackoffDelayMs(1), 4000);
+      assert.equal(computeBackoffDelayMs(2), 8000);
+      assert.equal(computeBackoffDelayMs(3), 16000);
+      assert.equal(computeBackoffDelayMs(4), 30000);
+      assert.equal(computeBackoffDelayMs(9), 30000);
+
+      const tx1: Transaction = {
+        id: 'tx_100',
+        tanggal: '2026-10-10',
+        kategori: 'Iuran Warga',
+        keterangan: 'Versi 1',
+        nominal: 25000,
+        tipe: 'masuk',
+        rtScope: 'RT 08 RW 05',
+      };
+      const tx1Edited: Transaction = { ...tx1, keterangan: 'Versi 2', nominal: 30000 };
+
+      let queue: PendingSyncOp[] = [];
+      queue = upsertPendingSyncOp(queue, { opKey: 'tx:tx_100', kind: 'saveTx', payload: tx1 });
+      queue = upsertPendingSyncOp(queue, { opKey: 'tx:tx_100', kind: 'saveTx', payload: tx1Edited });
+      assert.equal(queue.length, 1);
+      assert.equal(queue[0].kind, 'saveTx');
+      if (queue[0].kind === 'saveTx') {
+        assert.equal(queue[0].payload.nominal, 30000);
+      }
+
+      // Delete supersedes queued save for the same entity
+      queue = upsertPendingSyncOp(queue, { opKey: 'tx:tx_100', kind: 'deleteTx', targetId: 'tx_100' });
+      assert.equal(queue.length, 1);
+      assert.equal(queue[0].kind, 'deleteTx');
+
+      queue = removePendingSyncOpsByKey(queue, ['tx:tx_100']);
+      assert.equal(queue.length, 0);
+
+      // Error classification & friendly message formatting
+      assert.equal(isTerminalFirestoreError({ code: 'permission-denied' }), true);
+      assert.equal(isTerminalFirestoreError('Missing or insufficient permissions.'), true);
+      assert.equal(isTransientFirestoreError({ code: 'permission-denied' }), false);
+      assert.equal(isTransientFirestoreError({ code: 'unavailable' }), true);
+      assert.equal(isTransientFirestoreError('Failed to get document because the client is offline.'), true);
+
+      const friendly = formatFriendlyFirestoreError('{"error":"Missing or insufficient permissions.","operationType":"write"}');
+      assert.match(friendly, /Akses ditolak Firestore/i);
+      assert.equal(friendly.includes('{'), false);
     },
   },
 ];

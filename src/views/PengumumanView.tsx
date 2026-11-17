@@ -20,6 +20,7 @@ import { exportSuratPengumumanPDF } from '../utils/pdfExport';
 interface PengumumanViewProps {
   pengumumanList: PengumumanRT[];
   isAdmin: boolean;
+  isServerRole?: boolean;
   onOpenCreateModal: () => void;
   onDeletePengumuman: (id: string) => void;
   onBack: () => void;
@@ -29,6 +30,7 @@ interface PengumumanViewProps {
 export const PengumumanView: React.FC<PengumumanViewProps> = ({
   pengumumanList,
   isAdmin,
+  isServerRole = false,
   onOpenCreateModal,
   onDeletePengumuman,
   onBack,
@@ -271,7 +273,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
                   </button>
                 </div>
 
-                {isAdmin && (
+                {isAdmin && (isServerRole || !/^semua(\s+rt)?$/i.test(String(p.rtScope || '').trim())) && (
                   <button
                     onClick={() => onDeletePengumuman(p.id)}
                     className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"

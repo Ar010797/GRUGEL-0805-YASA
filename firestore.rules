@@ -41,24 +41,37 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/admins/$(request.auth.uid)).data;
     }
 
+    function sameCode(a, b) {
+      return a == b || (
+        a is string && b is string && (
+          (a.size() == 1 && b == '0' + a) ||
+          (b.size() == 1 && a == '0' + b)
+        )
+      );
+    }
+
+    function isServerAnyRW() {
+      return isBootstrappedAdmin() || (hasAdminDoc() && adminDoc().status == 'aktif' && adminDoc().role == 'server');
+    }
+
     function isActiveAdmin() {
       return isBootstrappedAdmin() || (hasAdminDoc() && adminDoc().status == 'aktif');
     }
 
     function isActiveAdminInRW(rw) {
-      return isBootstrappedAdmin() || (hasAdminDoc() && adminDoc().status == 'aktif' && adminDoc().rw == rw);
+      return isBootstrappedAdmin() || (hasAdminDoc() && adminDoc().status == 'aktif' && (adminDoc().rw == rw || sameCode(adminDoc().rw, rw)));
     }
 
     function isServerInRW(rw) {
-      return isBootstrappedAdmin() || (hasAdminDoc() && adminDoc().status == 'aktif' && adminDoc().role == 'server' && adminDoc().rw == rw);
+      return isBootstrappedAdmin() || (hasAdminDoc() && adminDoc().status == 'aktif' && adminDoc().role == 'server' && (adminDoc().rw == rw || sameCode(adminDoc().rw, rw)));
     }
 
     function isAssignedAdmin(rw, rt) {
       return isBootstrappedAdmin() || (
         hasAdminDoc() &&
         adminDoc().status == 'aktif' &&
-        adminDoc().rw == rw &&
-        (adminDoc().role == 'server' || (adminDoc().rt == rt && rt != 'SEMUA'))
+        (adminDoc().rw == rw || sameCode(adminDoc().rw, rw)) &&
+        (adminDoc().role == 'server' || ((adminDoc().rt == rt || sameCode(adminDoc().rt, rt)) && rt != 'SEMUA'))
       );
     }
 
@@ -66,8 +79,8 @@ service cloud.firestore {
       return isBootstrappedAdmin() || (
         hasAdminDoc() &&
         adminDoc().status == 'aktif' &&
-        adminDoc().rw == rw &&
-        (adminDoc().role == 'server' || adminDoc().rt == rt || rt == 'SEMUA')
+        (adminDoc().rw == rw || sameCode(adminDoc().rw, rw)) &&
+        (adminDoc().role == 'server' || adminDoc().rt == rt || sameCode(adminDoc().rt, rt) || rt == 'SEMUA')
       );
     }
 
@@ -80,7 +93,9 @@ service cloud.firestore {
     }
 
     function isWargaInRWRT(rw, rt) {
-      return hasWargaProfile() && wargaProfile().rw == rw && wargaProfile().rt == rt;
+      return hasWargaProfile() &&
+        (wargaProfile().rw == rw || sameCode(wargaProfile().rw, rw)) &&
+        (wargaProfile().rt == rt || sameCode(wargaProfile().rt, rt));
     }
 
     function canListOwnOrScoped() {
@@ -119,13 +134,24 @@ service cloud.firestore {
     }
 
     function isValidRwScope(data) {
-      return !('rwId' in data) || (data.rwId is string && data.rwId == 'rw_' + data.rw);
+      return !('rwId' in data) || (
+        data.rwId is string && (
+          data.rwId == 'rw_' + data.rw ||
+          (data.rw is string && data.rw.size() == 1 && data.rwId == 'rw_0' + data.rw)
+        )
+      );
     }
 
     function isValidRwRtScope(data) {
       return isValidRwScope(data) && (
         !('rtId' in data) ||
-        (data.rtId is string && ((data.rt == 'SEMUA' && data.rtId == 'SEMUA') || (data.rt != 'SEMUA' && data.rtId == 'rt_' + data.rt)))
+        (data.rtId is string && (
+          (data.rt == 'SEMUA' && data.rtId == 'SEMUA') ||
+          (data.rt != 'SEMUA' && (
+            data.rtId == 'rt_' + data.rt ||
+            (data.rt is string && data.rt.size() == 1 && data.rtId == 'rt_0' + data.rt)
+          ))
+        ))
       );
     }
 
@@ -657,7 +683,10 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'rwId', 'rtId', 'updatedAt'])
           )
         );
-      allow delete: if isValidId(uid) && isSignedIn() && isServerInRW(existing().rw);
+      allow delete: if isValidId(uid) && isSignedIn() && (
+        (resource == null && isServerAnyRW()) ||
+        (resource != null && isServerInRW(existing().rw))
+      );
     }
 
     // Collection: /wargaProfiles/{uid}
@@ -687,7 +716,10 @@ service cloud.firestore {
         isAssignedAdmin(existing().rw, existing().rt) &&
         isAssignedAdmin(incoming().rw, incoming().rt) &&
         incoming().diff(existing()).affectedKeys().hasOnly(['wargaId', 'noKK', 'nama', 'rt', 'rw', 'rtId', 'rwId', 'serverUid', 'updatedAt']);
-      allow delete: if isValidId(uid) && isSignedIn() && isAssignedAdmin(existing().rw, existing().rt);
+      allow delete: if isValidId(uid) && isSignedIn() && (
+        (resource == null && isActiveAdmin()) ||
+        (resource != null && isAssignedAdmin(existing().rw, existing().rt))
+      );
     }
 
     // Collection: /rtRegistry/{rwId}
@@ -716,7 +748,10 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         isActiveAdminInRW(existing().rw) &&
         incoming().diff(existing()).affectedKeys().hasOnly(['serverUid', 'adminsByRt', 'registeredRts', 'rwId', 'updatedAt']);
-      allow delete: if isValidId(rwId) && isSignedIn() && isServerInRW(existing().rw);
+      allow delete: if isValidId(rwId) && isSignedIn() && (
+        (resource == null && isServerAnyRW()) ||
+        (resource != null && isServerInRW(existing().rw))
+      );
     }
 
     // Collection: /rtManifest/{scopeId}
@@ -746,7 +781,10 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         isAssignedAdmin(existing().rw, existing().rt) &&
         incoming().diff(existing()).affectedKeys().hasOnly(['docIds', 'serverUid', 'rwId', 'rtId', 'updatedAt']);
-      allow delete: if isValidId(scopeId) && isSignedIn() && isServerInRW(existing().rw);
+      allow delete: if isValidId(scopeId) && isSignedIn() && (
+        (resource == null && isServerAnyRW()) ||
+        (resource != null && isServerInRW(existing().rw))
+      );
     }
 
     // Collection: /rtPublicSummaries/{scopeId}
@@ -776,7 +814,10 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         isAssignedAdmin(existing().rw, existing().rt) &&
         incoming().diff(existing()).affectedKeys().hasOnly(['tahunAktif', 'pengaturanKas', 'transactions', 'pengumuman', 'serverUid', 'rwId', 'rtId', 'updatedAt']);
-      allow delete: if isValidId(scopeId) && isSignedIn() && isAssignedAdmin(existing().rw, existing().rt);
+      allow delete: if isValidId(scopeId) && isSignedIn() && (
+        (resource == null && isActiveAdmin()) ||
+        (resource != null && isAssignedAdmin(existing().rw, existing().rt))
+      );
     }
 
     // Collection: /settings/{settingId}
@@ -813,7 +854,10 @@ service cloud.firestore {
           'kontakKetuaRT', 'kontakBendahara', 'saldoBerlanjutPerTahun', 'profilRT',
           'accessUids', 'serverUid', 'rtAdminUid', 'updatedAt'
         ]);
-      allow delete: if isValidId(settingId) && isSignedIn() && isAssignedAdmin(existing().rw, existing().rt);
+      allow delete: if isValidId(settingId) && isSignedIn() && (
+        (resource == null && isActiveAdmin()) ||
+        (resource != null && isAssignedAdmin(existing().rw, existing().rt))
+      );
     }
 
     // Collection: /warga/{wargaId} (PII restricted to assigned RW/RT Admins or linked resident owner)
@@ -862,7 +906,10 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['pin', 'telepon', 'updatedAt'])
           )
         );
-      allow delete: if isValidId(wargaId) && isSignedIn() && isAssignedAdmin(existing().rw, existing().rt);
+      allow delete: if isValidId(wargaId) && isSignedIn() && (
+        (resource == null && isActiveAdmin()) ||
+        (resource != null && isAssignedAdmin(existing().rw, existing().rt))
+      );
     }
 
     // Collection: /transactions/{txId}
@@ -896,7 +943,10 @@ service cloud.firestore {
           'residentId', 'namaWarga', 'nomorRumah', 'noKK', 'isSaldoAwal', 'tahun', 'rt', 'rtId', 'rwId', 'rtScope',
           'accessUids', 'serverUid', 'rtAdminUid', 'updatedAt'
         ]);
-      allow delete: if isValidId(txId) && isSignedIn() && isAssignedAdmin(existing().rw, existing().rt);
+      allow delete: if isValidId(txId) && isSignedIn() && (
+        (resource == null && isActiveAdmin()) ||
+        (resource != null && isAssignedAdmin(existing().rw, existing().rt))
+      );
     }
 
     // Collection: /bantuan/{bantuanId} (Confidential UU PDP - Assigned RW/RT Admin only)
@@ -930,7 +980,10 @@ service cloud.firestore {
           'tanggal', 'status', 'sumberDana', 'keterangan', 'rt', 'rtId', 'rwId', 'rtScope',
           'accessUids', 'serverUid', 'rtAdminUid', 'updatedAt'
         ]);
-      allow delete: if isValidId(bantuanId) && isSignedIn() && isAssignedAdmin(existing().rw, existing().rt);
+      allow delete: if isValidId(bantuanId) && isSignedIn() && (
+        (resource == null && isActiveAdmin()) ||
+        (resource != null && isAssignedAdmin(existing().rw, existing().rt))
+      );
     }
 
     // Collection: /pengumuman/{pengumumanId}
@@ -968,7 +1021,8 @@ service cloud.firestore {
           'accessUids', 'serverUid', 'rtAdminUid', 'updatedAt'
         ]);
       allow delete: if isValidId(pengumumanId) && isSignedIn() && (
-        isServerInRW(existing().rw) || isAssignedAdmin(existing().rw, existing().rt)
+        (resource == null && isActiveAdmin()) ||
+        (resource != null && (isServerInRW(existing().rw) || isAssignedAdmin(existing().rw, existing().rt)))
       );
     }
 
@@ -1003,7 +1057,10 @@ service cloud.firestore {
           'keterangan', 'dataBase64', 'rt', 'rtId', 'rwId', 'rtScope',
           'accessUids', 'serverUid', 'rtAdminUid', 'updatedAt'
         ]);
-      allow delete: if isValidId(dokumenId) && isSignedIn() && isAssignedAdmin(existing().rw, existing().rt);
+      allow delete: if isValidId(dokumenId) && isSignedIn() && (
+        (resource == null && isActiveAdmin()) ||
+        (resource != null && isAssignedAdmin(existing().rw, existing().rt))
+      );
     }
 
     // Collection: /adminAccounts/{accountId}
@@ -1045,14 +1102,21 @@ service cloud.firestore {
           (
             isAssignedAdmin(existing().rw, existing().rt) &&
             incoming().rt == existing().rt &&
-            ('authUid' in existing()) && existing().authUid == request.auth.uid &&
+            (
+              (('authUid' in existing()) && existing().authUid == request.auth.uid) ||
+              (!('authUid' in existing()) || existing().authUid == null)
+            ) &&
+            (!('authUid' in incoming()) || incoming().authUid == null || incoming().authUid == request.auth.uid) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'nama', 'kontak', 'jabatan', 'rtId', 'rwId',
+              'nama', 'kontak', 'jabatan', 'rtId', 'rwId', 'authUid',
               'terakhirLogin', 'terakhirSinkronisasi', 'accessUids', 'serverUid', 'rtAdminUid', 'updatedAt'
             ])
           )
         );
-      allow delete: if isValidId(accountId) && isSignedIn() && isServerInRW(existing().rw);
+      allow delete: if isValidId(accountId) && isSignedIn() && (
+        (resource == null && isServerAnyRW()) ||
+        (resource != null && isServerInRW(existing().rw))
+      );
     }
 
     // Collection: /laporanBulanan/{laporanId}
@@ -1105,7 +1169,10 @@ service cloud.firestore {
             ])
           )
         );
-      allow delete: if isValidId(laporanId) && isSignedIn() && isServerInRW(existing().rw);
+      allow delete: if isValidId(laporanId) && isSignedIn() && (
+        (resource == null && isServerAnyRW()) ||
+        (resource != null && isServerInRW(existing().rw))
+      );
     }
   }
 }
