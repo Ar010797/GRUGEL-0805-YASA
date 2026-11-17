@@ -10,8 +10,7 @@ import {
   getFirestore,
   initializeFirestore,
   memoryLocalCache,
-  persistentLocalCache,
-  persistentMultipleTabManager,
+  enableNetwork,
   doc,
   getDocFromServer,
   waitForPendingWrites,
@@ -70,42 +69,26 @@ const app: FirebaseApp = getApps().some((a) => a.name === PRIMARY_APP_NAME)
       appId: firebaseConfig.appId,
     });
 
-let resolvedPersistenceMode: 'indexeddb-multi-tab' | 'memory' = 'memory';
+let resolvedPersistenceMode: 'memory' = 'memory';
 
 function createFirestoreInstance(firebaseApp: FirebaseApp, databaseId: string): Firestore {
-  if (typeof window !== 'undefined' && typeof indexedDB !== 'undefined') {
-    try {
-      const instance = initializeFirestore(
-        firebaseApp,
-        {
-          localCache: persistentLocalCache({
-            tabManager: persistentMultipleTabManager(),
-          }),
-        },
-        databaseId
-      );
-      resolvedPersistenceMode = 'indexeddb-multi-tab';
-      return instance;
-    } catch (err: any) {
-      const msg = String(err?.message || '');
-      if (msg.includes('already been started') || err?.code === 'failed-precondition') {
-        try {
-          resolvedPersistenceMode = 'indexeddb-multi-tab';
-          return getFirestore(firebaseApp, databaseId);
-        } catch {
-          // fall through to memory cache
-        }
-      }
-      console.warn('Firestore persistentLocalCache unavailable, falling back to memoryLocalCache:', err);
-    }
-  }
-
   try {
     resolvedPersistenceMode = 'memory';
-    return initializeFirestore(firebaseApp, { localCache: memoryLocalCache() }, databaseId);
-  } catch {
-    resolvedPersistenceMode = 'memory';
-    return getFirestore(firebaseApp, databaseId);
+    return initializeFirestore(
+      firebaseApp,
+      {
+        experimentalAutoDetectLongPolling: true,
+        localCache: memoryLocalCache(),
+      },
+      databaseId
+    );
+  } catch (err: any) {
+    const msg = String(err?.message || '');
+    if (msg.includes('already been started') || err?.code === 'failed-precondition') {
+      resolvedPersistenceMode = 'memory';
+      return getFirestore(firebaseApp, databaseId);
+    }
+    throw err;
   }
 }
 
@@ -114,6 +97,22 @@ export const firestorePersistenceMode = resolvedPersistenceMode;
 export const auth: Auth = getAuth(app);
 
 export { waitForPendingWrites };
+
+let networkRecoveryInFlight: Promise<void> | null = null;
+
+export async function ensureFirestoreNetworkOnline(force = false): Promise<void> {
+  if (!force) return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  if (networkRecoveryInFlight) return networkRecoveryInFlight;
+  networkRecoveryInFlight = enableNetwork(db)
+    .catch(() => {
+      // ignore if already enabled or shutting down
+    })
+    .finally(() => {
+      networkRecoveryInFlight = null;
+    });
+  return networkRecoveryInFlight;
+}
 
 // Ensure auth sessions persist across reloads, Vercel SPA navigation, and Median WebView restarts
 if (typeof window !== 'undefined') {
@@ -227,6 +226,20 @@ export interface FirebaseConnectionDiagnostic {
 
 export async function testFirestoreConnection(): Promise<FirebaseConnectionDiagnostic> {
   const started = Date.now();
+  const browserOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+
+  if (browserOffline) {
+    return {
+      connected: false,
+      latencyMs: Date.now() - started,
+      projectId: firebaseConfig.projectId,
+      databaseId: firebaseConfig.firestoreDatabaseId,
+      authDomain: firebaseConfig.authDomain,
+      message: `Perangkat sedang offline. Perubahan lokal akan disinkronkan saat online.`,
+      errorDetail: 'navigator-offline',
+    };
+  }
+
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     const latencyMs = Date.now() - started;
@@ -263,8 +276,8 @@ export async function testFirestoreConnection(): Promise<FirebaseConnectionDiagn
       msg.includes('the client is offline') ||
       /network|failed to fetch|offline/i.test(msg);
 
-    if (isOffline) {
-      console.error('Please check your Firebase configuration.', error);
+    if (isOffline && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+      console.warn('Firestore server probe unreachable, retrying network:', msg || code);
     }
 
     return {
@@ -281,7 +294,9 @@ export async function testFirestoreConnection(): Promise<FirebaseConnectionDiagn
   }
 }
 
-// Run startup connectivity probe as required by Firebase SDK pattern
+// Run startup connectivity probe once the browser environment settles
 if (typeof window !== 'undefined') {
-  testFirestoreConnection().catch(() => {});
+  setTimeout(() => {
+    testFirestoreConnection().catch(() => {});
+  }, 400);
 }

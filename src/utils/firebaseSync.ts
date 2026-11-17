@@ -31,6 +31,7 @@ import {
 import {
   auth,
   db,
+  ensureFirestoreNetworkOnline,
   firebaseConfig,
   getSecondaryAuth,
   handleFirestoreError,
@@ -212,6 +213,19 @@ let activeAdminContext: AdminIdentityContext | null = null;
 
 export function getActiveAdminContext(): AdminIdentityContext | null {
   return activeAdminContext;
+}
+
+export async function ensureAdminContextReady(): Promise<AdminIdentityContext | null> {
+  const fbUser = auth.currentUser;
+  if (!fbUser) return null;
+  if (activeAdminContext && activeAdminContext.uid === fbUser.uid) {
+    return activeAdminContext;
+  }
+  try {
+    return await refreshAdminContext(fbUser.uid);
+  } catch {
+    return activeAdminContext && activeAdminContext.uid === fbUser.uid ? activeAdminContext : null;
+  }
 }
 
 export function toValidDocId(raw?: string | null, prefix = 'doc'): string {
@@ -399,6 +413,9 @@ function buildEntityUpdatePatch(
   existing?: CachedDocMeta | null
 ): Record<string, any> {
   const omitted = new Set<string>(['id', 'ownerUid', 'rw', 'createdAt']);
+  if (ctx?.role === 'admin') {
+    omitted.add('rt');
+  }
   if (colName === 'adminAccounts' && ctx?.role !== 'server') {
     ['username', 'passwordHash', 'rt', 'status', 'authUid'].forEach((k) => omitted.add(k));
   }
@@ -410,9 +427,12 @@ function buildEntityUpdatePatch(
     if (omitted.has(k) || v === undefined) continue;
     patch[k] = v;
   }
-  // Keep rwId aligned with immutable existing.rw on legacy docs so isValidRwScope passes
+  // Keep rwId/rtId aligned with immutable existing.rw/existing.rt when Admin updates legacy docs
   if (existing?.rw && existing.rw !== payload.rw) {
     patch.rwId = `rw_${existing.rw}`;
+  }
+  if (ctx?.role === 'admin' && existing?.rt && existing.rt !== payload.rt) {
+    patch.rtId = existing.rt === 'SEMUA' ? 'SEMUA' : `rt_${existing.rt}`;
   }
   // Purge legacy null optional fields on update
   if (Array.isArray(existing?.nullKeys)) {
@@ -595,6 +615,12 @@ export function clearAuthSessionHint(): void {
 
 const inFlightAdminContext = new Map<string, Promise<AdminIdentityContext | null>>();
 
+function isTargetIdCollisionError(error: unknown): boolean {
+  const code = String((error as any)?.code || '');
+  const msg = String((error as any)?.message || error || '');
+  return code === 'already-exists' || /Target ID already exists/i.test(msg);
+}
+
 export function refreshAdminContext(uid: string): Promise<AdminIdentityContext | null> {
   const existingPromise = inFlightAdminContext.get(uid);
   if (existingPromise) return existingPromise;
@@ -606,9 +632,26 @@ export function refreshAdminContext(uid: string): Promise<AdminIdentityContext |
     const adminRef = doc(db, 'admins', uid);
     let adminSnap;
     try {
-      adminSnap = await getDoc(adminRef);
+      adminSnap = isOnlineBrowser()
+        ? await getDocFromServer(adminRef).catch(async (err) => {
+            if (isTargetIdCollisionError(err)) {
+              await new Promise((r) => setTimeout(r, 250));
+              return getDocFromServer(adminRef);
+            }
+            return getDoc(adminRef);
+          })
+        : await getDoc(adminRef);
     } catch (error) {
-      handleFirestoreError(error, OperationType.GET, `admins/${uid}`);
+      if (isTargetIdCollisionError(error)) {
+        await new Promise((r) => setTimeout(r, 300));
+        try {
+          adminSnap = await getDocFromServer(adminRef);
+        } catch (retryErr) {
+          handleFirestoreError(retryErr, OperationType.GET, `admins/${uid}`);
+        }
+      } else {
+        handleFirestoreError(error, OperationType.GET, `admins/${uid}`);
+      }
     }
 
     if (!adminSnap.exists()) {
@@ -1070,7 +1113,7 @@ let lastClaimCompletedAt = 0;
 const CLAIM_COOLDOWN_MS = 30000;
 
 export async function claimAndSyncManifestDocs(options?: { force?: boolean }): Promise<number> {
-  const ctx = activeAdminContext;
+  const ctx = await ensureAdminContextReady();
   if (!ctx || !auth.currentUser) return 0;
 
   if (!options?.force) {
@@ -1997,7 +2040,7 @@ export async function provisionAdminAuthAccount(
   account: AdminRTAccount,
   oldPassword?: string
 ): Promise<{ authUid?: string; error?: string }> {
-  const ctx = activeAdminContext;
+  const ctx = await ensureAdminContextReady();
   if (!ctx || !auth.currentUser) return { error: 'Harus login sebagai Server Pusat.' };
 
   const username = account.username.trim();
@@ -2102,7 +2145,7 @@ const failedProvisionAttemptIds = new Set<string>();
 export async function provisionWargaAuthAccounts(
   wargaList: Array<Warga & { linkedUid?: string }>
 ): Promise<number> {
-  const ctx = activeAdminContext;
+  const ctx = await ensureAdminContextReady();
   if (!ctx || !auth.currentUser || wargaProvisioningActive) return 0;
 
   const candidates = wargaList.filter((w) => {
@@ -2597,6 +2640,56 @@ async function saveScopedEntityDoc(
   // Optimistically cache metadata so offline follow-up edits update cleanly instead of re-creating
   recordMeta(path, { ...payload, localCreated: true });
 
+  const recoverWithServerState = async (err: any) => {
+    const code = String(err?.code || '');
+    const msg = String(err?.message || '');
+    if (
+      isOnlineBrowser() &&
+      (code === 'not-found' ||
+        code === 'permission-denied' ||
+        /missing or insufficient permissions/i.test(msg))
+    ) {
+      const serverSnap = await getDocFromServer(docRef).catch(() => null);
+      if (serverSnap && !serverSnap.exists()) {
+        const currentUid = auth.currentUser?.uid || activeAdminContext?.uid || payload.ownerUid;
+        const createPayload = {
+          ...payload,
+          ownerUid: currentUid,
+          accessUids: Array.from(
+            new Set([
+              currentUid,
+              ...(Array.isArray(payload.accessUids) ? payload.accessUids : []),
+            ])
+          ).slice(0, 15),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+        await setDoc(docRef, createPayload);
+        recordMeta(path, { ...createPayload, localCreated: true }, { serverConfirmed: true });
+        return true;
+      }
+      if (serverSnap && serverSnap.exists()) {
+        const serverData = serverSnap.data();
+        recordMeta(path, { ...serverData, localCreated: true }, { serverConfirmed: true });
+        const refreshedMeta = docMetaCache.get(path) || null;
+        const refreshedPatch = buildEntityUpdatePatch(
+          colName,
+          payload,
+          activeAdminContext,
+          refreshedMeta
+        );
+        await updateDoc(docRef, refreshedPatch);
+        recordMeta(
+          path,
+          { ...serverData, ...refreshedPatch, localCreated: true },
+          { serverConfirmed: true }
+        );
+        return true;
+      }
+    }
+    return false;
+  };
+
   const executeWrite = async () => {
     if (!isUpdate) {
       try {
@@ -2604,6 +2697,13 @@ async function saveScopedEntityDoc(
         recordMeta(path, { ...payload, localCreated: true }, { serverConfirmed: isOnlineBrowser() });
         return;
       } catch (err) {
+        try {
+          if (await recoverWithServerState(err)) return;
+        } catch (retryErr) {
+          if (prevMeta) docMetaCache.set(path, prevMeta);
+          else docMetaCache.delete(path);
+          throw retryErr;
+        }
         if (prevMeta) docMetaCache.set(path, prevMeta);
         else docMetaCache.delete(path);
         throw err;
@@ -2614,52 +2714,12 @@ async function saveScopedEntityDoc(
       await updateDoc(docRef, buildEntityUpdatePatch(colName, payload, activeAdminContext, existing));
       recordMeta(path, { ...payload, localCreated: true }, { serverConfirmed: isOnlineBrowser() });
     } catch (err: any) {
-      const code = String(err?.code || '');
-      const msg = String(err?.message || '');
-      if (
-        isOnlineBrowser() &&
-        (code === 'not-found' ||
-          code === 'permission-denied' ||
-          /missing or insufficient permissions/i.test(msg))
-      ) {
-        const serverSnap = await getDocFromServer(docRef).catch(() => null);
-        if (serverSnap && !serverSnap.exists()) {
-          // Stale local cache or deleted doc on server: create cleanly via setDoc
-          const currentUid = auth.currentUser?.uid || activeAdminContext?.uid || payload.ownerUid;
-          const createPayload = {
-            ...payload,
-            ownerUid: currentUid,
-            accessUids: Array.from(
-              new Set([
-                currentUid,
-                ...(Array.isArray(payload.accessUids) ? payload.accessUids : []),
-              ])
-            ).slice(0, 15),
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          };
-          await setDoc(docRef, createPayload);
-          recordMeta(path, { ...createPayload, localCreated: true }, { serverConfirmed: true });
-          return;
-        }
-        if (serverSnap && serverSnap.exists()) {
-          const serverData = serverSnap.data();
-          recordMeta(path, { ...serverData, localCreated: true }, { serverConfirmed: true });
-          const refreshedMeta = docMetaCache.get(path) || null;
-          const refreshedPatch = buildEntityUpdatePatch(
-            colName,
-            payload,
-            activeAdminContext,
-            refreshedMeta
-          );
-          await updateDoc(docRef, refreshedPatch);
-          recordMeta(
-            path,
-            { ...serverData, ...refreshedPatch, localCreated: true },
-            { serverConfirmed: true }
-          );
-          return;
-        }
+      try {
+        if (await recoverWithServerState(err)) return;
+      } catch (retryErr) {
+        if (prevMeta) docMetaCache.set(path, prevMeta);
+        else docMetaCache.delete(path);
+        throw retryErr;
       }
 
       if (prevMeta) docMetaCache.set(path, prevMeta);
@@ -2678,10 +2738,11 @@ async function saveScopedEntityDoc(
 
 export async function saveWargaDoc(w: Warga): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
+  const ctx = await ensureAdminContextReady();
   const id = toValidDocId(w.id, 'w');
   const path = `warga/${id}`;
   const existing = await resolveExistingMeta(path);
-  const payload = buildWargaFirestorePayload({ ...w, id }, existing, activeAdminContext);
+  const payload = buildWargaFirestorePayload({ ...w, id }, existing, ctx);
 
   return saveScopedEntityDoc('warga', id, payload, existing, async () => {
     await appendDocIdsToManifest(payload.rw, payload.rt, { warga: [id] });
@@ -2732,75 +2793,69 @@ export async function bulkSaveWargaAndBantuanDocs(
   bantuanList: BantuanPemerintah[]
 ): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
+  const ctx = await ensureAdminContextReady();
   try {
-    // Resolve any existing metadata for items not yet in docMetaCache so updates use batch.update
     await Promise.all([
       ...wargaList.map((w) => resolveExistingMeta(`warga/${toValidDocId(w.id, 'w')}`)),
       ...bantuanList.map((b) => resolveExistingMeta(`bantuan/${toValidDocId(b.id, 'b')}`)),
     ]);
 
     const manifestBucketsByRt = new Map<string, { warga: string[]; bantuan: string[] }>();
-    const rw = activeAdminContext?.rw || DEFAULT_RW;
-    const commitPromises: Promise<unknown>[] = [];
-
-    let batch = writeBatch(db);
-    let ops = 0;
-
-    const queueBatchFlush = () => {
-      if (ops > 0) {
-        commitPromises.push(batch.commit());
-        batch = writeBatch(db);
-        ops = 0;
-      }
-    };
+    const rw = ctx?.rw || DEFAULT_RW;
+    const writes: PendingBatchWrite[] = [];
 
     for (const w of wargaList) {
       const id = toValidDocId(w.id, 'w');
       const path = `warga/${id}`;
       const existing = docMetaCache.get(path) || null;
-      const payload = buildWargaFirestorePayload({ ...w, id }, existing, activeAdminContext);
-      const ref = doc(db, 'warga', id);
-      if (existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated)) {
-        batch.update(ref, buildEntityUpdatePatch('warga', payload, activeAdminContext, existing));
-      } else {
-        batch.set(ref, payload);
+      if (ctx?.role === 'admin' && ctx.rt !== 'SEMUA') {
+        const wRt = normalizeRTCode(w.rt);
+        if (wRt && wRt !== ctx.rt) continue;
+        if (existing?.rw && existing.rw !== ctx.rw) continue;
+        if (existing?.rt && existing.rt !== ctx.rt) continue;
       }
-      recordMeta(path, { ...payload, localCreated: true });
-      ops++;
+
+      const payload = buildWargaFirestorePayload({ ...w, id }, existing, ctx);
+      const isUpdate = Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated));
+      writes.push({ colName: 'warga', id, payload, rt: payload.rt, isUpdate });
 
       const entry = manifestBucketsByRt.get(payload.rt) || { warga: [], bantuan: [] };
       entry.warga.push(id);
       manifestBucketsByRt.set(payload.rt, entry);
-
-      if (ops >= 350) queueBatchFlush();
     }
 
     for (const b of bantuanList) {
       const id = toValidDocId(b.id, 'b');
       const path = `bantuan/${id}`;
       const existing = docMetaCache.get(path) || null;
-      const payload = buildBantuanFirestorePayload({ ...b, id }, existing, activeAdminContext);
-      const ref = doc(db, 'bantuan', id);
-      if (existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated)) {
-        batch.update(ref, buildEntityUpdatePatch('bantuan', payload, activeAdminContext, existing));
-      } else {
-        batch.set(ref, payload);
+      if (ctx?.role === 'admin' && ctx.rt !== 'SEMUA') {
+        const bRt = extractRTFromScope(b.rtScope, '', true);
+        if (bRt && bRt !== 'SEMUA' && bRt !== ctx.rt) continue;
+        if (existing?.rw && existing.rw !== ctx.rw) continue;
+        if (existing?.rt && existing.rt !== ctx.rt) continue;
       }
-      recordMeta(path, { ...payload, localCreated: true });
-      ops++;
+
+      const payload = buildBantuanFirestorePayload({ ...b, id }, existing, ctx);
+      const isUpdate = Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated));
+      writes.push({ colName: 'bantuan', id, payload, rt: payload.rt, isUpdate });
 
       const entry = manifestBucketsByRt.get(payload.rt) || { warga: [], bantuan: [] };
       entry.bantuan.push(id);
       manifestBucketsByRt.set(payload.rt, entry);
-
-      if (ops >= 350) queueBatchFlush();
     }
 
-    queueBatchFlush();
-    if (commitPromises.length === 0) return { ok: true, pending: false };
+    if (writes.length === 0) return { ok: true, pending: false };
+
+    const bulkTask = (async () => {
+      const res = await executeResilientWrites(writes, 30);
+      if (res.failed.length > 0) {
+        const first = res.failed[0];
+        throw new Error(first.error || `Gagal menyimpan ${res.failed.length} dokumen warga/bantuan.`);
+      }
+    })();
 
     return await commitTrackedWrite(
-      Promise.all(commitPromises),
+      bulkTask,
       OperationType.WRITE,
       'warga',
       async () => {
@@ -2808,8 +2863,8 @@ export async function bulkSaveWargaAndBantuanDocs(
           await appendDocIdsToManifest(rw, rtCode, bucket);
           await upsertRtRegistry({
             rw,
-            ownerUid: auth.currentUser?.uid || activeAdminContext?.uid || 'system',
-            serverUid: activeAdminContext?.serverUid,
+            ownerUid: auth.currentUser?.uid || ctx?.uid || 'system',
+            serverUid: ctx?.serverUid,
             addRt: rtCode,
           });
         }
@@ -2827,10 +2882,11 @@ export async function bulkSaveWargaAndBantuanDocs(
 
 export async function saveTransactionDoc(tx: Transaction): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
+  const ctx = await ensureAdminContextReady();
   const id = toValidDocId(tx.id, 'tx');
   const path = `transactions/${id}`;
   const existing = await resolveExistingMeta(path);
-  const payload = buildTransactionFirestorePayload({ ...tx, id }, existing, activeAdminContext);
+  const payload = buildTransactionFirestorePayload({ ...tx, id }, existing, ctx);
 
   return saveScopedEntityDoc('transactions', id, payload, existing, async () => {
     await appendDocIdsToManifest(payload.rw, payload.rt, { transactions: [id] });
@@ -2853,10 +2909,11 @@ export async function deleteTransactionDoc(idRaw: string): Promise<FirestoreWrit
 
 export async function saveBantuanDoc(b: BantuanPemerintah): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
+  const ctx = await ensureAdminContextReady();
   const id = toValidDocId(b.id, 'b');
   const path = `bantuan/${id}`;
   const existing = await resolveExistingMeta(path);
-  const payload = buildBantuanFirestorePayload({ ...b, id }, existing, activeAdminContext);
+  const payload = buildBantuanFirestorePayload({ ...b, id }, existing, ctx);
 
   return saveScopedEntityDoc('bantuan', id, payload, existing, async () => {
     await appendDocIdsToManifest(payload.rw, payload.rt, { bantuan: [id] });
@@ -2879,10 +2936,11 @@ export async function deleteBantuanDoc(idRaw: string): Promise<FirestoreWriteRes
 
 export async function savePengumumanDoc(p: PengumumanRT): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
+  const ctx = await ensureAdminContextReady();
   const id = toValidDocId(p.id, 'p');
   const path = `pengumuman/${id}`;
   const existing = await resolveExistingMeta(path);
-  const payload = buildPengumumanFirestorePayload({ ...p, id }, existing, activeAdminContext);
+  const payload = buildPengumumanFirestorePayload({ ...p, id }, existing, ctx);
 
   return saveScopedEntityDoc('pengumuman', id, payload, existing, async () => {
     if (payload.rt !== 'SEMUA') {
@@ -2907,6 +2965,7 @@ export async function deletePengumumanDoc(idRaw: string): Promise<FirestoreWrite
 
 export async function saveDokumenDoc(d: DokumenPdfWarga): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
+  const ctx = await ensureAdminContextReady();
   const id = toValidDocId(d.id, 'doc');
   const path = `dokumen/${id}`;
   if (d.dataBase64 && d.dataBase64.length > 850000) {
@@ -2916,7 +2975,7 @@ export async function saveDokumenDoc(d: DokumenPdfWarga): Promise<FirestoreWrite
     };
   }
   const existing = await resolveExistingMeta(path);
-  const payload = buildDokumenFirestorePayload({ ...d, id }, existing, activeAdminContext);
+  const payload = buildDokumenFirestorePayload({ ...d, id }, existing, ctx);
 
   return saveScopedEntityDoc('dokumen', id, payload, existing, async () => {
     await appendDocIdsToManifest(payload.rw, payload.rt, { dokumen: [id] });
@@ -2942,13 +3001,14 @@ export async function saveAdminAccountDoc(
   authUidOverride?: string
 ): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
+  const ctx = await ensureAdminContextReady();
   const id = toValidDocId(acc.id, 'adm');
   const path = `adminAccounts/${id}`;
   const existing = await resolveExistingMeta(path);
   const payload = buildAdminAccountFirestorePayload(
     { ...acc, id },
     existing,
-    activeAdminContext,
+    ctx,
     authUidOverride
   );
 
@@ -2957,7 +3017,7 @@ export async function saveAdminAccountDoc(
     await upsertRtRegistry({
       rw: payload.rw,
       ownerUid: payload.ownerUid,
-      serverUid: activeAdminContext?.serverUid,
+      serverUid: ctx?.serverUid,
       addRt: payload.rt,
       addAdminUid: payload.authUid,
     });
@@ -2982,10 +3042,11 @@ export async function saveLaporanDoc(
   lap: PembaruanBulananRT
 ): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) return { ok: false, message: 'Belum login ke Firebase.' };
+  const ctx = await ensureAdminContextReady();
   const id = toValidDocId(lap.id, 'lap');
   const path = `laporanBulanan/${id}`;
   const existing = await resolveExistingMeta(path);
-  const payload = buildLaporanFirestorePayload({ ...lap, id }, existing, activeAdminContext);
+  const payload = buildLaporanFirestorePayload({ ...lap, id }, existing, ctx);
 
   return saveScopedEntityDoc('laporanBulanan', id, payload, existing, async () => {
     await appendDocIdsToManifest(payload.rw, payload.rt, { laporanBulanan: [id] });
@@ -2996,10 +3057,10 @@ export async function saveSettingsDoc(
   pengaturanKas: PengaturanKas,
   tahunAktif: number
 ): Promise<FirestoreWriteResult> {
-  if (!auth.currentUser || !activeAdminContext) {
+  const ctx = await ensureAdminContextReady();
+  if (!auth.currentUser || !ctx) {
     return { ok: false, message: 'Belum login ke Firebase.' };
   }
-  const ctx = activeAdminContext;
   const rw =
     ctx.role === 'admin'
       ? ctx.rw || DEFAULT_RW
@@ -3040,7 +3101,7 @@ export async function syncRtPublicSummary(params: {
   pengumumanList: PengumumanRT[];
   wargaList: Warga[];
 }): Promise<void> {
-  const ctx = activeAdminContext;
+  const ctx = await ensureAdminContextReady();
   if (!ctx || !auth.currentUser) return;
   const rt =
     ctx.role === 'admin' && ctx.rt !== 'SEMUA'
@@ -3205,10 +3266,10 @@ async function executeResilientWrites(
           const path = `${w.colName}/${w.id}`;
           const ref = doc(db, w.colName, w.id);
           const existing = docMetaCache.get(path) || null;
-          if (!w.isUpdate) {
-            return setDoc(ref, w.payload);
-          }
           try {
+            if (!w.isUpdate) {
+              return await setDoc(ref, w.payload);
+            }
             return await updateDoc(ref, buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext, existing));
           } catch (err: any) {
             if (isOnlineBrowser()) {
@@ -3218,6 +3279,12 @@ async function executeResilientWrites(
                 return setDoc(ref, {
                   ...w.payload,
                   ownerUid: currentUid,
+                  accessUids: Array.from(
+                    new Set([
+                      currentUid,
+                      ...(Array.isArray(w.payload.accessUids) ? w.payload.accessUids : []),
+                    ])
+                  ).slice(0, 15),
                   createdAt: serverTimestamp(),
                   updatedAt: serverTimestamp(),
                 });
@@ -3723,6 +3790,7 @@ export function subscribeFirestoreState(
 
   const readyFlags = new Set<string>();
   const pendingSnapshotsByKey = new Map<string, boolean>();
+  const fromCacheSnapshotsByKey = new Map<string, boolean>();
   const expectedKeys =
     user.role === 'warga'
       ? ['warga', 'rtPublicSummary']
@@ -3742,6 +3810,9 @@ export function subscribeFirestoreState(
     const online = isOnlineBrowser();
     const allListenersReady = expectedKeys.every((k) => readyFlags.has(k));
     const hasPendingSnap = Array.from(pendingSnapshotsByKey.values()).some(Boolean);
+    const anyFromCache =
+      fromCacheSnapshotsByKey.size === 0 ||
+      expectedKeys.some((k) => fromCacheSnapshotsByKey.get(k) !== false);
     const hasPendingWrites = hasPendingSnap || activePendingWriteCount > 0;
     const err = latestAsyncWriteError || lastListenerError;
 
@@ -3763,7 +3834,7 @@ export function subscribeFirestoreState(
       onStatusChange?.(true, null, 'pending');
       return;
     }
-    if (allListenersReady) {
+    if (allListenersReady && !anyFromCache) {
       onStatusChange?.(true, null, 'synced');
     } else {
       onStatusChange?.(true, null, 'connecting');
@@ -3785,9 +3856,14 @@ export function subscribeFirestoreState(
   const handleOnline = () => {
     lastListenerError = null;
     computeAndNotifyStatus();
-    if (user.role !== 'warga') {
-      void claimAndSyncManifestDocs().catch(() => {});
-    }
+    void ensureFirestoreNetworkOnline(true)
+      .then(() => {
+        if (user.role !== 'warga') {
+          return claimAndSyncManifestDocs({ force: true });
+        }
+        return 0;
+      })
+      .catch(() => {});
   };
   const handleOffline = () => computeAndNotifyStatus();
 
@@ -3805,13 +3881,14 @@ export function subscribeFirestoreState(
 
   const markReady = (
     key: string,
-    hasPendingWrites: boolean,
+    metadata: { hasPendingWrites: boolean; fromCache: boolean },
     partial: Partial<FirestoreRealtimeSnapshot>,
     emitDataUpdate = true
   ) => {
     if (disposed) return;
     readyFlags.add(key);
-    pendingSnapshotsByKey.set(key, hasPendingWrites);
+    pendingSnapshotsByKey.set(key, metadata.hasPendingWrites);
+    fromCacheSnapshotsByKey.set(key, metadata.fromCache);
     const allListenersReady = expectedKeys.every((k) => readyFlags.has(k));
     const isFirstReady = allListenersReady && !firstReadyEmitted;
     if (isFirstReady) {
@@ -3868,7 +3945,12 @@ export function subscribeFirestoreState(
               updatedAt: tsToIso(d.updatedAt),
             });
           });
-          markReady('warga', snap.metadata.hasPendingWrites, { wargaList: list }, hasChanges);
+          markReady(
+            'warga',
+            { hasPendingWrites: snap.metadata.hasPendingWrites, fromCache: snap.metadata.fromCache },
+            { wargaList: list },
+            hasChanges
+          );
 
           const first = list[0];
           const rt = first ? getWargaRTCode(first, DEFAULT_RT) : extractRTFromScope(user.rtScope);
@@ -3885,14 +3967,22 @@ export function subscribeFirestoreState(
                 lastListenerError = null;
                 if (sumSnap.exists()) {
                   const s = sumSnap.data();
-                  markReady('rtPublicSummary', sumSnap.metadata.hasPendingWrites, {
-                    tahunAktif: Number(s.tahunAktif) || 2026,
-                    pengaturanKas: s.pengaturanKas as PengaturanKas | undefined,
-                    transactions: Array.isArray(s.transactions) ? s.transactions : [],
-                    pengumumanList: Array.isArray(s.pengumuman) ? s.pengumuman : [],
-                  });
+                  markReady(
+                    'rtPublicSummary',
+                    { hasPendingWrites: sumSnap.metadata.hasPendingWrites, fromCache: sumSnap.metadata.fromCache },
+                    {
+                      tahunAktif: Number(s.tahunAktif) || 2026,
+                      pengaturanKas: s.pengaturanKas as PengaturanKas | undefined,
+                      transactions: Array.isArray(s.transactions) ? s.transactions : [],
+                      pengumumanList: Array.isArray(s.pengumuman) ? s.pengumuman : [],
+                    }
+                  );
                 } else {
-                  markReady('rtPublicSummary', sumSnap.metadata.hasPendingWrites, {});
+                  markReady(
+                    'rtPublicSummary',
+                    { hasPendingWrites: sumSnap.metadata.hasPendingWrites, fromCache: sumSnap.metadata.fromCache },
+                    {}
+                  );
                 }
               },
               (err) => {
@@ -3918,161 +4008,296 @@ export function subscribeFirestoreState(
     return cleanup;
   }
 
-  // ADMIN RT or SERVER PUSAT: Refresh admin context if needed & claim manifest docs in background (non-blocking)
+  // ADMIN RT or SERVER PUSAT: Wait for admin context readiness before attaching Watch listeners so auth & listeners never race
   void (async () => {
-    try {
-      if (!activeAdminContext || activeAdminContext.uid !== fbUser.uid) {
-        await refreshAdminContext(fbUser.uid);
-      }
-      await claimAndSyncManifestDocs();
-    } catch {
-      // non-fatal, listeners stay active
-    }
-  })();
+    await ensureAdminContextReady().catch(() => null);
+    if (disposed) return;
 
-  const isDocInScope = (colName: EntityBucket, d: Record<string, any>): boolean => {
-    const ctx = activeAdminContext;
-    if (!ctx) return true;
-    const dRw = normalizeRWCode(d.rw, ctx.rw);
-    if (dRw !== ctx.rw) return false;
-    if (ctx.role === 'server' || ctx.rt === 'SEMUA') return true;
-    const dRt = d.rt === 'SEMUA' ? 'SEMUA' : extractRTFromScope(d.rt, DEFAULT_RT, true);
-    if (colName === 'pengumuman' && dRt === 'SEMUA') return true;
-    return dRt === ctx.rt;
-  };
+    void claimAndSyncManifestDocs().catch(() => {});
 
-  const setupScopedListener = <T extends { id: string; updatedAt?: string }>(
-    colName: EntityBucket,
-    key: keyof FirestoreRealtimeSnapshot,
-    altMatch?: (a: T, b: T) => boolean
-  ) => {
-    const qCol = query(
-      collection(db, colName),
-      where('accessUids', 'array-contains', fbUser.uid)
-    );
-    unsubs.push(
-      onSnapshot(
-        qCol,
-        { includeMetadataChanges: true },
-        (snap) => {
-          lastListenerError = null;
-          const alreadyReady = readyFlags.has(colName);
-          const hasChanges = !alreadyReady || snap.docChanges().length > 0;
-          const items: T[] = [];
-          const rawForReconcile: Array<{ id: string; data: Record<string, any> }> = [];
-          snap.forEach((docSnap) => {
-            const d = docSnap.data();
-            recordMeta(`${colName}/${docSnap.id}`, d, { serverConfirmed: !snap.metadata.fromCache });
-            if (!isDocInScope(colName, d)) return;
-            rawForReconcile.push({ id: docSnap.id, data: d });
-            items.push({
-              ...(d as unknown as T),
-              id: docSnap.id,
-              updatedAt: tsToIso(d.updatedAt),
+    const isDocInScope = (colName: EntityBucket, d: Record<string, any>): boolean => {
+      const ctx = activeAdminContext;
+      if (!ctx) return true;
+      const dRw = normalizeRWCode(d.rw, ctx.rw);
+      if (dRw !== ctx.rw) return false;
+      if (ctx.role === 'server' || ctx.rt === 'SEMUA') return true;
+      const dRt = d.rt === 'SEMUA' ? 'SEMUA' : extractRTFromScope(d.rt, DEFAULT_RT, true);
+      if (colName === 'pengumuman' && dRt === 'SEMUA') return true;
+      return dRt === ctx.rt;
+    };
+
+    const setupScopedListener = <T extends { id: string; updatedAt?: string }>(
+      colName: EntityBucket,
+      key: keyof FirestoreRealtimeSnapshot,
+      altMatch?: (a: T, b: T) => boolean
+    ) => {
+      let currentUnsub: Unsubscribe | null = null;
+      let retryCount = 0;
+
+      const attach = () => {
+        if (disposed) return;
+        const qCol = query(
+          collection(db, colName),
+          where('accessUids', 'array-contains', fbUser.uid)
+        );
+        currentUnsub = onSnapshot(
+          qCol,
+          { includeMetadataChanges: true },
+          (snap) => {
+            lastListenerError = null;
+            retryCount = 0;
+            const alreadyReady = readyFlags.has(colName);
+            const hasChanges = !alreadyReady || snap.docChanges().length > 0;
+            const items: T[] = [];
+            const rawForReconcile: Array<{ id: string; data: Record<string, any> }> = [];
+            snap.forEach((docSnap) => {
+              const d = docSnap.data();
+              recordMeta(`${colName}/${docSnap.id}`, d, { serverConfirmed: !snap.metadata.fromCache });
+              if (!isDocInScope(colName, d)) return;
+              rawForReconcile.push({ id: docSnap.id, data: d });
+              items.push({
+                ...(d as unknown as T),
+                id: docSnap.id,
+                updatedAt: tsToIso(d.updatedAt),
+              });
             });
-          });
-          const deduped = dedupeEntityList(items, [], altMatch);
-          markReady(colName, snap.metadata.hasPendingWrites, { [key]: deduped } as any, hasChanges);
+            const deduped = dedupeEntityList(items, [], altMatch);
+            markReady(
+              colName,
+              { hasPendingWrites: snap.metadata.hasPendingWrites, fromCache: snap.metadata.fromCache },
+              { [key]: deduped } as any,
+              hasChanges
+            );
 
-          if (rawForReconcile.length > 0) {
-            reconcileLoadedDocsWithManifestAndAcls(colName, rawForReconcile).catch(() => {});
+            if (rawForReconcile.length > 0) {
+              reconcileLoadedDocsWithManifestAndAcls(colName, rawForReconcile).catch(() => {});
+            }
+          },
+          (err) => {
+            if (isTargetIdCollisionError(err) && retryCount < 2 && !disposed) {
+              retryCount++;
+              if (currentUnsub) {
+                try {
+                  currentUnsub();
+                } catch {
+                  // ignore
+                }
+                currentUnsub = null;
+              }
+              setTimeout(() => attach(), 300 * retryCount);
+              return;
+            }
+            reportFirestoreError(err, OperationType.GET, colName);
+            lastListenerError = `Gagal menyinkronkan ${colName}: ${err.message}`;
+            readyFlags.add(colName);
+            computeAndNotifyStatus();
+          }
+        );
+      };
+
+      attach();
+      unsubs.push(() => {
+        if (currentUnsub) {
+          try {
+            currentUnsub();
+          } catch {
+            // ignore
+          }
+          currentUnsub = null;
+        }
+      });
+    };
+
+    setupScopedListener<Warga>('warga', 'wargaList', (a, b) =>
+      Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
+    );
+    setupScopedListener<Transaction>('transactions', 'transactions');
+    setupScopedListener<BantuanPemerintah>('bantuan', 'bantuanList');
+    setupScopedListener<PengumumanRT>('pengumuman', 'pengumumanList');
+    setupScopedListener<DokumenPdfWarga>('dokumen', 'dokumenList');
+    setupScopedListener<AdminRTAccount>('adminAccounts', 'adminAccounts', (a, b) =>
+      a.username.toLowerCase() === b.username.toLowerCase()
+    );
+    setupScopedListener<PembaruanBulananRT>('laporanBulanan', 'laporanBulananRT');
+
+    // Settings listener (array-contains + direct fallback getDoc for rt/rw settings)
+    let settingsUnsub: Unsubscribe | null = null;
+    let settingsRetry = 0;
+    const attachSettings = () => {
+      if (disposed) return;
+      settingsUnsub = onSnapshot(
+        query(collection(db, 'settings'), where('accessUids', 'array-contains', fbUser.uid)),
+        { includeMetadataChanges: true },
+        async (snap) => {
+          lastListenerError = null;
+          settingsRetry = 0;
+          const docs = snap.docs.map((d) => {
+            const data = d.data();
+            recordMeta(`settings/${d.id}`, data, { serverConfirmed: !snap.metadata.fromCache });
+            return data;
+          });
+
+          let chosen =
+            docs.find((d) =>
+              activeAdminContext?.role === 'server'
+                ? d.id === `rw_${activeAdminContext.rw}`
+                : d.rt === activeAdminContext?.rt && d.rw === activeAdminContext?.rw
+            ) || docs[0];
+
+          if (!chosen && activeAdminContext && activeAdminContext.rt !== 'SEMUA') {
+            const rtSettingSnap = await getDoc(
+              doc(db, 'settings', `rw_${activeAdminContext.rw}_rt_${activeAdminContext.rt}`)
+            ).catch(() => null);
+            if (rtSettingSnap && rtSettingSnap.exists()) {
+              chosen = rtSettingSnap.data();
+              recordMeta(`settings/${rtSettingSnap.id}`, chosen);
+            }
+          }
+
+          if (!chosen && activeAdminContext) {
+            const globalSnap = await getDoc(doc(db, 'settings', `rw_${activeAdminContext.rw}`)).catch(
+              () => null
+            );
+            if (globalSnap && globalSnap.exists()) {
+              chosen = globalSnap.data();
+              recordMeta(`settings/${globalSnap.id}`, chosen);
+            }
+          }
+
+          if (chosen) {
+            const {
+              accessUids: _a,
+              ownerUid: _o,
+              serverUid: _s,
+              rtAdminUid: _r,
+              createdAt: _c,
+              id: _id,
+              rt: _rt,
+              rw: _rw,
+              rtId: _rtId,
+              rwId: _rwId,
+              ...rest
+            } = chosen;
+            markReady(
+              'settings',
+              { hasPendingWrites: snap.metadata.hasPendingWrites, fromCache: snap.metadata.fromCache },
+              {
+                tahunAktif: Number(chosen.tahunAktif) || 2026,
+                pengaturanKas: {
+                  ...(rest as PengaturanKas),
+                  updatedAt: tsToIso(chosen.updatedAt),
+                },
+              }
+            );
+          } else {
+            markReady(
+              'settings',
+              { hasPendingWrites: snap.metadata.hasPendingWrites, fromCache: snap.metadata.fromCache },
+              {}
+            );
           }
         },
         (err) => {
-          reportFirestoreError(err, OperationType.GET, colName);
-          lastListenerError = `Gagal menyinkronkan ${colName}: ${err.message}`;
-          readyFlags.add(colName);
+          if (isTargetIdCollisionError(err) && settingsRetry < 2 && !disposed) {
+            settingsRetry++;
+            if (settingsUnsub) {
+              try {
+                settingsUnsub();
+              } catch {
+                // ignore
+              }
+              settingsUnsub = null;
+            }
+            setTimeout(() => attachSettings(), 300 * settingsRetry);
+            return;
+          }
+          reportFirestoreError(err, OperationType.GET, 'settings');
+          lastListenerError = `Gagal menyinkronkan settings: ${err.message}`;
+          readyFlags.add('settings');
           computeAndNotifyStatus();
+        }
+      );
+    };
+    attachSettings();
+    unsubs.push(() => {
+      if (settingsUnsub) {
+        try {
+          settingsUnsub();
+        } catch {
+          // ignore
+        }
+        settingsUnsub = null;
+      }
+    });
+
+    // Watch rtManifest for this Admin RT in real time so any cross-account doc added by Server RW or peer RT Admin is claimed immediately
+  const scopedRt =
+    activeAdminContext?.role === 'admin' && activeAdminContext.rt !== 'SEMUA'
+      ? activeAdminContext.rt
+      : user.role === 'admin'
+      ? extractRTFromScope(user.rtScope, DEFAULT_RT)
+      : '';
+  const scopedRw = activeAdminContext?.rw || DEFAULT_RW;
+  if (scopedRt && scopedRt !== 'SEMUA') {
+    unsubs.push(
+      onSnapshot(
+        doc(db, 'rtManifest', `rt_${scopedRt}_rw_${scopedRw}`),
+        async (manifestSnap) => {
+          if (!manifestSnap.exists()) return;
+          const ctx = await ensureAdminContextReady();
+          if (!ctx || ctx.role !== 'admin') return;
+          const docIdsMap: Record<string, string[]> = manifestSnap.data().docIds || {};
+          const missingPatches: Array<{
+            ref: ReturnType<typeof doc>;
+            path: string;
+            patch: Record<string, any>;
+          }> = [];
+          const fetches: Promise<void>[] = [];
+
+          for (const [colNameRaw, ids] of Object.entries(docIdsMap)) {
+            const colName = colNameRaw as EntityBucket;
+            if (!Array.isArray(ids) || !CLAIM_ABLE_COLLECTIONS.includes(colName)) continue;
+            for (const id of ids) {
+              if (!id) continue;
+              const docPath = `${colName}/${id}`;
+              const cached = docMetaCache.get(docPath);
+              if (cached?.accessUids?.includes(ctx.uid)) continue;
+              fetches.push(
+                getDocFromServer(doc(db, colName, id))
+                  .then((snap) => {
+                    if (!snap.exists()) return;
+                    const data = snap.data();
+                    recordMeta(docPath, { ...data, localCreated: true }, { serverConfirmed: true });
+                    if (!isPatchableEntityDoc(colName, id, data, ctx)) return;
+                    const patch = buildAclSyncPatch({
+                      colName,
+                      data,
+                      ctx,
+                      effectiveServerUid: ctx.serverUid,
+                      adminsByRt: ctx.adminsByRt || {},
+                      includeRtAdminUid: true,
+                    });
+                    if (patch) {
+                      missingPatches.push({ ref: doc(db, colName, id), path: docPath, patch });
+                    }
+                  })
+                  .catch(() => {})
+              );
+            }
+          }
+          if (fetches.length > 0) {
+            await Promise.all(fetches);
+            if (missingPatches.length > 0) {
+              await commitDocAccessPatches(missingPatches);
+            }
+          }
+        },
+        () => {
+          // ignore if rtManifest not yet initialized
         }
       )
     );
-  };
-
-  setupScopedListener<Warga>('warga', 'wargaList', (a, b) =>
-    Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
-  );
-  setupScopedListener<Transaction>('transactions', 'transactions');
-  setupScopedListener<BantuanPemerintah>('bantuan', 'bantuanList');
-  setupScopedListener<PengumumanRT>('pengumuman', 'pengumumanList');
-  setupScopedListener<DokumenPdfWarga>('dokumen', 'dokumenList');
-  setupScopedListener<AdminRTAccount>('adminAccounts', 'adminAccounts', (a, b) =>
-    a.username.toLowerCase() === b.username.toLowerCase()
-  );
-  setupScopedListener<PembaruanBulananRT>('laporanBulanan', 'laporanBulananRT');
-
-  // Settings listener (array-contains + direct fallback getDoc for rt/rw settings)
-  unsubs.push(
-    onSnapshot(
-      query(collection(db, 'settings'), where('accessUids', 'array-contains', fbUser.uid)),
-      { includeMetadataChanges: true },
-      async (snap) => {
-        lastListenerError = null;
-        const docs = snap.docs.map((d) => {
-          const data = d.data();
-          recordMeta(`settings/${d.id}`, data, { serverConfirmed: !snap.metadata.fromCache });
-          return data;
-        });
-
-        let chosen =
-          docs.find((d) =>
-            activeAdminContext?.role === 'server'
-              ? d.id === `rw_${activeAdminContext.rw}`
-              : d.rt === activeAdminContext?.rt && d.rw === activeAdminContext?.rw
-          ) || docs[0];
-
-        if (!chosen && activeAdminContext && activeAdminContext.rt !== 'SEMUA') {
-          const rtSettingSnap = await getDoc(
-            doc(db, 'settings', `rw_${activeAdminContext.rw}_rt_${activeAdminContext.rt}`)
-          ).catch(() => null);
-          if (rtSettingSnap && rtSettingSnap.exists()) {
-            chosen = rtSettingSnap.data();
-            recordMeta(`settings/${rtSettingSnap.id}`, chosen);
-          }
-        }
-
-        if (!chosen && activeAdminContext) {
-          const globalSnap = await getDoc(doc(db, 'settings', `rw_${activeAdminContext.rw}`)).catch(
-            () => null
-          );
-          if (globalSnap && globalSnap.exists()) {
-            chosen = globalSnap.data();
-            recordMeta(`settings/${globalSnap.id}`, chosen);
-          }
-        }
-
-        if (chosen) {
-          const {
-            accessUids: _a,
-            ownerUid: _o,
-            serverUid: _s,
-            rtAdminUid: _r,
-            createdAt: _c,
-            id: _id,
-            rt: _rt,
-            rw: _rw,
-            rtId: _rtId,
-            rwId: _rwId,
-            ...rest
-          } = chosen;
-          markReady('settings', snap.metadata.hasPendingWrites, {
-            tahunAktif: Number(chosen.tahunAktif) || 2026,
-            pengaturanKas: {
-              ...(rest as PengaturanKas),
-              updatedAt: tsToIso(chosen.updatedAt),
-            },
-          });
-        } else {
-          markReady('settings', snap.metadata.hasPendingWrites, {});
-        }
-      },
-      (err) => {
-        reportFirestoreError(err, OperationType.GET, 'settings');
-        lastListenerError = `Gagal menyinkronkan settings: ${err.message}`;
-        readyFlags.add('settings');
-        computeAndNotifyStatus();
-      }
-    )
-  );
+  }
 
   // Watch rtRegistry & systemMeta/serverLock changes -> only run background claim when serverUid or scoped RT admins actually change
   const rw = activeAdminContext?.rw || DEFAULT_RW;
@@ -4141,6 +4366,7 @@ export function subscribeFirestoreState(
       }
     )
   );
+  })();
 
   return cleanup;
 }

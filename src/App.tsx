@@ -53,7 +53,7 @@ import { FloatingNotification } from './components/FloatingNotification';
 import { KirimLaporanModal } from './components/KirimLaporanModal';
 import { UpgradeKKModal } from './components/UpgradeKKModal';
 import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db, waitForPendingWrites } from './lib/firebase';
+import { auth, db, ensureFirestoreNetworkOnline, waitForPendingWrites } from './lib/firebase';
 import {
   AuthUser,
   Transaction,
@@ -109,6 +109,8 @@ import {
   testFirestoreConnection,
   getPendingServerWriteCount,
   clearLatestAsyncWriteError,
+  getActiveAdminContext,
+  ensureAdminContextReady,
   toValidDocId,
 } from './utils/firebaseSync';
 import {
@@ -122,6 +124,7 @@ import {
   buildServerFilteredViewData,
   getKasKematianBalanceSummary,
   normalizeRTCode,
+  getWargaRTCode,
   doesTransactionBelongToWarga,
   getTransactionRTCode,
   hasWargaCashDiff,
@@ -511,29 +514,88 @@ export default function App() {
       // ignore storage errors
     }
 
-    testFirestoreConnection().then((diag) => {
+    let wasDisconnected = typeof navigator !== 'undefined' && navigator.onLine === false;
+
+    const runReconnectCycle = async (recoverNetwork = false) => {
+      if (!active) return;
+      if (recoverNetwork && wasDisconnected) {
+        await ensureFirestoreNetworkOnline(true);
+      }
+      const diag = await testFirestoreConnection();
       if (!active) return;
       setServerConnected(diag.connected);
-      if (!diag.connected && diag.message) {
+      wasDisconnected = !diag.connected;
+      if (diag.connected) {
+        setCloudError((prev) =>
+          prev && (prev.includes('Firestore') || prev.includes('koneksi') || prev.includes('Firebase') || prev.includes('offline'))
+            ? null
+            : prev
+        );
+        if (auth.currentUser) {
+          await ensureAdminContextReady().catch(() => null);
+          await waitForPendingWrites(db).catch(() => {});
+          await flushPendingOps().catch(() => {});
+          if (currentUserRef.current?.role !== 'warga') {
+            await claimAndSyncManifestDocs({ force: true }).catch(() => {});
+          }
+        }
+      } else if (diag.message) {
         setCloudError(diag.message);
+        setSseConnected(false);
       }
-    });
+    };
+
+    const initialProbeTimer = setTimeout(() => {
+      if (!active) return;
+      void runReconnectCycle(false);
+    }, 600);
 
     const healthCheckInterval = setInterval(async () => {
       if (!active) return;
       const diag = await testFirestoreConnection();
       if (!active) return;
       setServerConnected(diag.connected);
+      wasDisconnected = !diag.connected;
       if (diag.connected) {
         setCloudError((prev) =>
-          prev && (prev.includes('Firestore') || prev.includes('koneksi') || prev.includes('Firebase'))
+          prev && (prev.includes('Firestore') || prev.includes('koneksi') || prev.includes('Firebase') || prev.includes('offline'))
             ? null
             : prev
         );
       } else if (diag.message) {
         setCloudError(diag.message);
+        setSseConnected(false);
       }
     }, 30000);
+
+    let lastResumeTriggerAt = 0;
+    const handleResumeOrOnline = (fromOfflineEvent = false) => {
+      if (fromOfflineEvent) {
+        wasDisconnected = true;
+      }
+      const now = Date.now();
+      if (!fromOfflineEvent && now - lastResumeTriggerAt < 4000) return;
+      lastResumeTriggerAt = now;
+      void runReconnectCycle(true);
+    };
+    const handleOnlineEvent = () => handleResumeOrOnline(true);
+    const handleFocusEvent = () => handleResumeOrOnline(false);
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        handleResumeOrOnline(false);
+      }
+    };
+    const handleBrowserOffline = () => {
+      if (!active) return;
+      wasDisconnected = true;
+      setServerConnected(false);
+      setSseConnected(false);
+    };
+
+    window.addEventListener('online', handleOnlineEvent);
+    window.addEventListener('focus', handleFocusEvent);
+    window.addEventListener('offline', handleBrowserOffline);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     const unsubscribeAuth = onAuthStateChanged(auth, async (fbUser) => {
       if (!active) return;
@@ -560,7 +622,6 @@ export default function App() {
       if (hintUser && !currentUserRef.current) {
         setCurrentUser(hintUser);
         setIsLoginModalOpen(false);
-        setServerConnected(true);
         setCurrentView(
           hintUser.role === 'server'
             ? 'server-kontrol'
@@ -579,7 +640,6 @@ export default function App() {
         const roleChanged = currentUserRef.current?.role !== resolved.role;
         setCurrentUser(resolved);
         setIsLoginModalOpen(false);
-        setServerConnected(true);
         if (!hadUser || roleChanged) {
           setCurrentView(
             resolved.role === 'server'
@@ -598,7 +658,12 @@ export default function App() {
 
     return () => {
       active = false;
+      clearTimeout(initialProbeTimer);
       clearInterval(healthCheckInterval);
+      window.removeEventListener('online', handleOnlineEvent);
+      window.removeEventListener('focus', handleFocusEvent);
+      window.removeEventListener('offline', handleBrowserOffline);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       unsubscribeAuth();
     };
   }, []);
@@ -697,13 +762,6 @@ export default function App() {
         if (isFirstReady) {
           clearTimeout(readyFallbackTimer);
           setDataLoadedReady(true);
-          setSseConnected(true);
-          setServerConnected(true);
-          if (readPendingOps().length === 0) {
-            setSyncStatus('synced');
-          } else {
-            setSyncStatus('connecting');
-          }
 
           // Safe deduplicated migration: ALWAYS inspect legacy local cache (never delete until verified 0 failures)
           if (
@@ -844,7 +902,7 @@ export default function App() {
       clearTimeout(readyFallbackTimer);
       unsubFirestore();
     };
-  }, [currentUser?.role, currentUser?.username, currentUser?.noKK, currentUser?.wargaId, firebaseUid]);
+  }, [firebaseUid, currentUser?.role, currentUser?.rtScope, currentUser?.noKK, currentUser?.wargaId]);
 
   // 3. Background Firebase Auth Provisioning for Warga KK missing linkedUid
   useEffect(() => {
@@ -866,9 +924,13 @@ export default function App() {
   // 4. Safe one-time reconciliation for pre-existing transactions -> Warga accounts (non-destructive)
   const lastTxWargaBackfillSigRef = useRef<string>('');
   useEffect(() => {
-    if (!dataLoadedReady || !currentUser || !auth.currentUser) return;
+    if (!dataLoadedReady || !sseConnected || !currentUser || !auth.currentUser) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     if (currentUser.role !== 'admin' && currentUser.role !== 'server') return;
     if (wargaList.length === 0 || transactions.length === 0) return;
+
+    const ctx = getActiveAdminContext();
+    if (!ctx || ctx.uid !== auth.currentUser.uid) return;
 
     const sig = `${tahunAktif}:${wargaList.length}:${transactions.length}:${transactions[0]?.id || ''}`;
     if (lastTxWargaBackfillSigRef.current === sig) return;
@@ -877,6 +939,9 @@ export default function App() {
     const nowIso = new Date().toISOString();
     const changedWarga: Warga[] = [];
     const nextWargaList = wargaList.map((w) => {
+      if (ctx.role === 'admin' && ctx.rt !== 'SEMUA' && getWargaRTCode(w, ctx.rt) !== ctx.rt) {
+        return w;
+      }
       const reconciled = reconcileWargaCashFromTransactions({
         warga: w,
         transactions,
@@ -901,17 +966,20 @@ export default function App() {
     latestStateRef.current = { ...latestStateRef.current, wargaList: nextWargaList };
 
     const timer = setTimeout(() => {
-      void bulkSaveWargaAndBantuanDocs(changedWarga, [])
-        .then(async (res) => {
-          if (res.ok && !res.pending) {
-            await triggerPublicSummarySync({ wargaList: nextWargaList });
-          }
+      void ensureAdminContextReady()
+        .then((readyCtx) => {
+          if (!readyCtx) return;
+          return bulkSaveWargaAndBantuanDocs(changedWarga, []).then(async (res) => {
+            if (res.ok && !res.pending) {
+              await triggerPublicSummarySync({ wargaList: nextWargaList });
+            }
+          });
         })
         .catch(() => {});
     }, 350);
 
     return () => clearTimeout(timer);
-  }, [dataLoadedReady, currentUser?.role, tahunAktif, wargaList.length, transactions.length]);
+  }, [dataLoadedReady, sseConnected, currentUser?.role, tahunAktif, wargaList.length, transactions.length]);
 
   const handleForceSyncNow = async () => {
     setCloudSyncBusy(true);
@@ -919,6 +987,7 @@ export default function App() {
     setCloudError(null);
     clearLatestAsyncWriteError();
     try {
+      await ensureFirestoreNetworkOnline(true);
       const diag = await testFirestoreConnection();
       setServerConnected(diag.connected);
       if (!diag.connected) {
