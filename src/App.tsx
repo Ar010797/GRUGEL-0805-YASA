@@ -90,6 +90,7 @@ import {
   fetchCloudSqlMigrationSnapshot,
   hardResetFirestoreData,
   saveWargaDoc,
+  saveWargaWithLinkedSyncBatch,
   deleteWargaDoc,
   updateWargaSelfDoc,
   bulkSaveWargaAndBantuanDocs,
@@ -133,6 +134,7 @@ import {
   buildServerFilteredViewData,
   getKasKematianBalanceSummary,
   normalizeRTCode,
+  normalizeRWCode,
   getWargaRTCode,
   doesTransactionBelongToWarga,
   getTransactionRTCode,
@@ -273,6 +275,7 @@ export default function App() {
   const [txModalType, setTxModalType] = useState<'masuk' | 'keluar' | 'kematian'>('masuk');
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [isWargaModalOpen, setIsWargaModalOpen] = useState<boolean>(false);
+  const [editingWarga, setEditingWarga] = useState<Warga | null>(null);
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState<boolean>(false);
   const [upgradeTargetWarga, setUpgradeTargetWarga] = useState<Warga | null>(null);
   const [isPengumumanModalOpen, setIsPengumumanModalOpen] = useState<boolean>(false);
@@ -518,7 +521,20 @@ export default function App() {
         return { remaining: ops.length, lastError: 'Perangkat sedang offline. Menunggu koneksi kembali.' };
       }
 
-      await ensureAdminContextReady().catch(() => null);
+      const readyCtx = await ensureAdminContextReady().catch(() => null);
+      if (auth.currentUser && currentUserRef.current?.role !== 'warga' && !readyCtx) {
+        if (retryAttemptRef.current < 5) {
+          retryAttemptRef.current = retryAttemptRef.current + 1;
+          schedulePendingRetry();
+        }
+        if (isMountedRef.current) {
+          setSyncStatus('pending');
+        }
+        return {
+          remaining: ops.length,
+          lastError: 'Menunggu sinkronisasi sesi otorisasi Admin/Server aktif...',
+        };
+      }
 
       const stillFailed: PendingSyncOp[] = [];
       let lastError: string | undefined;
@@ -2239,9 +2255,29 @@ export default function App() {
       return { wargaList: currentWarga, changedWarga: [], pending: false };
     }
 
+    const adminCtx = getActiveAdminContext();
+    const scopedAdminRT =
+      currentUserRef.current?.role === 'admin'
+        ? (adminCtx?.rt && adminCtx.rt !== 'SEMUA'
+            ? adminCtx.rt
+            : normalizeRTCode(currentUserRef.current.rtScope))
+        : '';
+    const scopedAdminRW =
+      currentUserRef.current?.role === 'admin' ? adminCtx?.rw || '' : '';
+
     const changedWarga: Warga[] = [];
     const nextWargaList = currentWarga.map((w) => {
       if (!matchedIds.has(w.id)) return w;
+      if (currentUserRef.current?.role === 'admin') {
+        const wRT = getWargaRTCode(w, scopedAdminRT || '');
+        const wRW = normalizeRWCode(w.rw) || scopedAdminRW;
+        if (scopedAdminRT && scopedAdminRT !== 'SEMUA' && wRT && wRT !== scopedAdminRT) {
+          return w;
+        }
+        if (scopedAdminRW && wRW && wRW !== scopedAdminRW) {
+          return w;
+        }
+      }
       const reconciled = reconcileWargaCashFromTransactions({
         warga: w,
         transactions: nextTransactions,
@@ -2613,17 +2649,42 @@ export default function App() {
     });
   };
 
+  const handleOpenNewWarga = () => {
+    setEditingWarga(null);
+    setIsWargaModalOpen(true);
+  };
+
+  const handleOpenEditWarga = (target: Warga) => {
+    if (currentUser?.role === 'admin' && currentUser.rtScope) {
+      const assignedRT = normalizeRTCode(currentUser.rtScope);
+      const targetRT = getWargaRTCode(target, assignedRT);
+      if (assignedRT && assignedRT !== 'SEMUA' && targetRT && targetRT !== assignedRT) {
+        setCloudError(
+          `Admin RT ${assignedRT} tidak memiliki izin mengubah data warga milik RT ${targetRT}.`
+        );
+        return;
+      }
+    }
+    setEditingWarga(target);
+    setIsWargaModalOpen(true);
+  };
+
   // Add Resident
-  const handleSaveWarga = async (w: Omit<Warga, 'id' | 'no'>) => {
+  const handleSaveWarga = async (w: Omit<Warga, 'id' | 'no'>): Promise<FirestoreWriteResult> => {
     const prevWarga = latestStateRef.current.wargaList;
     const nowIso = new Date().toISOString();
+    const assignedAdminRT =
+      currentUser?.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '';
     const fallbackRT =
       currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
         ? selectedServerRT
-        : pengaturanKas.profilRT?.namaRT || '08';
+        : assignedAdminRT || pengaturanKas.profilRT?.namaRT || '08';
     const newW: Warga = {
       ...w,
-      rt: w.rt || fallbackRT,
+      rt:
+        currentUser?.role === 'admin' && assignedAdminRT
+          ? assignedAdminRT
+          : normalizeRTCode(w.rt) || fallbackRT,
       id: toValidDocId('w_' + Date.now(), 'w'),
       no: prevWarga.length + 1,
       statusIuran: w.statusIuran || 'Belum',
@@ -2652,8 +2713,235 @@ export default function App() {
       results: [res],
       rollback,
       fallbackError: 'Gagal menyimpan data warga ke Cloud Firestore.',
-      onConfirmed: () => triggerPublicSummarySync({ wargaList: nextWarga }),
+      onConfirmed: () => {
+        setRolloverNotice(
+          `Data warga & KK "${newW.nama}" berhasil ditambahkan dan tersimpan ke Cloud Firestore.`
+        );
+        setTimeout(() => setRolloverNotice(null), 6000);
+        return triggerPublicSummarySync({ wargaList: nextWarga });
+      },
     });
+    if (res.ok && res.pending) {
+      setRolloverNotice(
+        `Data warga & KK "${newW.nama}" disimpan sementara dan menunggu sinkronisasi otomatis ke server.`
+      );
+      setTimeout(() => setRolloverNotice(null), 6000);
+    }
+    return res;
+  };
+
+  // Update Resident / Kepala Keluarga / Susunan Anggota KK
+  const handleUpdateWarga = async (updatedWarga: Warga): Promise<FirestoreWriteResult> => {
+    const prevWarga = latestStateRef.current.wargaList;
+    const prevTxs = latestStateRef.current.transactions;
+    const prevBantuan = latestStateRef.current.bantuanList;
+    const oldWarga = prevWarga.find((w) => w.id === updatedWarga.id);
+
+    if (!oldWarga) {
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'not-found',
+        message: 'Data warga yang akan diubah tidak ditemukan.',
+      };
+    }
+
+    const assignedAdminRT =
+      currentUser?.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '';
+    const oldRT = getWargaRTCode(oldWarga, assignedAdminRT || pengaturanKas.profilRT?.namaRT || '08');
+
+    if (currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA' && oldRT !== assignedAdminRT) {
+      const msg = `Admin RT ${assignedAdminRT} tidak memiliki izin mengubah data warga milik RT ${oldRT}.`;
+      setCloudError(msg);
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'permission-denied',
+        message: msg,
+      };
+    }
+
+    const effectiveRT =
+      currentUser?.role === 'server'
+        ? normalizeRTCode(updatedWarga.rt) || oldRT
+        : oldRT;
+    const effectiveRW =
+      currentUser?.role === 'server'
+        ? updatedWarga.rw || oldWarga.rw || pengaturanKas.profilRT?.namaRW || '05'
+        : oldWarga.rw || pengaturanKas.profilRT?.namaRW || '05';
+
+    const nowIso = new Date().toISOString();
+    const cleanedMembers = Array.isArray(updatedWarga.anggotaKeluarga)
+      ? updatedWarga.anggotaKeluarga
+      : oldWarga.anggotaKeluarga || [];
+
+    const finalWarga: Warga = {
+      ...oldWarga,
+      ...updatedWarga,
+      id: oldWarga.id,
+      no: oldWarga.no,
+      rt: effectiveRT,
+      rw: effectiveRW,
+      jumlahJiwa:
+        cleanedMembers.length > 0
+          ? cleanedMembers.length
+          : updatedWarga.jumlahJiwa || oldWarga.jumlahJiwa || 1,
+      anggotaKeluarga: cleanedMembers,
+      statusIuran: updatedWarga.statusIuran || oldWarga.statusIuran || 'Belum',
+      statusIuranPerTahun: {
+        ...(oldWarga.statusIuranPerTahun || {}),
+        [tahunAktif]: updatedWarga.statusIuran || oldWarga.statusIuran || 'Belum',
+      },
+      pin: updatedWarga.pin || oldWarga.pin || '123456',
+      riwayatPerubahanKK: oldWarga.riwayatPerubahanKK,
+      updatedAt: nowIso,
+    };
+
+    const oldNamaLower = String(oldWarga.nama || '').trim().toLowerCase();
+    const oldNoKK = String(oldWarga.noKK || '').trim();
+    const scopeChanged =
+      oldNamaLower !== String(finalWarga.nama || '').trim().toLowerCase() ||
+      oldNoKK !== String(finalWarga.noKK || '').trim() ||
+      oldRT !== effectiveRT ||
+      (oldWarga.rw || '05') !== effectiveRW;
+
+    const modifiedTxs: Transaction[] = [];
+    const nextTxs = scopeChanged
+      ? prevTxs.map((t) => {
+          const matchesId = Boolean(t.residentId && t.residentId === finalWarga.id);
+          const matchesKK = Boolean(oldNoKK && t.noKK && t.noKK === oldNoKK);
+          const txNamaLower = String(t.namaWarga || '').trim().toLowerCase();
+          const txSameScope =
+            (!t.residentId || t.residentId === finalWarga.id) &&
+            (!oldNoKK || !t.noKK || t.noKK === oldNoKK) &&
+            getTransactionRTCode(t, prevWarga, oldRT) === oldRT;
+          const matchesHeadName = Boolean(oldNamaLower && txNamaLower === oldNamaLower && txSameScope);
+
+          if (matchesId || matchesKK || matchesHeadName) {
+            const nextNamaWarga =
+              matchesHeadName || (!t.namaWarga && matchesKK) ? finalWarga.nama : t.namaWarga;
+            const nextRtScope =
+              oldRT !== effectiveRT || (oldWarga.rw || '05') !== effectiveRW || !t.rtScope
+                ? `RT ${effectiveRT} RW ${effectiveRW}`
+                : t.rtScope;
+            const nextTx: Transaction = {
+              ...t,
+              residentId: finalWarga.id,
+              noKK: finalWarga.noKK,
+              namaWarga: nextNamaWarga,
+              rtScope: nextRtScope,
+              updatedAt: nowIso,
+            };
+            modifiedTxs.push(nextTx);
+            return nextTx;
+          }
+          return t;
+        })
+      : prevTxs;
+
+    const modifiedBantuan: BantuanPemerintah[] = [];
+    const nextBantuan = scopeChanged
+      ? prevBantuan.map((b) => {
+          const matchesKK = Boolean(oldNoKK && b.noKK && b.noKK === oldNoKK);
+          const bNamaLower = String(b.namaPenerima || '').trim().toLowerCase();
+          const bantuanSameScope =
+            (!oldNoKK || !b.noKK || b.noKK === oldNoKK) &&
+            (!b.rtScope || normalizeRTCode(b.rtScope) === oldRT);
+          const matchesHeadName = Boolean(oldNamaLower && bNamaLower === oldNamaLower && bantuanSameScope);
+
+          if (matchesKK || matchesHeadName) {
+            const nextB: BantuanPemerintah = {
+              ...b,
+              noKK: finalWarga.noKK,
+              namaPenerima: matchesHeadName ? finalWarga.nama : b.namaPenerima,
+              rtScope:
+                oldRT !== effectiveRT || (oldWarga.rw || '05') !== effectiveRW || !b.rtScope
+                  ? `RT ${effectiveRT} RW ${effectiveRW}`
+                  : b.rtScope,
+              updatedAt: nowIso,
+            };
+            modifiedBantuan.push(nextB);
+            return nextB;
+          }
+          return b;
+        })
+      : prevBantuan;
+
+    const nextWargaList = prevWarga.map((w) => (w.id === finalWarga.id ? finalWarga : w));
+    setWargaList(nextWargaList);
+    if (modifiedTxs.length > 0) setTransactions(nextTxs);
+    if (modifiedBantuan.length > 0) setBantuanList(nextBantuan);
+    latestStateRef.current = {
+      ...latestStateRef.current,
+      wargaList: nextWargaList,
+      transactions: nextTxs,
+      bantuanList: nextBantuan,
+    };
+    setSyncStatus('pending');
+
+    const ops: PendingSyncOp[] = [
+      { opKey: `warga:${finalWarga.id}`, kind: 'saveWarga', payload: finalWarga },
+      ...modifiedTxs.map((tx) => ({ opKey: `tx:${tx.id}`, kind: 'saveTx' as const, payload: tx })),
+      ...modifiedBantuan.map((b) => ({ opKey: `bantuan:${b.id}`, kind: 'saveBantuan' as const, payload: b })),
+    ];
+
+    const rollback = () => {
+      setWargaList(prevWarga);
+      setTransactions(prevTxs);
+      setBantuanList(prevBantuan);
+      latestStateRef.current = {
+        ...latestStateRef.current,
+        wargaList: prevWarga,
+        transactions: prevTxs,
+        bantuanList: prevBantuan,
+      };
+    };
+
+    const onConfirmedAction = () => {
+      setRolloverNotice(
+        `Data warga & KK "${finalWarga.nama}" (${finalWarga.jumlahJiwa} jiwa) berhasil diperbarui dan tersimpan ke Cloud Firestore.`
+      );
+      setTimeout(() => setRolloverNotice(null), 6000);
+      return triggerPublicSummarySync({
+        wargaList: latestStateRef.current.wargaList,
+        transactions: latestStateRef.current.transactions,
+      });
+    };
+
+    const onBatchSettled = (settledRes: FirestoreWriteResult) => {
+      if (!isMountedRef.current) return;
+      void settleWriteBatch({
+        ops,
+        results: ops.map(() => settledRes),
+        rollback,
+        fallbackError: 'Gagal menyimpan pembaruan data warga ke Cloud Firestore.',
+        onConfirmed: onConfirmedAction,
+      });
+    };
+
+    const res = await saveWargaWithLinkedSyncBatch({
+      warga: finalWarga,
+      relatedTxs: modifiedTxs,
+      relatedBantuan: modifiedBantuan,
+      onSettled: onBatchSettled,
+    });
+
+    await settleWriteBatch({
+      ops,
+      results: ops.map(() => res),
+      rollback,
+      fallbackError: 'Gagal menyimpan pembaruan data warga ke Cloud Firestore.',
+      onConfirmed: onConfirmedAction,
+    });
+
+    if (res.ok && res.pending) {
+      setRolloverNotice(
+        `Pembaruan data warga "${finalWarga.nama}" dalam antrean sinkronisasi otomatis ke server.`
+      );
+      setTimeout(() => setRolloverNotice(null), 6000);
+    }
+
+    return res;
   };
 
   // Bulk Import Excel: Grouped Warga + Anggota Keluarga + Penerimaan Bantuan in 1 click
@@ -2666,13 +2954,42 @@ export default function App() {
     const nonce = Math.random().toString(36).slice(2, 6);
     const nowIso = new Date().toISOString();
 
+    const assignedAdminRT =
+      currentUser?.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '';
+    const rtScopeRwMatch =
+      currentUser?.role === 'admin'
+        ? currentUser.rtScope?.match(/RW[\s.\-:_]*0*([0-9]+)/i)?.[1]
+        : '';
+    const assignedAdminRW =
+      (rtScopeRwMatch ? normalizeRWCode(rtScopeRwMatch) : '') ||
+      normalizeRWCode(pengaturanKas.profilRT?.namaRW) ||
+      '05';
+    const rawFallbackRT =
+      currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
+        ? normalizeRTCode(selectedServerRT)
+        : assignedAdminRT || normalizeRTCode(pengaturanKas.profilRT?.namaRT) || '08';
+    const fallbackRT = rawFallbackRT && rawFallbackRT !== 'SEMUA' ? rawFallbackRT : '08';
+
     const currentWarga = latestStateRef.current.wargaList || [];
     const updatedWarga = [...currentWarga];
     const changedWargaToSave: Warga[] = [];
+    const knownNewIds = new Set<string>();
     let addedKKCount = 0;
     let updatedKKCount = 0;
 
     importedWarga.forEach((incoming, idx) => {
+      const candidateRt = normalizeRTCode(incoming.rt);
+      const scopedRt =
+        currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA'
+          ? assignedAdminRT
+          : candidateRt && candidateRt !== 'SEMUA'
+            ? candidateRt
+            : fallbackRT;
+      const scopedRw =
+        currentUser?.role === 'admin'
+          ? assignedAdminRW
+          : normalizeRWCode(incoming.rw) || assignedAdminRW || '05';
+
       const existingIndex = incoming.noKK
         ? updatedWarga.findIndex((w) => w.noKK === incoming.noKK)
         : updatedWarga.findIndex((w) => w.nama.toLowerCase() === incoming.nama.toLowerCase());
@@ -2680,6 +2997,28 @@ export default function App() {
       if (existingIndex >= 0) {
         if (options.mergeExisting) {
           const existing = updatedWarga[existingIndex];
+          const existingRt = normalizeRTCode(existing.rt);
+          if (
+            currentUser?.role === 'admin' &&
+            assignedAdminRT &&
+            assignedAdminRT !== 'SEMUA' &&
+            existingRt &&
+            existingRt !== assignedAdminRT
+          ) {
+            return;
+          }
+          const mergedRt =
+            currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA'
+              ? assignedAdminRT
+              : candidateRt && candidateRt !== 'SEMUA'
+                ? candidateRt
+                : existingRt && existingRt !== 'SEMUA'
+                  ? existingRt
+                  : fallbackRT;
+          const mergedRw =
+            currentUser?.role === 'admin'
+              ? assignedAdminRW
+              : normalizeRWCode(incoming.rw) || normalizeRWCode(existing.rw) || scopedRw;
           const nextStatus = incoming.statusIuran || existing.statusIuran || 'Belum';
           const mergedItem: Warga = {
             ...existing,
@@ -2687,8 +3026,8 @@ export default function App() {
             noKK: incoming.noKK || existing.noKK,
             nik: incoming.nik || existing.nik,
             noRumah: incoming.noRumah || existing.noRumah,
-            rt: incoming.rt || existing.rt,
-            rw: incoming.rw || existing.rw,
+            rt: mergedRt,
+            rw: mergedRw,
             alamat: incoming.alamat || existing.alamat,
             kodePos: incoming.kodePos || existing.kodePos,
             jenisKelamin: incoming.jenisKelamin || existing.jenisKelamin,
@@ -2713,10 +3052,12 @@ export default function App() {
           updatedKKCount++;
         }
       } else {
-        const assignedId = `w_${baseTime}_${idx}_${nonce}`;
+        const assignedId = toValidDocId(`w_${baseTime}_${idx}_${nonce}`, 'w');
         const newWarga: Warga = {
           ...incoming,
           id: assignedId,
+          rt: scopedRt,
+          rw: scopedRw,
           no: updatedWarga.length + 1,
           statusIuran: incoming.statusIuran || 'Belum',
           statusIuranPerTahun: { [tahunAktif]: incoming.statusIuran || 'Belum' },
@@ -2725,6 +3066,7 @@ export default function App() {
         };
         updatedWarga.push(newWarga);
         changedWargaToSave.push(newWarga);
+        knownNewIds.add(assignedId);
         addedKKCount++;
       }
     });
@@ -2743,17 +3085,42 @@ export default function App() {
           existing.tanggal === b.tanggal
       );
       if (!isDuplicate) {
-        const assignedBId = `b_${baseTime}_${idx}_${nonce}`;
+        const assignedBId = toValidDocId(`b_${baseTime}_${idx}_${nonce}`, 'b');
+        const parsedBantuanRt = normalizeRTCode(b.rtScope);
+        const safeBantuanRt =
+          currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA'
+            ? assignedAdminRT
+            : parsedBantuanRt && parsedBantuanRt !== 'SEMUA'
+              ? parsedBantuanRt
+              : fallbackRT;
         const item: BantuanPemerintah = {
           ...b,
           id: assignedBId,
+          rtScope: `RT ${safeBantuanRt} RW ${assignedAdminRW}`,
           updatedAt: nowIso,
         };
         nextBantuanList.unshift(item);
         newBantuanToSave.push(item);
+        knownNewIds.add(assignedBId);
         addedBantuanCount++;
       }
     });
+
+    const bulkOps: PendingSyncOp[] = [
+      ...changedWargaToSave.map((w) => ({ opKey: `warga:${w.id}`, kind: 'saveWarga' as const, payload: w })),
+      ...newBantuanToSave.map((b) => ({ opKey: `bantuan:${b.id}`, kind: 'saveBantuan' as const, payload: b })),
+    ];
+
+    if (bulkOps.length === 0) {
+      setRolloverNotice('Tidak ada data baru untuk diimpor (seluruh KK & bantuan pada file sudah ada).');
+      setTimeout(() => setRolloverNotice(null), 5000);
+      return;
+    }
+
+    const totalJiwa = importedWarga.reduce(
+      (sum, w) => sum + (w.anggotaKeluarga?.length || w.jumlahJiwa || 1),
+      0
+    );
 
     setSyncStatus('pending');
     setWargaList(updatedWarga);
@@ -2762,11 +3129,10 @@ export default function App() {
       setBantuanList(nextBantuanList);
       latestStateRef.current = { ...latestStateRef.current, bantuanList: nextBantuanList };
     }
+    setRolloverNotice(
+      `Menyimpan ${addedKKCount + updatedKKCount} KK (${totalJiwa} jiwa)${addedBantuanCount > 0 ? ` dan ${addedBantuanCount} data bantuan` : ''} ke Cloud Firestore...`
+    );
 
-    const bulkOps: PendingSyncOp[] = [
-      ...changedWargaToSave.map((w) => ({ opKey: `warga:${w.id}`, kind: 'saveWarga' as const, payload: w })),
-      ...newBantuanToSave.map((b) => ({ opKey: `bantuan:${b.id}`, kind: 'saveBantuan' as const, payload: b })),
-    ];
     const rollbackBulk = () => {
       setWargaList(currentWarga);
       setBantuanList(currentBantuan);
@@ -2775,40 +3141,55 @@ export default function App() {
         wargaList: currentWarga,
         bantuanList: currentBantuan,
       };
+      setRolloverNotice(null);
     };
 
+    const confirmBulkImport = () => {
+      setRolloverNotice(
+        `Import Excel Berhasil & Tersinkron! ${addedKKCount} KK baru ditambahkan${updatedKKCount > 0 ? `, ${updatedKKCount} KK diperbarui` : ''} (${totalJiwa} jiwa)${addedBantuanCount > 0 ? ` beserta ${addedBantuanCount} data penerimaan bantuan` : ''}.`
+      );
+      setTimeout(() => setRolloverNotice(null), 7000);
+      return triggerPublicSummarySync({ wargaList: latestStateRef.current.wargaList });
+    };
+
+    let bulkFinalSettled = false;
     const onBulkSettled = (settledRes: FirestoreWriteResult) => {
-      if (!isMountedRef.current) return;
+      if (!isMountedRef.current || bulkFinalSettled) return;
+      bulkFinalSettled = true;
       void settleWriteBatch({
         ops: bulkOps,
         results: bulkOps.map(() => settledRes),
         rollback: rollbackBulk,
         fallbackError: 'Gagal menyinkronkan import Excel ke Cloud Firestore.',
-        onConfirmed: () => triggerPublicSummarySync({ wargaList: latestStateRef.current.wargaList }),
+        onConfirmed: confirmBulkImport,
       });
     };
 
-    void bulkSaveWargaAndBantuanDocs(changedWargaToSave, newBantuanToSave, onBulkSettled).then(
-      async (bulkRes) => {
-        if (!isMountedRef.current) return;
-        await settleWriteBatch({
-          ops: bulkOps,
-          results: bulkOps.map(() => bulkRes),
-          rollback: rollbackBulk,
-          fallbackError: 'Gagal menyinkronkan import Excel ke Cloud Firestore.',
-          onConfirmed: () => triggerPublicSummarySync({ wargaList: updatedWarga }),
-        });
+    void bulkSaveWargaAndBantuanDocs(
+      changedWargaToSave,
+      newBantuanToSave,
+      onBulkSettled,
+      knownNewIds
+    ).then(async (bulkRes) => {
+      if (!isMountedRef.current) return;
+      if (!bulkRes.pending) {
+        if (bulkFinalSettled) return;
+        bulkFinalSettled = true;
       }
-    );
-
-    const totalJiwa = importedWarga.reduce(
-      (sum, w) => sum + (w.anggotaKeluarga?.length || w.jumlahJiwa || 1),
-      0
-    );
-    setRolloverNotice(
-      `Import Excel Berhasil! ${addedKKCount} KK baru ditambahkan${updatedKKCount > 0 ? `, ${updatedKKCount} KK diperbarui` : ''} (${totalJiwa} jiwa)${addedBantuanCount > 0 ? ` beserta ${addedBantuanCount} data penerimaan bantuan` : ''}.`
-    );
-    setTimeout(() => setRolloverNotice(null), 7000);
+      await settleWriteBatch({
+        ops: bulkOps,
+        results: bulkOps.map(() => bulkRes),
+        rollback: rollbackBulk,
+        fallbackError: 'Gagal menyinkronkan import Excel ke Cloud Firestore.',
+        onConfirmed: confirmBulkImport,
+      });
+      if (bulkRes.ok && bulkRes.pending && isMountedRef.current) {
+        setRolloverNotice(
+          `Data import Excel (${addedKKCount + updatedKKCount} KK) disimpan lokal dan menunggu sinkronisasi otomatis ke Cloud Firestore.`
+        );
+        setTimeout(() => setRolloverNotice(null), 7000);
+      }
+    });
   };
 
   // Toggle resident fee status
@@ -2857,8 +3238,25 @@ export default function App() {
   };
 
   // Delete resident
-  const handleDeleteWarga = async (id: string) => {
+  const handleDeleteWarga = async (id: string): Promise<FirestoreWriteResult> => {
     const prevWarga = latestStateRef.current.wargaList;
+    const target = prevWarga.find((w) => w.id === id);
+
+    if (target && currentUser?.role === 'admin' && currentUser.rtScope) {
+      const assignedRT = normalizeRTCode(currentUser.rtScope);
+      const targetRT = getWargaRTCode(target, assignedRT);
+      if (assignedRT && assignedRT !== 'SEMUA' && targetRT && targetRT !== assignedRT) {
+        const msg = `Admin RT ${assignedRT} tidak memiliki izin menghapus data warga milik RT ${targetRT}.`;
+        setCloudError(msg);
+        return {
+          ok: false,
+          terminal: true,
+          errorCode: 'permission-denied',
+          message: msg,
+        };
+      }
+    }
+
     const nextWarga = prevWarga.filter((w) => w.id !== id);
     setWargaList(nextWarga);
     latestStateRef.current = { ...latestStateRef.current, wargaList: nextWarga };
@@ -2869,11 +3267,20 @@ export default function App() {
       setWargaList(prevWarga);
       latestStateRef.current = { ...latestStateRef.current, wargaList: prevWarga };
     };
+    const showDeletedNotice = () => {
+      setRolloverNotice(
+        `Data warga "${target?.nama || id}" berhasil dihapus dari server Cloud Firestore.`
+      );
+      setTimeout(() => setRolloverNotice(null), 6000);
+    };
     const onSettled = createPendingSettler({
       ops,
       rollback,
       fallbackError: 'Gagal menghapus data warga di Cloud Firestore.',
-      onConfirmed: () => triggerPublicSummarySync({ wargaList: latestStateRef.current.wargaList }),
+      onConfirmed: () => {
+        showDeletedNotice();
+        return triggerPublicSummarySync({ wargaList: latestStateRef.current.wargaList });
+      },
     });
     const res = await deleteWargaDoc(id, onSettled(0));
     await settleWriteBatch({
@@ -2881,8 +3288,18 @@ export default function App() {
       results: [res],
       rollback,
       fallbackError: 'Gagal menghapus data warga di Cloud Firestore.',
-      onConfirmed: () => triggerPublicSummarySync({ wargaList: nextWarga }),
+      onConfirmed: () => {
+        showDeletedNotice();
+        return triggerPublicSummarySync({ wargaList: nextWarga });
+      },
     });
+    if (res.ok && res.pending) {
+      setRolloverNotice(
+        `Penghapusan data warga "${target?.nama || id}" sedang menunggu koneksi untuk tersinkron ke server.`
+      );
+      setTimeout(() => setRolloverNotice(null), 6000);
+    }
+    return res;
   };
 
   // Upgrade / Perbarui Data KK Warga (Meninggal Dunia, Pisah KK, Pembaruan Berkala)
@@ -2912,27 +3329,87 @@ export default function App() {
     keterangan: string;
     catatSantunanKematian: boolean;
     namaMeninggal?: string;
-  }) => {
+  }): Promise<FirestoreWriteResult> => {
     const prevWarga = latestStateRef.current.wargaList;
     const prevTxs = latestStateRef.current.transactions;
     const prevBantuan = latestStateRef.current.bantuanList;
-    const oldTxs = prevTxs.filter(
-      (t) =>
-        (t.residentId && t.residentId === wargaId) ||
-        (t.noKK && t.noKK === oldWarga.noKK) ||
-        (t.namaWarga && t.namaWarga.toLowerCase() === oldWarga.nama.toLowerCase())
+
+    const existingWarga = prevWarga.find((w) => w.id === wargaId) || oldWarga;
+    if (!existingWarga) {
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'not-found',
+        message: 'Data Kartu Keluarga yang dipilih tidak ditemukan.',
+      };
+    }
+
+    const assignedAdminRT =
+      currentUser?.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '';
+    const oldRT = getWargaRTCode(
+      existingWarga,
+      assignedAdminRT || pengaturanKas.profilRT?.namaRT || '08'
     );
+
+    if (currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA' && oldRT !== assignedAdminRT) {
+      const msg = `Admin RT ${assignedAdminRT} tidak memiliki izin melakukan upgrade KK milik RT ${oldRT}.`;
+      setCloudError(msg);
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'permission-denied',
+        message: msg,
+      };
+    }
+
+    const effectiveRT =
+      currentUser?.role === 'server'
+        ? normalizeRTCode(newKKData.rt) || oldRT
+        : oldRT;
+    const effectiveRW =
+      currentUser?.role === 'server'
+        ? newKKData.rw || existingWarga.rw || pengaturanKas.profilRT?.namaRW || '05'
+        : existingWarga.rw || pengaturanKas.profilRT?.namaRW || '05';
+
+    const oldNamaSafe = String(existingWarga.nama || '').trim();
+    const oldNamaLower = oldNamaSafe.toLowerCase();
+    const oldNoKKSafe = String(existingWarga.noKK || '').trim();
+
+    const oldTxs = prevTxs.filter((t) => {
+      if (t.residentId && t.residentId === wargaId) return true;
+      if (oldNoKKSafe && t.noKK && t.noKK === oldNoKKSafe) return true;
+      const txSameScope =
+        (!t.residentId || t.residentId === wargaId) &&
+        (!oldNoKKSafe || !t.noKK || t.noKK === oldNoKKSafe) &&
+        getTransactionRTCode(t, prevWarga, oldRT) === oldRT;
+      return Boolean(
+        oldNamaLower &&
+          t.namaWarga &&
+          String(t.namaWarga).trim().toLowerCase() === oldNamaLower &&
+          txSameScope
+      );
+    });
     const totalKasDipindahkan = oldTxs.reduce((sum, t) => sum + (t.nominal || 0), 0);
 
-    const oldAnggotaNames = (oldWarga.anggotaKeluarga || []).map((a) => a.nama.trim().toLowerCase());
-    const newAnggotaNames = (newKKData.anggotaKeluarga || []).map((a) => a.nama.trim().toLowerCase());
+    const oldAnggotaNames = (existingWarga.anggotaKeluarga || [])
+      .map((a) => String(a.nama || '').trim().toLowerCase())
+      .filter(Boolean);
+    const newAnggotaNames = (newKKData.anggotaKeluarga || [])
+      .map((a) => String(a.nama || '').trim().toLowerCase())
+      .filter(Boolean);
 
-    const anggotaKeluar = (oldWarga.anggotaKeluarga || [])
-      .filter((a) => !newAnggotaNames.includes(a.nama.trim().toLowerCase()))
+    const anggotaKeluar = (existingWarga.anggotaKeluarga || [])
+      .filter((a) => {
+        const nm = String(a.nama || '').trim().toLowerCase();
+        return nm && !newAnggotaNames.includes(nm);
+      })
       .map((a) => `${a.nama} (${a.hubungan})`);
 
     const anggotaMasuk = (newKKData.anggotaKeluarga || [])
-      .filter((a) => !oldAnggotaNames.includes(a.nama.trim().toLowerCase()))
+      .filter((a) => {
+        const nm = String(a.nama || '').trim().toLowerCase();
+        return nm && !oldAnggotaNames.includes(nm);
+      })
       .map((a) => `${a.nama} (${a.hubungan})`);
 
     const riwayatBaru: RiwayatPerubahanKK = {
@@ -2940,15 +3417,18 @@ export default function App() {
       tanggal: new Date().toISOString().split('T')[0],
       alasan,
       keterangan: keterangan || 'Pembaruan data KK melalui import Excel / edit langsung',
-      noKKLama: oldWarga.noKK,
+      noKKLama: oldNoKKSafe,
       noKKBaru: newKKData.noKK,
-      kepalaKeluargaLama: oldWarga.nama,
+      kepalaKeluargaLama: oldNamaSafe,
       kepalaKeluargaBaru: newKKData.nama,
       anggotaKeluar: anggotaKeluar.length > 0 ? anggotaKeluar : undefined,
       anggotaMasuk: anggotaMasuk.length > 0 ? anggotaMasuk : undefined,
       totalKasDipindahkan,
     };
 
+    const newHeadMember = newKKData.anggotaKeluarga.find(
+      (m) => m.hubungan === 'Kepala Keluarga'
+    );
     const nowIso = new Date().toISOString();
     let updatedWargaItem: Warga | null = null;
     const nextWargaList = prevWarga.map((w) => {
@@ -2957,8 +3437,12 @@ export default function App() {
           ...w,
           nama: newKKData.nama,
           noKK: newKKData.noKK,
-          rt: newKKData.rt || w.rt,
-          rw: newKKData.rw || w.rw,
+          nik:
+            newHeadMember?.nik && newHeadMember.nik.length === 16
+              ? newHeadMember.nik
+              : w.nik,
+          rt: effectiveRT,
+          rw: effectiveRW,
           alamat: newKKData.alamat || w.alamat,
           kodePos: newKKData.kodePos || w.kodePos,
           tanggalDikeluarkan: newKKData.tanggalDikeluarkan || w.tanggalDikeluarkan,
@@ -2976,22 +3460,39 @@ export default function App() {
       return w;
     });
 
+    if (!updatedWargaItem) {
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'not-found',
+        message: 'Data Kartu Keluarga warga tidak ditemukan dalam daftar aktif.',
+      };
+    }
+
     const modifiedTxs: Transaction[] = [];
     let nextTxList = prevTxs.map((t) => {
       const matchesId = Boolean(t.residentId && t.residentId === wargaId);
-      const matchesKK = t.noKK && t.noKK === oldWarga.noKK;
-      const matchesNama =
-        t.namaWarga && t.namaWarga.toLowerCase() === oldWarga.nama.toLowerCase();
+      const matchesKK = Boolean(oldNoKKSafe && t.noKK && t.noKK === oldNoKKSafe);
+      const txNamaLower = String(t.namaWarga || '').trim().toLowerCase();
+      const txSameScope =
+        (!t.residentId || t.residentId === wargaId) &&
+        (!oldNoKKSafe || !t.noKK || t.noKK === oldNoKKSafe) &&
+        getTransactionRTCode(t, prevWarga, oldRT) === oldRT;
+      const matchesHeadName = Boolean(oldNamaLower && txNamaLower === oldNamaLower && txSameScope);
 
-      if (matchesId || matchesKK || matchesNama) {
+      if (matchesId || matchesKK || matchesHeadName) {
+        const baseKet = String(t.keterangan || '');
+        const nextKet =
+          oldNoKKSafe && oldNoKKSafe !== newKKData.noKK && !baseKet.includes('Dialihkan')
+            ? `${baseKet ? baseKet + ' ' : ''}(Dialihkan dari KK lama: ${oldNoKKSafe})`
+            : baseKet;
         const nextTx: Transaction = {
           ...t,
           residentId: wargaId,
           noKK: newKKData.noKK,
-          namaWarga: newKKData.nama,
-          keterangan: t.keterangan.includes('Dialihkan')
-            ? t.keterangan
-            : `${t.keterangan} (Dialihkan dari KK lama: ${oldWarga.noKK})`,
+          namaWarga: matchesHeadName || !t.namaWarga ? newKKData.nama : t.namaWarga,
+          rtScope: `RT ${effectiveRT} RW ${effectiveRW}`,
+          keterangan: nextKet,
           updatedAt: nowIso,
         };
         modifiedTxs.push(nextTx);
@@ -3012,7 +3513,7 @@ export default function App() {
         namaWarga: newKKData.nama,
         noKK: newKKData.noKK,
         tahun: tahunAktif,
-        rtScope: `RT ${newKKData.rt || oldWarga.rt || '08'} RW ${newKKData.rw || oldWarga.rw || '05'}`,
+        rtScope: `RT ${effectiveRT} RW ${effectiveRW}`,
         updatedAt: nowIso,
       };
       nextTxList = [santunanTx, ...nextTxList];
@@ -3021,14 +3522,19 @@ export default function App() {
 
     const modifiedBantuan: BantuanPemerintah[] = [];
     const nextBantuanList = prevBantuan.map((b) => {
-      if (
-        b.noKK === oldWarga.noKK ||
-        b.namaPenerima.toLowerCase() === oldWarga.nama.toLowerCase()
-      ) {
+      const matchesKK = Boolean(oldNoKKSafe && b.noKK && b.noKK === oldNoKKSafe);
+      const bNamaLower = String(b.namaPenerima || '').trim().toLowerCase();
+      const bantuanSameScope =
+        (!oldNoKKSafe || !b.noKK || b.noKK === oldNoKKSafe) &&
+        (!b.rtScope || normalizeRTCode(b.rtScope) === oldRT);
+      const matchesHeadName = Boolean(oldNamaLower && bNamaLower === oldNamaLower && bantuanSameScope);
+
+      if (matchesKK || matchesHeadName) {
         const nextB: BantuanPemerintah = {
           ...b,
-          namaPenerima: newKKData.nama,
+          namaPenerima: matchesHeadName ? newKKData.nama : b.namaPenerima,
           noKK: newKKData.noKK,
+          rtScope: `RT ${effectiveRT} RW ${effectiveRW}`,
           updatedAt: nowIso,
         };
         modifiedBantuan.push(nextB);
@@ -3046,24 +3552,11 @@ export default function App() {
       transactions: nextTxList,
       bantuanList: nextBantuanList,
     };
-    setFloatingAnnouncement({
-      id: 'upgrade_' + Date.now(),
-      judul: 'Data KK Berhasil Diperbarui',
-      isi: `Data KK atas nama ${oldWarga.nama} berhasil diperbarui menjadi ${newKKData.nama} (${newKKData.noKK}). Seluruh riwayat catatan keuangan & kas (${oldTxs.length} transaksi senilai Rp ${totalKasDipindahkan.toLocaleString('id-ID')}) dialihkan utuh tanpa ada yang hilang.`,
-      kategori: 'Umum',
-      tanggal: new Date().toISOString().split('T')[0],
-      tanggalBerakhir: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      penulis: 'Sistem Upgrade KK',
-    });
-    setIsUpgradeModalOpen(false);
-    setUpgradeTargetWarga(null);
 
-    const savedUpgradeWarga = updatedWargaItem as Warga | null;
+    const savedUpgradeWarga = updatedWargaItem as Warga;
     setSyncStatus('pending');
     const upgradeOps: PendingSyncOp[] = [
-      ...(savedUpgradeWarga
-        ? [{ opKey: `warga:${savedUpgradeWarga.id}`, kind: 'saveWarga' as const, payload: savedUpgradeWarga }]
-        : []),
+      { opKey: `warga:${savedUpgradeWarga.id}`, kind: 'saveWarga' as const, payload: savedUpgradeWarga },
       ...modifiedTxs.map((tx) => ({ opKey: `tx:${tx.id}`, kind: 'saveTx' as const, payload: tx })),
       ...modifiedBantuan.map((b) => ({ opKey: `bantuan:${b.id}`, kind: 'saveBantuan' as const, payload: b })),
     ];
@@ -3079,29 +3572,63 @@ export default function App() {
       };
     };
 
-    const [wargaRes, txResults, bantuanResults] = await Promise.all([
-      savedUpgradeWarga ? saveWargaDoc(savedUpgradeWarga) : Promise.resolve({ ok: true } as FirestoreWriteResult),
-      Promise.all(modifiedTxs.map((tx) => saveTransactionDoc(tx))),
-      Promise.all(modifiedBantuan.map((b) => saveBantuanDoc(b))),
-    ]);
+    const showUpgradeSuccessNotice = (isPending = false) => {
+      setFloatingAnnouncement({
+        id: 'upgrade_' + Date.now(),
+        judul: isPending ? 'Upgrade KK Menunggu Sinkronisasi' : 'Data KK Berhasil Diperbarui',
+        isi: isPending
+          ? `Perubahan KK ${oldNamaSafe} -> ${newKKData.nama} (${newKKData.noKK}) sedang dalam antrean sinkronisasi otomatis ke server.`
+          : `Data KK atas nama ${oldNamaSafe} berhasil diperbarui menjadi ${newKKData.nama} (${newKKData.noKK}) dan tersimpan di Cloud Firestore. Seluruh riwayat kas (${oldTxs.length} transaksi senilai Rp ${totalKasDipindahkan.toLocaleString('id-ID')}) dialihkan utuh.`,
+        kategori: 'Umum',
+        tanggal: new Date().toISOString().split('T')[0],
+        tanggalBerakhir: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        penulis: 'Sistem Upgrade KK',
+      });
+    };
 
-    const combinedResults: FirestoreWriteResult[] = [
-      ...(savedUpgradeWarga ? [wargaRes] : []),
-      ...txResults,
-      ...bantuanResults,
-    ];
+    const onUpgradeConfirmed = () => {
+      showUpgradeSuccessNotice(false);
+      return triggerPublicSummarySync({
+        wargaList: latestStateRef.current.wargaList,
+        transactions: latestStateRef.current.transactions,
+      });
+    };
+
+    const onUpgradeSettled = (settledRes: FirestoreWriteResult) => {
+      if (!isMountedRef.current) return;
+      void settleWriteBatch({
+        ops: upgradeOps,
+        results: upgradeOps.map(() => settledRes),
+        rollback: rollbackUpgrade,
+        fallbackError: 'Gagal menyinkronkan upgrade KK ke Cloud Firestore.',
+        onConfirmed: onUpgradeConfirmed,
+      });
+    };
+
+    const batchRes = await saveWargaWithLinkedSyncBatch({
+      warga: savedUpgradeWarga,
+      relatedTxs: modifiedTxs,
+      relatedBantuan: modifiedBantuan,
+      onSettled: onUpgradeSettled,
+    });
 
     await settleWriteBatch({
       ops: upgradeOps,
-      results: combinedResults,
+      results: upgradeOps.map(() => batchRes),
       rollback: rollbackUpgrade,
       fallbackError: 'Gagal menyinkronkan upgrade KK ke Cloud Firestore.',
-      onConfirmed: () =>
-        triggerPublicSummarySync({
-          wargaList: nextWargaList,
-          transactions: nextTxList,
-        }),
+      onConfirmed: onUpgradeConfirmed,
     });
+
+    if (batchRes.ok) {
+      if (batchRes.pending) {
+        showUpgradeSuccessNotice(true);
+      }
+      setIsUpgradeModalOpen(false);
+      setUpgradeTargetWarga(null);
+    }
+
+    return batchRes;
   };
 
   // Create Announcement
@@ -4265,7 +4792,8 @@ export default function App() {
                   profilRT={serverViewData.pengaturanKas.profilRT}
                   pengaturanKas={serverViewData.pengaturanKas}
                   isServer={true}
-                  onOpenWargaModal={() => setIsWargaModalOpen(true)}
+                  onOpenWargaModal={handleOpenNewWarga}
+                  onEditWarga={handleOpenEditWarga}
                   onOpenUpgradeModal={(w) => {
                     setUpgradeTargetWarga(w || null);
                     setIsUpgradeModalOpen(true);
@@ -4283,7 +4811,7 @@ export default function App() {
                   onAddBantuan={handleAddBantuan}
                   onUpdateStatus={handleUpdateStatusBantuan}
                   onDeleteBantuan={handleDeleteBantuan}
-                  onOpenImportExcel={() => setIsWargaModalOpen(true)}
+                  onOpenImportExcel={handleOpenNewWarga}
                   onGoToDataWarga={() => setCurrentView('data-warga')}
                   onBack={() => setCurrentView('server-kontrol')}
                 />
@@ -4294,7 +4822,7 @@ export default function App() {
                   pengaturanKas={serverViewData.pengaturanKas}
                   onNavigate={(view) => setCurrentView(view)}
                   onOpenTxModal={(type) => handleOpenNewTransaction(type || 'masuk')}
-                  onOpenWargaModal={() => setIsWargaModalOpen(true)}
+                  onOpenWargaModal={handleOpenNewWarga}
                   onOpenPengumumanModal={() => setIsPengumumanModalOpen(true)}
                   onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
                 />
@@ -4345,7 +4873,7 @@ export default function App() {
                   wargaList={serverViewData.wargaList}
                   pengaturanKas={serverViewData.pengaturanKas}
                   onToggleStatus={handleToggleWargaStatus}
-                  onOpenWargaModal={() => setIsWargaModalOpen(true)}
+                  onOpenWargaModal={handleOpenNewWarga}
                   onBack={() => setCurrentView('server-kontrol')}
                 />
               ) : currentView === 'pengumuman' ? (
@@ -4461,7 +4989,7 @@ export default function App() {
                     pengaturanKas={pengaturanKas}
                     onNavigate={(view) => setCurrentView(view)}
                     onOpenTxModal={(type) => handleOpenNewTransaction(type || 'masuk')}
-                    onOpenWargaModal={() => setIsWargaModalOpen(true)}
+                    onOpenWargaModal={handleOpenNewWarga}
                     onOpenPengumumanModal={() => setIsPengumumanModalOpen(true)}
                     onOpenSaldoAwalModal={() => setIsSaldoAwalModalOpen(true)}
                   />
@@ -4522,7 +5050,7 @@ export default function App() {
                     wargaList={wargaList}
                     pengaturanKas={pengaturanKas}
                     onToggleStatus={handleToggleWargaStatus}
-                    onOpenWargaModal={() => setIsWargaModalOpen(true)}
+                    onOpenWargaModal={handleOpenNewWarga}
                     onBack={() => setCurrentView('beranda')}
                   />
                 )}
@@ -4534,7 +5062,8 @@ export default function App() {
                     profilRT={pengaturanKas.profilRT}
                     pengaturanKas={pengaturanKas}
                     isServer={isServer}
-                    onOpenWargaModal={() => setIsWargaModalOpen(true)}
+                    onOpenWargaModal={handleOpenNewWarga}
+                    onEditWarga={handleOpenEditWarga}
                     onOpenUpgradeModal={(w) => {
                       setUpgradeTargetWarga(w || null);
                       setIsUpgradeModalOpen(true);
@@ -4558,7 +5087,7 @@ export default function App() {
                     onAddBantuan={handleAddBantuan}
                     onUpdateStatus={handleUpdateStatusBantuan}
                     onDeleteBantuan={handleDeleteBantuan}
-                    onOpenImportExcel={() => setIsWargaModalOpen(true)}
+                    onOpenImportExcel={handleOpenNewWarga}
                     onGoToDataWarga={() => setCurrentView('data-warga')}
                     onBack={() => setCurrentView('beranda')}
                   />
@@ -4681,12 +5210,18 @@ export default function App() {
         />
       )}
 
-      {/* Resident (Warga) Modal with Bulk Excel Import & Manual KK (Admin & Server) */}
+      {/* Resident (Warga) Modal with Bulk Excel Import, Add Manual & Edit KK (Admin & Server) */}
       {(isAdminRT || isServer) && (
         <WargaModal
           isOpen={isWargaModalOpen}
-          onClose={() => setIsWargaModalOpen(false)}
+          onClose={() => {
+            setIsWargaModalOpen(false);
+            setEditingWarga(null);
+          }}
           onSave={handleSaveWarga}
+          onUpdate={handleUpdateWarga}
+          editingWarga={editingWarga}
+          isServer={isServer}
           onBulkImport={handleBulkImportWargaBantuan}
           profilRT={isServer && selectedServerRT !== 'SEMUA' ? serverViewData.pengaturanKas.profilRT : pengaturanKas.profilRT}
         />
@@ -4720,9 +5255,10 @@ export default function App() {
             setIsUpgradeModalOpen(false);
             setUpgradeTargetWarga(null);
           }}
-          wargaList={wargaList}
-          transactions={transactions}
+          wargaList={isServer ? serverViewData.wargaList : wargaList}
+          transactions={isServer ? serverViewData.transactions : transactions}
           initialTargetWarga={upgradeTargetWarga}
+          isServer={isServer}
           onApplyUpgrade={handleApplyUpgradeKK}
         />
       )}

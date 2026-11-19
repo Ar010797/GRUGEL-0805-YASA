@@ -28,6 +28,7 @@ import {
   ChevronRight,
   LayoutGrid,
   Table as TableIcon,
+  Edit3,
 } from 'lucide-react';
 import { Warga, BantuanPemerintah, ProfilRT, PengaturanKas } from '../types';
 import { exportDataWargaPerKK_PDF, exportSingleKK_PDF, exportKartuKeluargaPemerintah_PDF } from '../utils/pdfExport';
@@ -42,6 +43,7 @@ interface DataWargaViewProps {
   pengaturanKas?: PengaturanKas;
   isServer?: boolean;
   onOpenWargaModal: () => void;
+  onEditWarga?: (warga: Warga) => void;
   onOpenUpgradeModal?: (targetWarga?: Warga) => void;
   onDeleteWarga: (id: string) => void;
   onBack: () => void;
@@ -54,6 +56,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
   pengaturanKas,
   isServer = false,
   onOpenWargaModal,
+  onEditWarga,
   onOpenUpgradeModal,
   onDeleteWarga,
   onBack,
@@ -121,12 +124,17 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
     return true;
   });
 
+  // Live reference so realtime edits/deletes immediately reflect inside Detail KK modal
+  const activeSelectedWarga = selectedWarga
+    ? wargaList.find((w) => w.id === selectedWarga.id) || null
+    : null;
+
   // Aid data for currently selected resident
-  const selectedWargaBansos = selectedWarga
+  const selectedWargaBansos = activeSelectedWarga
     ? bantuanList.filter(
         (b) =>
-          (b.noKK && b.noKK === selectedWarga.noKK) ||
-          b.namaPenerima.toLowerCase() === selectedWarga.nama.toLowerCase()
+          (b.noKK && b.noKK === activeSelectedWarga.noKK) ||
+          b.namaPenerima.toLowerCase() === activeSelectedWarga.nama.toLowerCase()
       )
     : [];
 
@@ -429,7 +437,18 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                         )}
                       </div>
 
-                      <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-slate-200/70">
+                      <div className="flex flex-wrap items-center justify-end gap-1.5 pt-2 border-t border-slate-200/70">
+                        {onEditWarga && (
+                          <button
+                            onClick={() => onEditWarga(w)}
+                            className="flex items-center gap-1 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-200/80 px-2.5 py-1.5 text-[11px] font-bold text-amber-800 transition-colors cursor-pointer"
+                            title="Edit data Kepala Keluarga & Anggota KK"
+                          >
+                            <Edit3 size={12} />
+                            <span>Edit</span>
+                          </button>
+                        )}
+
                         {onOpenUpgradeModal && (
                           <button
                             onClick={() => onOpenUpgradeModal(w)}
@@ -456,7 +475,10 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                               message: `Apakah Anda yakin ingin menghapus data warga "${w.nama}" (No KK: ${w.noKK || '-'}) beserta seluruh data anggota keluarganya? Tindakan ini tidak dapat dibatalkan.`,
                               targetName: `${w.nama} (No KK: ${w.noKK})`,
                               variant: 'danger',
-                              onConfirm: () => onDeleteWarga(w.id),
+                              onConfirm: () => {
+                                if (selectedWarga?.id === w.id) setSelectedWarga(null);
+                                onDeleteWarga(w.id);
+                              },
                             });
                           }}
                           className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
@@ -574,6 +596,17 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                           </td>
                           <td className="py-3.5 px-4 text-right border-b border-slate-100">
                             <div className="flex items-center justify-end gap-1">
+                              {onEditWarga && (
+                                <button
+                                  onClick={() => onEditWarga(w)}
+                                  className="flex items-center gap-1 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-200/80 px-2.5 py-1 text-[11px] font-bold text-amber-800 transition-colors cursor-pointer"
+                                  title="Edit data Kepala Keluarga, alamat, & susunan anggota KK"
+                                >
+                                  <Edit3 size={12} />
+                                  <span>Edit</span>
+                                </button>
+                              )}
+
                               {onOpenUpgradeModal && (
                                 <button
                                   onClick={() => onOpenUpgradeModal(w)}
@@ -602,7 +635,10 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                                     message: `Apakah Anda yakin ingin menghapus data warga "${w.nama}" (No KK: ${w.noKK || '-'}) beserta seluruh data anggota keluarganya? Tindakan ini tidak dapat dibatalkan.`,
                                     targetName: `${w.nama} (No KK: ${w.noKK})`,
                                     variant: 'danger',
-                                    onConfirm: () => onDeleteWarga(w.id),
+                                    onConfirm: () => {
+                                      if (selectedWarga?.id === w.id) setSelectedWarga(null);
+                                      onDeleteWarga(w.id);
+                                    },
                                   });
                                 }}
                                 className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
@@ -624,7 +660,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
     </div>
 
       {/* MODAL DETAIL KARTU KELUARGA & BANTUAN PEMERINTAH (UNTUK ADMIN) */}
-      {selectedWarga && (
+      {activeSelectedWarga && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
           <div className="w-full max-w-3xl rounded-3xl bg-white shadow-2xl border border-slate-200 overflow-hidden max-h-[92vh] flex flex-col animate-in fade-in zoom-in-95 duration-150">
             {/* Modal Header */}
@@ -638,7 +674,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                     Detail Kartu Keluarga & Riwayat Bantuan
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Data Kependudukan Resmi RT {selectedWarga.rt || rtStr} RW {selectedWarga.rw || rwStr} {desaStr}
+                    Data Kependudukan Resmi RT {activeSelectedWarga.rt || rtStr} RW {activeSelectedWarga.rw || rwStr} {desaStr}
                   </p>
                 </div>
               </div>
@@ -659,14 +695,14 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                     <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                       Kepala Keluarga
                     </span>
-                    <h2 className="text-base font-black text-slate-900">{selectedWarga.nama}</h2>
+                    <h2 className="text-base font-black text-slate-900">{activeSelectedWarga.nama}</h2>
                   </div>
                   <div className="text-left sm:text-right">
                     <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                       Nomor Kartu Keluarga (KK)
                     </span>
                     <p className="font-mono text-sm font-extrabold text-[#0B5D3F]">
-                      {selectedWarga.noKK || '3302140508000000'}
+                      {activeSelectedWarga.noKK || '3302140508000000'}
                     </p>
                   </div>
                 </div>
@@ -674,33 +710,33 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs pt-1">
                   <div>
                     <span className="text-slate-400 block text-[10px]">Nomor Rumah</span>
-                    <strong className="text-slate-800">Rumah {selectedWarga.noRumah}</strong>
+                    <strong className="text-slate-800">Rumah {activeSelectedWarga.noRumah}</strong>
                   </div>
                   <div>
                     <span className="text-slate-400 block text-[10px]">Wilayah RT/RW</span>
-                    <strong className="text-slate-800">RT {selectedWarga.rt || '08'} / RW {selectedWarga.rw || '05'}</strong>
+                    <strong className="text-slate-800">RT {activeSelectedWarga.rt || '08'} / RW {activeSelectedWarga.rw || '05'}</strong>
                   </div>
                   <div>
                     <span className="text-slate-400 block text-[10px]">Jumlah Jiwa</span>
-                    <strong className="text-slate-800">{selectedWarga.anggotaKeluarga?.length || selectedWarga.jumlahJiwa || 1} Orang</strong>
+                    <strong className="text-slate-800">{activeSelectedWarga.anggotaKeluarga?.length || activeSelectedWarga.jumlahJiwa || 1} Orang</strong>
                   </div>
                   <div>
                     <span className="text-slate-400 block text-[10px]">Status Iuran Kas</span>
                     <span
                       className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                        selectedWarga.statusIuran === 'Sudah'
+                        activeSelectedWarga.statusIuran === 'Sudah'
                           ? 'bg-emerald-100 text-emerald-800'
                           : 'bg-rose-100 text-rose-800'
                       }`}
                     >
-                      {selectedWarga.statusIuran === 'Sudah' ? 'LUNAS' : 'BELUM BAYAR'}
+                      {activeSelectedWarga.statusIuran === 'Sudah' ? 'LUNAS' : 'BELUM BAYAR'}
                     </span>
                   </div>
                 </div>
 
                 <div className="text-xs text-slate-600 pt-1 border-t border-slate-200">
                   <span className="text-slate-400 block text-[10px]">Alamat Lengkap</span>
-                  <p>{selectedWarga.alamat || `RT ${selectedWarga.rt || rtStr} RW ${selectedWarga.rw || rwStr} ${desaStr}, ${kecStr}, ${kabStr}`}</p>
+                  <p>{activeSelectedWarga.alamat || `RT ${activeSelectedWarga.rt || rtStr} RW ${activeSelectedWarga.rw || rwStr} ${desaStr}, ${kecStr}, ${kabStr}`}</p>
                 </div>
               </div>
 
@@ -724,12 +760,12 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {(selectedWarga.anggotaKeluarga && selectedWarga.anggotaKeluarga.length > 0
-                        ? selectedWarga.anggotaKeluarga
+                      {(activeSelectedWarga.anggotaKeluarga && activeSelectedWarga.anggotaKeluarga.length > 0
+                        ? activeSelectedWarga.anggotaKeluarga
                         : [
                             {
-                              nik: selectedWarga.nik || '3302140000000001',
-                              nama: selectedWarga.nama,
+                              nik: activeSelectedWarga.nik || '3302140000000001',
+                              nama: activeSelectedWarga.nama,
                               hubungan: 'Kepala Keluarga',
                               tempatLahir: 'Banyumas',
                               tanggalLahir: '—',
@@ -797,7 +833,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
               </div>
 
               {/* RIWAYAT UPGRADE & PEMBARUAN KK (JIKA PERNAH MENINGGAL / PISAH KK) */}
-              {selectedWarga.riwayatPerubahanKK && selectedWarga.riwayatPerubahanKK.length > 0 && (
+              {activeSelectedWarga.riwayatPerubahanKK && activeSelectedWarga.riwayatPerubahanKK.length > 0 && (
                 <div className="space-y-3 pt-2">
                   <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
                     <History size={16} className="text-[#0B5D3F]" />
@@ -807,7 +843,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                   </div>
 
                   <div className="space-y-2.5">
-                    {selectedWarga.riwayatPerubahanKK.map((rw) => (
+                    {activeSelectedWarga.riwayatPerubahanKK.map((rw) => (
                       <div
                         key={rw.id}
                         className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-3.5 text-xs text-emerald-950 space-y-1.5"
@@ -849,12 +885,29 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
               </button>
 
               <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
+                {/* Tombol Edit Data Warga di Modal Detail */}
+                {onEditWarga && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const w = activeSelectedWarga;
+                      setSelectedWarga(null);
+                      onEditWarga(w);
+                    }}
+                    className="flex items-center justify-center gap-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-300 px-3.5 py-2 text-xs font-bold text-amber-900 shadow-xs cursor-pointer"
+                    title="Edit data kepala keluarga, no KK, alamat, dan susunan anggota"
+                  >
+                    <Edit3 size={13} />
+                    <span>Edit Data KK</span>
+                  </button>
+                )}
+
                 {/* Tombol Upgrade KK di Modal Detail */}
                 {onOpenUpgradeModal && (
                   <button
                     type="button"
                     onClick={() => {
-                      const w = selectedWarga;
+                      const w = activeSelectedWarga;
                       setSelectedWarga(null);
                       onOpenUpgradeModal(w);
                     }}
@@ -868,7 +921,7 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
 
                 {/* Download Standar Register RT */}
                 <button
-                  onClick={() => exportSingleKK_PDF(selectedWarga, bantuanList, effectiveProfil, pengaturanKas)}
+                  onClick={() => exportSingleKK_PDF(activeSelectedWarga, bantuanList, effectiveProfil, pengaturanKas)}
                   className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 px-3.5 py-2 text-xs font-bold text-slate-700 shadow-xs cursor-pointer"
                   title="Cetak Ringkasan Register Warga RT"
                 >
@@ -879,14 +932,15 @@ export const DataWargaView: React.FC<DataWargaViewProps> = ({
                 {/* CETAK / DOWNLOAD KARTU KELUARGA RESMI PEMERINTAH (DENGAN KONFIRMASI SERVER) */}
                 <button
                   onClick={() => {
+                    const target = activeSelectedWarga;
                     setConfirmDialog({
                       isOpen: true,
                       title: 'Persetujuan Cetak Kartu Keluarga Standar Pemerintah',
-                      message: `Anda akan mencetak Kartu Keluarga Resmi Republik Indonesia untuk ${selectedWarga.nama} (No KK: ${selectedWarga.noKK}). Dokumen ini memiliki format Dukcapil dan dilindungi undang-undang. Pastikan Anda bertindak sah sebagai Pengurus/Server dan data ini tidak disalahgunakan. Apakah Anda menyetujui penerbitan cetak KK ini?`,
-                      targetName: `KARTU KELUARGA RESMI: ${selectedWarga.nama} (${selectedWarga.noKK})`,
+                      message: `Anda akan mencetak Kartu Keluarga Resmi Republik Indonesia untuk ${target.nama} (No KK: ${target.noKK}). Dokumen ini memiliki format Dukcapil dan dilindungi undang-undang. Pastikan Anda bertindak sah sebagai Pengurus/Server dan data ini tidak disalahgunakan. Apakah Anda menyetujui penerbitan cetak KK ini?`,
+                      targetName: `KARTU KELUARGA RESMI: ${target.nama} (${target.noKK})`,
                       variant: 'warning',
                       onConfirm: () => {
-                        exportKartuKeluargaPemerintah_PDF(selectedWarga, effectiveProfil, true);
+                        exportKartuKeluargaPemerintah_PDF(target, effectiveProfil, true);
                       },
                     });
                   }}

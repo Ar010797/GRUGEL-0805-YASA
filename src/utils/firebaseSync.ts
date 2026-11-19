@@ -120,6 +120,8 @@ interface CachedDocMeta {
   authUid?: string;
   localCreated?: boolean;
   serverConfirmed?: boolean;
+  permissionDenied?: boolean;
+  permissionMessage?: string;
   nullKeys?: string[];
 }
 
@@ -158,7 +160,8 @@ async function commitTrackedWrite(
   opType: OperationType,
   path: string,
   onAcked?: () => Promise<void> | void,
-  onSettled?: (result: FirestoreWriteResult) => void
+  onSettled?: (result: FirestoreWriteResult) => void,
+  ackTimeoutMs = 2500
 ): Promise<FirestoreWriteResult> {
   activePendingWriteCount++;
   notifyPendingWriteListeners();
@@ -230,7 +233,7 @@ async function commitTrackedWrite(
       timer = setTimeout(() => {
         returnedPending = true;
         resolve({ ok: true, pending: true });
-      }, 2500);
+      }, ackTimeoutMs);
     }),
   ]);
   if (timer) clearTimeout(timer);
@@ -275,6 +278,14 @@ export function toValidDocId(raw?: string | null, prefix = 'doc'): string {
     .slice(0, 120);
   if (cleaned.length >= 1) return cleaned;
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export function resolveEntityDocId(raw?: string | null, prefix = 'doc'): string {
+  const trimmed = String(raw || '').trim();
+  if (trimmed && trimmed.length <= 128 && /^[a-zA-Z0-9_\-]+$/.test(trimmed)) {
+    return trimmed;
+  }
+  return toValidDocId(raw, prefix);
 }
 
 function isPlainObject(val: unknown): val is Record<string, any> {
@@ -438,16 +449,54 @@ async function resolveExistingMeta(path: string): Promise<CachedDocMeta | null> 
     const [colName, docId] = path.split('/');
     if (!colName || !docId) return cached || null;
     const docRef = doc(db, colName, docId);
+    let confirmedFromServer = false;
+    let serverErr: any = null;
     const snap = isOnlineBrowser()
-      ? await getDocFromServer(docRef).catch(() => getDoc(docRef))
+      ? await getDocFromServer(docRef)
+          .then((s) => {
+            confirmedFromServer = true;
+            return s;
+          })
+          .catch((err) => {
+            serverErr = err;
+            if (extractFirestoreErrorCode(err) === 'permission-denied') {
+              throw err;
+            }
+            return getDoc(docRef);
+          })
       : await getDoc(docRef);
     if (!snap.exists()) {
+      if (confirmedFromServer) {
+        docMetaCache.delete(path);
+        return null;
+      }
+      if (serverErr && extractFirestoreErrorCode(serverErr) === 'permission-denied') {
+        return {
+          ownerUid: cached?.ownerUid || '',
+          createdAt: cached?.createdAt ?? null,
+          rw: cached?.rw,
+          rt: cached?.rt,
+          permissionDenied: true,
+          permissionMessage: formatFriendlyFirestoreError(serverErr),
+        };
+      }
       return cached && (cached.ownerUid || cached.localCreated) ? cached : null;
     }
     const data = snap.data();
-    recordMeta(path, { ...data, localCreated: true }, { serverConfirmed: !snap.metadata.fromCache });
+    const isFromServer = confirmedFromServer || !snap.metadata?.fromCache;
+    recordMeta(path, { ...data, localCreated: isFromServer }, { serverConfirmed: isFromServer });
     return docMetaCache.get(path) || null;
-  } catch {
+  } catch (err: any) {
+    if (extractFirestoreErrorCode(err) === 'permission-denied') {
+      return {
+        ownerUid: cached?.ownerUid || '',
+        createdAt: cached?.createdAt ?? null,
+        rw: cached?.rw,
+        rt: cached?.rt,
+        permissionDenied: true,
+        permissionMessage: formatFriendlyFirestoreError(err),
+      };
+    }
     return cached && (cached.ownerUid || cached.localCreated) ? cached : null;
   }
 }
@@ -481,10 +530,19 @@ function buildEntityUpdatePatch(
   }
   // Keep rwId/rtId aligned with immutable existing.rw/existing.rt when updating legacy/unpadded docs
   if (existing?.rw && existing.rw !== payload.rw) {
-    patch.rwId = `rw_${existing.rw}`;
+    const cleanRw = /^[a-zA-Z0-9]+$/.test(existing.rw)
+      ? existing.rw
+      : normalizeRWCode(existing.rw, payload.rw || DEFAULT_RW);
+    patch.rwId = `rw_${cleanRw}`;
   }
   if ((!ctx || ctx.role !== 'server') && existing?.rt && existing.rt !== payload.rt) {
-    patch.rtId = existing.rt === 'SEMUA' ? 'SEMUA' : `rt_${existing.rt}`;
+    const cleanRt =
+      existing.rt === 'SEMUA'
+        ? 'SEMUA'
+        : /^[a-zA-Z0-9]+$/.test(existing.rt)
+        ? existing.rt
+        : normalizeRTCode(existing.rt) || payload.rt || DEFAULT_RT;
+    patch.rtId = cleanRt === 'SEMUA' ? 'SEMUA' : `rt_${cleanRt}`;
   }
   // Purge legacy null optional fields on update
   if (Array.isArray(existing?.nullKeys)) {
@@ -518,18 +576,25 @@ function computeScopeMetadata(rtRaw: string, rwRaw: string, ctx?: AdminIdentityC
   let rtAdminUid: string | undefined =
     ctx?.role === 'admin' && (ctx.rt === rt || rt === 'SEMUA') ? ctx.uid : undefined;
 
-  if (ctx?.adminsByRt) {
+  if (ctx?.adminsByRt && typeof ctx.adminsByRt === 'object') {
     if (rt === 'SEMUA') {
       Object.values(ctx.adminsByRt)
         .flat()
         .forEach((uid) => {
-          if (uid && !uids.includes(uid)) uids.push(uid);
+          if (typeof uid === 'string' && uid.trim() && !uids.includes(uid.trim())) {
+            uids.push(uid.trim());
+          }
         });
     } else {
-      const assigned = ctx.adminsByRt[rt] || [];
-      if (!rtAdminUid && assigned[0]) rtAdminUid = assigned[0];
+      const rawAssigned = ctx.adminsByRt[rt];
+      const assigned = Array.isArray(rawAssigned) ? rawAssigned : [];
+      if (!rtAdminUid && typeof assigned[0] === 'string' && assigned[0].trim()) {
+        rtAdminUid = assigned[0].trim();
+      }
       assigned.forEach((uid) => {
-        if (uid && !uids.includes(uid)) uids.push(uid);
+        if (typeof uid === 'string' && uid.trim() && !uids.includes(uid.trim())) {
+          uids.push(uid.trim());
+        }
       });
     }
   }
@@ -549,11 +614,19 @@ function mergeScopedOwnership(
   scope: ReturnType<typeof computeScopeMetadata>,
   fallbackOwnerUid: string
 ) {
+  const canReuseExistingOwner = Boolean(
+    existing?.serverConfirmed === true &&
+      !existing?.permissionDenied &&
+      existing?.ownerUid &&
+      existing?.createdAt != null
+  );
+
   // Prioritize active/assigned UIDs first so 15-entry cap never evicts active devices
   const mergedUids = Array.from(
     new Set([
+      ...(canReuseExistingOwner ? [] : [fallbackOwnerUid]),
       ...scope.accessUids,
-      existing?.ownerUid || '',
+      ...(canReuseExistingOwner && existing?.ownerUid ? [existing.ownerUid] : []),
       fallbackOwnerUid,
       ...(existing?.accessUids || []),
     ])
@@ -562,8 +635,8 @@ function mergeScopedOwnership(
     .slice(0, 15);
 
   return {
-    ownerUid: existing?.ownerUid || fallbackOwnerUid,
-    createdAt: existing?.createdAt || serverTimestamp(),
+    ownerUid: canReuseExistingOwner ? existing!.ownerUid : fallbackOwnerUid,
+    createdAt: canReuseExistingOwner ? existing!.createdAt : serverTimestamp(),
     updatedAt: serverTimestamp(),
     accessUids: mergedUids.length > 0 ? mergedUids : [fallbackOwnerUid],
     serverUid: scope.serverUid || existing?.serverUid,
@@ -615,6 +688,92 @@ function resolveScopedRtRw(
     rt: fromRt || fromScope || fallback || DEFAULT_RT,
     rw,
   };
+}
+
+function validateAdminWriteScope(params: {
+  ctx: AdminIdentityContext | null;
+  targetRw?: string | null;
+  targetRt?: string | null;
+  existing?: CachedDocMeta | null;
+  allowSemua?: boolean;
+  entityLabel?: string;
+}): FirestoreWriteResult | null {
+  const { ctx, targetRw, targetRt, existing, allowSemua = false, entityLabel = 'data' } = params;
+  if (!ctx) {
+    return {
+      ok: false,
+      terminal: true,
+      errorCode: 'permission-denied',
+      message: 'Sesi otorisasi Admin/Server belum aktif atau akun sedang nonaktif.',
+    };
+  }
+  if (ctx.role === 'server') {
+    return null;
+  }
+  if (!ctx.rt || ctx.rt === 'SEMUA') {
+    return {
+      ok: false,
+      terminal: true,
+      errorCode: 'permission-denied',
+      message: 'Wilayah RT pada akun Admin RT tidak valid.',
+    };
+  }
+  if (existing?.rw) {
+    const exRw = normalizeRWCode(existing.rw, '');
+    if (exRw && exRw !== ctx.rw) {
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'permission-denied',
+        message: `Admin RT ${ctx.rt} RW ${ctx.rw} tidak memiliki izin mengubah ${entityLabel} milik RW ${exRw}.`,
+      };
+    }
+  }
+  if (existing?.rt) {
+    const exRt = existing.rt === 'SEMUA' ? 'SEMUA' : extractRTFromScope(existing.rt, '', true);
+    if (exRt === 'SEMUA' || (exRt && exRt !== ctx.rt)) {
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'permission-denied',
+        message: `Admin RT ${ctx.rt} tidak memiliki izin mengubah ${entityLabel} milik RT ${exRt}.`,
+      };
+    }
+  }
+  if (targetRw) {
+    const reqRw = normalizeRWCode(targetRw, '');
+    if (reqRw && reqRw !== ctx.rw) {
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'permission-denied',
+        message: `Admin RT ${ctx.rt} RW ${ctx.rw} tidak dapat menyimpan ${entityLabel} ke RW ${reqRw}.`,
+      };
+    }
+  }
+  if (targetRt) {
+    const reqRt =
+      String(targetRt).trim().toUpperCase() === 'SEMUA'
+        ? 'SEMUA'
+        : extractRTFromScope(targetRt, '', true);
+    if (reqRt === 'SEMUA' && !allowSemua) {
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'permission-denied',
+        message: `Admin RT ${ctx.rt} tidak dapat menyimpan ${entityLabel} untuk semua RT.`,
+      };
+    }
+    if (reqRt && reqRt !== 'SEMUA' && reqRt !== ctx.rt) {
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'permission-denied',
+        message: `Admin RT ${ctx.rt} tidak memiliki izin menyimpan ${entityLabel} untuk RT ${reqRt}.`,
+      };
+    }
+  }
+  return null;
 }
 
 // ==========================================
@@ -730,13 +889,35 @@ export function refreshAdminContext(uid: string): Promise<AdminIdentityContext |
     }
 
     const adminData = adminSnap.data();
-    if (adminData.status === 'nonaktif') {
+    if (adminData.status !== 'aktif') {
       return null;
     }
 
-    const rw = normalizeRWCode(adminData.rw, DEFAULT_RW);
+    const rawRw = typeof adminData.rw === 'string' ? adminData.rw.trim() : '';
+    const rw = normalizeRWCode(rawRw, DEFAULT_RW);
     const role: 'server' | 'admin' = adminData.role === 'server' ? 'server' : 'admin';
-    const rt = role === 'server' ? 'SEMUA' : normalizeRTCode(adminData.rt) || DEFAULT_RT;
+    const parsedAdminRt = extractRTFromScope(adminData.rt, '', true) || normalizeRTCode(adminData.rt);
+    if (role === 'admin' && (!rawRw || !parsedAdminRt || parsedAdminRt === 'SEMUA')) {
+      return null;
+    }
+    const rt = role === 'server' ? 'SEMUA' : parsedAdminRt;
+
+    // Self-heal missing canonical rwId/rtId on own /admins/{uid} doc if needed
+    const expectedIds = buildScopeIds(rt, rw);
+    if (
+      isOnlineBrowser() &&
+      rawRw === rw &&
+      (role === 'server' ? adminData.rt === 'SEMUA' : adminData.rt === rt) &&
+      (adminData.rwId !== expectedIds.rwId || adminData.rtId !== expectedIds.rtId)
+    ) {
+      updateDoc(adminRef, {
+        email: String(adminData.email || currentUser.email || ''),
+        displayName: String(adminData.displayName || adminData.username || 'Admin'),
+        rwId: expectedIds.rwId,
+        rtId: expectedIds.rtId,
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+    }
 
     let serverUid: string | undefined = role === 'server' ? uid : undefined;
     let adminsByRt: Record<string, string[]> = {};
@@ -942,6 +1123,73 @@ async function appendDocIdsToManifest(
   await nextLock;
 }
 
+async function removeDocIdsFromManifest(
+  rwRaw: string,
+  rtRaw: string,
+  entries: Partial<Record<EntityBucket, string[]>>
+) {
+  const ctx = activeAdminContext;
+  const uid = auth.currentUser?.uid || ctx?.uid;
+  if (!uid || !isOnlineBrowser()) return;
+
+  const rw = normalizeRWCode(rwRaw, ctx?.rw || DEFAULT_RW);
+  const rt =
+    rtRaw.toUpperCase() === 'SEMUA'
+      ? ctx?.rt && ctx.rt !== 'SEMUA'
+        ? ctx.rt
+        : DEFAULT_RT
+      : extractRTFromScope(rtRaw, DEFAULT_RT);
+
+  if (!rt || rt === 'SEMUA') return;
+  const scopeId = `rt_${rt}_rw_${rw}`;
+  const prevLock = manifestLockMap.get(scopeId) || Promise.resolve();
+
+  const nextLock = prevLock
+    .catch(() => {})
+    .then(async () => {
+      const manifestRef = doc(db, 'rtManifest', scopeId);
+      try {
+        await runTransaction(db, async (tx) => {
+          const snap = await tx.get(manifestRef);
+          if (!snap.exists()) return;
+          const existing = snap.data();
+          const nextDocIds: Record<string, string[]> = { ...(existing?.docIds || {}) };
+          let changed = false;
+
+          for (const [bucket, idsToRemove] of Object.entries(entries)) {
+            if (!idsToRemove || idsToRemove.length === 0) continue;
+            const prevList = Array.isArray(nextDocIds[bucket]) ? nextDocIds[bucket] : [];
+            const removeSet = new Set(idsToRemove);
+            const filtered = prevList.filter((itemId) => !removeSet.has(itemId));
+            if (filtered.length !== prevList.length) {
+              nextDocIds[bucket] = filtered;
+              changed = true;
+            }
+          }
+
+          if (!changed) return;
+
+          const { rwId, rtId } = buildScopeIds(rt, rw);
+          tx.update(
+            manifestRef,
+            stripUndefinedDeep({
+              rwId,
+              rtId,
+              docIds: nextDocIds,
+              serverUid: ctx?.serverUid || existing.serverUid,
+              updatedAt: serverTimestamp(),
+            })
+          );
+        });
+      } catch (err) {
+        console.warn('removeDocIdsFromManifest warning:', err);
+      }
+    });
+
+  manifestLockMap.set(scopeId, nextLock);
+  await nextLock;
+}
+
 async function commitDocAccessPatches(
   updates: Array<{ ref: ReturnType<typeof doc>; path: string; patch: Record<string, any> }>
 ): Promise<number> {
@@ -1009,16 +1257,20 @@ function isPatchableEntityDoc(
   const rawRt = typeof data.rt === 'string' ? data.rt : '';
   if (!isNonEmptyStrClient(rawRw, 10) || !isNonEmptyStrClient(rawRt, 10)) return false;
 
-  // Enforce exact rw match against immutable existing().rw unless bootstrapped server email
+  // Enforce RW match (tolerating padded/unpadded legacy forms) unless bootstrapped server email
   const isBootstrappedEmail =
     ctx.role === 'server' && ctx.email.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL;
-  if (!isBootstrappedEmail && rawRw !== ctx.rw) {
+  const normDataRw = normalizeRWCode(rawRw, '');
+  if (!isBootstrappedEmail && rawRw !== ctx.rw && normDataRw !== ctx.rw) {
     return false;
   }
 
   if (ctx.role === 'admin') {
-    // Firestore isAssignedAdmin requires exact adminDoc().rw == existing().rw && adminDoc().rt == existing().rt && rt != 'SEMUA'
-    if (rawRt === 'SEMUA' || rawRt !== ctx.rt || rawRw !== ctx.rw) return false;
+    const normDataRt = extractRTFromScope(rawRt, '', true);
+    if (rawRt === 'SEMUA' || normDataRt === 'SEMUA') return false;
+    if ((rawRt !== ctx.rt && normDataRt !== ctx.rt) || (rawRw !== ctx.rw && normDataRw !== ctx.rw)) {
+      return false;
+    }
     if (colName === 'adminAccounts' && data.authUid !== ctx.uid) return false;
   }
 
@@ -1906,9 +2158,9 @@ export async function registerAndSyncAdminWithFirebase(params: {
 
     const adminRef = doc(db, 'admins', fbUser.uid);
     const existingAdminSnap = await getDoc(adminRef).catch(() => null);
+    const { rwId, rtId } = buildScopeIds(rt, rw);
     if (!existingAdminSnap || !existingAdminSnap.exists()) {
       const pinDigest = await sha256Hex(pin);
-      const { rwId, rtId } = buildScopeIds(rt, rw);
       await setDoc(adminRef, {
         uid: fbUser.uid,
         email: fbUser.email || email,
@@ -1926,6 +2178,32 @@ export async function registerAndSyncAdminWithFirebase(params: {
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+    } else {
+      const existingData = existingAdminSnap.data();
+      if (existingData.status !== 'aktif') {
+        await signOut(auth);
+        return {
+          ok: false,
+          message: 'Akun Admin RT Anda berstatus nonaktif di Server Pusat.',
+        };
+      }
+      const existingRole = existingData.role === 'server' ? 'server' : 'admin';
+      const existingRw = String(existingData.rw || rw);
+      const existingRt = String(existingData.rt || rt);
+      const safeScope = buildScopeIds(existingRt, existingRw);
+      if (
+        existingData.rwId !== safeScope.rwId ||
+        existingData.rtId !== safeScope.rtId ||
+        (account.nama && existingData.displayName !== account.nama && existingRole === 'admin')
+      ) {
+        await updateDoc(adminRef, {
+          email: fbUser.email || email,
+          displayName: account.nama || existingData.displayName || username,
+          rwId: safeScope.rwId,
+          rtId: safeScope.rtId,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
     }
 
     await upsertRtRegistry({
@@ -2109,6 +2387,7 @@ export async function provisionAdminAuthAccount(
     const secAuth = await getSecondaryAuth();
     let targetUid = '';
 
+    let authSignInFailed = false;
     try {
       const created = await createUserWithEmailAndPassword(secAuth, email, password);
       targetUid = created.user.uid;
@@ -2124,7 +2403,11 @@ export async function provisionAdminAuthAccount(
         } catch {
           // Try with new password just in case
           const signed2 = await signInWithEmailAndPassword(secAuth, email, password).catch(() => null);
-          if (signed2) targetUid = signed2.user.uid;
+          if (signed2) {
+            targetUid = signed2.user.uid;
+          } else {
+            authSignInFailed = true;
+          }
         }
       } else {
         return { error: formatFirebaseAuthError(err, 'Gagal membuat akun Auth Admin RT.') };
@@ -2133,59 +2416,66 @@ export async function provisionAdminAuthAccount(
       await signOut(secAuth).catch(() => {});
     }
 
-    if (targetUid) {
-      const adminRef = doc(db, 'admins', targetUid);
-      const existingSnap = await getDoc(adminRef).catch(() => null);
-      const { rwId, rtId } = buildScopeIds(rt, rw);
-      try {
-        if (existingSnap && existingSnap.exists()) {
-          await updateDoc(adminRef, {
-            email,
-            displayName: account.nama,
-            username,
-            role: 'admin',
-            rt,
-            rtId,
-            rwId,
-            rtScope: `RT ${rt} RW ${rw}`,
-            status: account.status === 'nonaktif' ? 'nonaktif' : 'aktif',
-            updatedAt: serverTimestamp(),
-          });
-        } else {
-          await setDoc(adminRef, {
-            uid: targetUid,
-            email,
-            displayName: account.nama,
-            username,
-            role: 'admin',
-            rt,
-            rw,
-            rtId,
-            rwId,
-            rtScope: `RT ${rt} RW ${rw}`,
-            status: account.status === 'nonaktif' ? 'nonaktif' : 'aktif',
-            ownerUid: ctx.uid,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        }
-      } catch (writeErr: any) {
-        reportFirestoreError(writeErr, OperationType.WRITE, `admins/${targetUid}`);
-        return { error: formatFirebaseAuthError(writeErr, 'Gagal menyimpan otorisasi admin RT di Firestore.') };
-      }
-
-      await upsertRtRegistry({
-        rw,
-        ownerUid: ctx.uid,
-        serverUid: ctx.serverUid,
-        addRt: rt,
-        addAdminUid: targetUid,
-      });
-
-      await refreshAdminContext(ctx.uid);
+    if (!targetUid) {
+      return {
+        error: authSignInFailed
+          ? `Akun Firebase Auth (${email}) sudah terdaftar dengan password lain. Masukkan password sebelumnya saat mengedit agar sinkron.`
+          : 'Gagal mendapatkan UID akun Firebase Auth untuk Admin RT.',
+      };
     }
 
-    return { authUid: targetUid || undefined };
+    const adminRef = doc(db, 'admins', targetUid);
+    const existingSnap = await getDoc(adminRef).catch(() => null);
+    const { rwId, rtId } = buildScopeIds(rt, rw);
+    try {
+      if (existingSnap && existingSnap.exists()) {
+        await updateDoc(adminRef, {
+          email,
+          displayName: account.nama,
+          username,
+          role: 'admin',
+          rt,
+          rw,
+          rtId,
+          rwId,
+          rtScope: `RT ${rt} RW ${rw}`,
+          status: account.status === 'nonaktif' ? 'nonaktif' : 'aktif',
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(adminRef, {
+          uid: targetUid,
+          email,
+          displayName: account.nama,
+          username,
+          role: 'admin',
+          rt,
+          rw,
+          rtId,
+          rwId,
+          rtScope: `RT ${rt} RW ${rw}`,
+          status: account.status === 'nonaktif' ? 'nonaktif' : 'aktif',
+          ownerUid: ctx.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch (writeErr: any) {
+      reportFirestoreError(writeErr, OperationType.WRITE, `admins/${targetUid}`);
+      return { error: formatFirebaseAuthError(writeErr, 'Gagal menyimpan otorisasi admin RT di Firestore.') };
+    }
+
+    await upsertRtRegistry({
+      rw,
+      ownerUid: ctx.uid,
+      serverUid: ctx.serverUid,
+      addRt: rt,
+      addAdminUid: targetUid,
+    });
+
+    await refreshAdminContext(ctx.uid);
+
+    return { authUid: targetUid };
   } catch (err: any) {
     return { error: formatFirebaseAuthError(err, 'Gagal memproses akun Admin RT.') };
   }
@@ -2328,8 +2618,8 @@ export function buildWargaFirestorePayload(
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
-  const id = toValidDocId(w.id, 'w');
-  const { rt, rw } = resolveScopedRtRw(w.rt, w.rw, null, ctx, false);
+  const id = resolveEntityDocId(w.id, 'w');
+  const { rt, rw } = resolveScopedRtRw(w.rt || existing?.rt, w.rw || existing?.rw, null, ctx, false);
   const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
@@ -2352,21 +2642,22 @@ export function buildWargaFirestorePayload(
     id,
     no: toFiniteNumberOrUndefined(w.no),
     nama: String(w.nama || 'Warga').trim().slice(0, 160) || 'Warga',
-    noKK: w.noKK ? String(w.noKK).slice(0, 32) : undefined,
-    nik: w.nik ? String(w.nik).slice(0, 32) : undefined,
+    noKK: w.noKK != null ? String(w.noKK).slice(0, 32) : undefined,
+    nik: w.nik != null ? String(w.nik).slice(0, 32) : undefined,
     noRumah: String(w.noRumah || '-').slice(0, 32),
     rt,
     rw,
     rtId,
     rwId,
-    alamat: w.alamat ? String(w.alamat).slice(0, 300) : undefined,
-    kodePos: w.kodePos ? String(w.kodePos).slice(0, 12) : undefined,
-    tanggalDikeluarkan: w.tanggalDikeluarkan ? String(w.tanggalDikeluarkan).slice(0, 32) : undefined,
+    alamat: w.alamat != null ? String(w.alamat).slice(0, 300) : undefined,
+    kodePos: w.kodePos != null ? String(w.kodePos).slice(0, 12) : undefined,
+    tanggalDikeluarkan:
+      w.tanggalDikeluarkan != null ? String(w.tanggalDikeluarkan).slice(0, 32) : undefined,
     jenisKelamin: w.jenisKelamin === 'Perempuan' ? 'Perempuan' : 'Laki-laki',
     jumlahJiwa: toFiniteNumberOrDefault(w.jumlahJiwa, anggotaKeluarga?.length || 1),
     statusIuran: w.statusIuran === 'Sudah' ? 'Sudah' : 'Belum',
     anggotaKeluarga,
-    telepon: w.telepon ? String(w.telepon).slice(0, 32) : undefined,
+    telepon: w.telepon != null ? String(w.telepon).slice(0, 32) : undefined,
     pin: w.pin ? String(w.pin).slice(0, 12) : undefined,
     pinAttempts: toFiniteNumberOrUndefined(w.pinAttempts),
     pinLockedUntil: toFiniteNumberOrUndefined(w.pinLockedUntil),
@@ -2391,11 +2682,18 @@ export function buildTransactionFirestorePayload(
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
-  const id = toValidDocId(tx.id, 'tx');
-  const { rt, rw } = resolveScopedRtRw(null, null, tx.rtScope, ctx, false);
+  const id = resolveEntityDocId(tx.id, 'tx');
+  const { rt, rw } = resolveScopedRtRw(
+    (tx as any).rt || existing?.rt,
+    (tx as any).rw || existing?.rw,
+    tx.rtScope,
+    ctx,
+    false
+  );
   const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
+  const scopeRtMatches = tx.rtScope && extractRTFromScope(tx.rtScope, '', true) === rt;
 
   return stripUndefinedDeep({
     id,
@@ -2414,7 +2712,7 @@ export function buildTransactionFirestorePayload(
     rw,
     rtId,
     rwId,
-    rtScope: String(tx.rtScope || `RT ${rt} RW ${rw}`).slice(0, 64),
+    rtScope: String(scopeRtMatches ? tx.rtScope : `RT ${rt} RW ${rw}`).slice(0, 64),
     ...meta,
   });
 }
@@ -2425,11 +2723,18 @@ export function buildBantuanFirestorePayload(
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
-  const id = toValidDocId(b.id, 'b');
-  const { rt, rw } = resolveScopedRtRw(null, null, b.rtScope, ctx, false);
+  const id = resolveEntityDocId(b.id, 'b');
+  const { rt, rw } = resolveScopedRtRw(
+    (b as any).rt || existing?.rt,
+    (b as any).rw || existing?.rw,
+    b.rtScope,
+    ctx,
+    false
+  );
   const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
+  const scopeRtMatches = b.rtScope && extractRTFromScope(b.rtScope, '', true) === rt;
 
   const validStatus =
     b.status === 'Sudah Disalurkan' ||
@@ -2454,7 +2759,7 @@ export function buildBantuanFirestorePayload(
     rw,
     rtId,
     rwId,
-    rtScope: String(b.rtScope || `RT ${rt} RW ${rw}`).slice(0, 64),
+    rtScope: String(scopeRtMatches ? b.rtScope : `RT ${rt} RW ${rw}`).slice(0, 64),
     ...meta,
   });
 }
@@ -2465,10 +2770,10 @@ export function buildPengumumanFirestorePayload(
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
-  const id = toValidDocId(p.id, 'p');
+  const id = resolveEntityDocId(p.id, 'p');
   const { rt, rw } = resolveScopedRtRw(
-    null,
-    null,
+    (p as any).rt || existing?.rt,
+    (p as any).rw || existing?.rw,
     p.rtScope,
     ctx,
     ctx?.role === 'server'
@@ -2519,8 +2824,14 @@ export function buildDokumenFirestorePayload(
   ctx: AdminIdentityContext | null
 ) {
   const uid = auth.currentUser?.uid || ctx?.uid || 'system';
-  const id = toValidDocId(d.id, 'doc');
-  const { rt, rw } = resolveScopedRtRw(null, null, d.rtScope, ctx, false);
+  const id = resolveEntityDocId(d.id, 'doc');
+  const { rt, rw } = resolveScopedRtRw(
+    (d as any).rt || existing?.rt,
+    (d as any).rw || existing?.rw,
+    d.rtScope,
+    ctx,
+    false
+  );
   const { rwId, rtId } = buildScopeIds(rt, rw);
   const scope = computeScopeMetadata(rt, rw, ctx);
   const meta = mergeScopedOwnership(existing, scope, uid);
@@ -2677,21 +2988,86 @@ export function buildSettingsFirestorePayload(
 // 5. DIRECT FIRESTORE CRUD & PUBLIC SUMMARY SYNC
 // ==========================================
 
+function buildCreateSafePayload(payload: Record<string, any>, fallbackUid?: string): Record<string, any> {
+  const currentUid = auth.currentUser?.uid || fallbackUid || payload.ownerUid || 'system';
+  return {
+    ...payload,
+    ownerUid: currentUid,
+    accessUids: Array.from(
+      new Set([
+        currentUid,
+        ...(Array.isArray(payload.accessUids) ? payload.accessUids : []),
+      ])
+    )
+      .filter((u): u is string => typeof u === 'string' && u.length > 0)
+      .slice(0, 15),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+}
+
 async function saveScopedEntityDoc(
   colName: EntityBucket,
   id: string,
   payload: Record<string, any>,
   existing: CachedDocMeta | null,
   onAcked?: () => Promise<void> | void,
-  onSettled?: (res: FirestoreWriteResult) => void
+  onSettled?: (res: FirestoreWriteResult) => void,
+  ctxOverride?: AdminIdentityContext | null
 ): Promise<FirestoreWriteResult> {
   const path = `${colName}/${id}`;
   const docRef = doc(db, colName, id);
-  const isUpdate = Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated));
+  const initialCtx = ctxOverride ?? activeAdminContext;
+  let effectiveExisting = existing;
+
+  if (effectiveExisting?.permissionDenied) {
+    return {
+      ok: false,
+      terminal: true,
+      errorCode: 'permission-denied',
+      message:
+        effectiveExisting.permissionMessage ||
+        `Akses ditolak Firestore untuk mengakses ${colName}/${id}.`,
+    };
+  }
+
+  // If cached metadata came from unconfirmed local cache (e.g. offline/pending create), verify server state online first
+  if (effectiveExisting && !effectiveExisting.serverConfirmed && isOnlineBrowser()) {
+    try {
+      const serverCheck = await getDocFromServer(docRef);
+      if (!serverCheck.exists()) {
+        docMetaCache.delete(path);
+        effectiveExisting = null;
+      } else {
+        const sData = serverCheck.data();
+        recordMeta(path, { ...sData, localCreated: true }, { serverConfirmed: true });
+        effectiveExisting = docMetaCache.get(path) || effectiveExisting;
+      }
+    } catch (checkErr: any) {
+      if (extractFirestoreErrorCode(checkErr) === 'permission-denied') {
+        return {
+          ok: false,
+          terminal: true,
+          errorCode: 'permission-denied',
+          message: formatFriendlyFirestoreError(checkErr),
+        };
+      }
+      // Fall through to write + recovery handling below for transient errors
+    }
+  }
+
+  const isUpdate = Boolean(
+    effectiveExisting &&
+      (effectiveExisting.serverConfirmed ||
+        effectiveExisting.ownerUid ||
+        effectiveExisting.localCreated)
+  );
   const prevMeta = docMetaCache.get(path);
 
-  // Optimistically cache metadata so offline follow-up edits update cleanly instead of re-creating
-  recordMeta(path, { ...payload, localCreated: true });
+  // Only cache localCreated optimistically when offline so online create errors never poison docMetaCache
+  if (!isOnlineBrowser()) {
+    recordMeta(path, { ...payload, localCreated: true });
+  }
 
   const recoverWithServerState = async (err: any) => {
     const code = extractFirestoreErrorCode(err);
@@ -2699,53 +3075,60 @@ async function saveScopedEntityDoc(
       isOnlineBrowser() &&
       (code === 'not-found' || code === 'permission-denied')
     ) {
-      const serverSnap = await getDocFromServer(docRef).catch(() => null);
-      if (serverSnap && !serverSnap.exists()) {
-        const currentUid = auth.currentUser?.uid || activeAdminContext?.uid || payload.ownerUid;
-        const createPayload = {
-          ...payload,
-          ownerUid: currentUid,
-          accessUids: Array.from(
-            new Set([
-              currentUid,
-              ...(Array.isArray(payload.accessUids) ? payload.accessUids : []),
-            ])
-          ).slice(0, 15),
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        };
+      let serverSnap;
+      try {
+        serverSnap = await getDocFromServer(docRef);
+      } catch (getErr) {
+        if (extractFirestoreErrorCode(getErr) === 'permission-denied') {
+          throw getErr;
+        }
+        return false;
+      }
+      const refreshedCtx = await ensureAdminContextReady().catch(() => initialCtx);
+      if (!serverSnap.exists()) {
+        const createPayload = buildCreateSafePayload(payload, refreshedCtx?.uid);
         await setDoc(docRef, createPayload);
         recordMeta(path, { ...createPayload, localCreated: true }, { serverConfirmed: true });
         return true;
       }
-      if (serverSnap && serverSnap.exists()) {
-        const serverData = serverSnap.data();
-        recordMeta(path, { ...serverData, localCreated: true }, { serverConfirmed: true });
-        const refreshedMeta = docMetaCache.get(path) || null;
-        const refreshedCtx = await ensureAdminContextReady().catch(() => activeAdminContext);
-        const refreshedPatch = buildEntityUpdatePatch(
-          colName,
-          payload,
-          refreshedCtx,
-          refreshedMeta
-        );
-        await updateDoc(docRef, refreshedPatch);
-        recordMeta(
-          path,
-          { ...serverData, ...refreshedPatch, localCreated: true },
-          { serverConfirmed: true }
-        );
-        return true;
+      const serverData = serverSnap.data();
+      const scopeErr = validateAdminWriteScope({
+        ctx: refreshedCtx,
+        targetRw: String(serverData.rw || payload.rw || ''),
+        targetRt: String(serverData.rt || payload.rt || ''),
+        allowSemua: colName === 'pengumuman' || colName === 'settings',
+        entityLabel: colName,
+      });
+      if (scopeErr) {
+        const errScope = new Error(scopeErr.message || 'Permission denied');
+        (errScope as any).code = 'permission-denied';
+        throw errScope;
       }
+      recordMeta(path, { ...serverData, localCreated: true }, { serverConfirmed: true });
+      const refreshedMeta = docMetaCache.get(path) || null;
+      const refreshedPatch = buildEntityUpdatePatch(
+        colName,
+        payload,
+        refreshedCtx,
+        refreshedMeta
+      );
+      await updateDoc(docRef, refreshedPatch);
+      recordMeta(
+        path,
+        { ...serverData, ...refreshedPatch, localCreated: true },
+        { serverConfirmed: true }
+      );
+      return true;
     }
     return false;
   };
 
   const executeWrite = async () => {
     if (!isUpdate) {
+      const createPayload = buildCreateSafePayload(payload, initialCtx?.uid);
       try {
-        await setDoc(docRef, payload);
-        recordMeta(path, { ...payload, localCreated: true }, { serverConfirmed: isOnlineBrowser() });
+        await setDoc(docRef, createPayload);
+        recordMeta(path, { ...createPayload, localCreated: true }, { serverConfirmed: isOnlineBrowser() });
         return;
       } catch (err) {
         try {
@@ -2762,7 +3145,10 @@ async function saveScopedEntityDoc(
     }
 
     try {
-      await updateDoc(docRef, buildEntityUpdatePatch(colName, payload, activeAdminContext, existing));
+      await updateDoc(
+        docRef,
+        buildEntityUpdatePatch(colName, payload, initialCtx, effectiveExisting)
+      );
       recordMeta(path, { ...payload, localCreated: true }, { serverConfirmed: isOnlineBrowser() });
     } catch (err: any) {
       try {
@@ -2811,10 +3197,29 @@ async function deleteScopedEntityDoc(
       message: 'Hanya Super Admin Server RW yang dapat menghapus akun Admin RT.',
     };
   }
-  const id = toValidDocId(idRaw, prefix);
+  const id = resolveEntityDocId(idRaw, prefix);
   const path = `${colName}/${id}`;
-  const cachedMeta = docMetaCache.get(path);
-  if (colName === 'pengumuman' && cachedMeta?.rt === 'SEMUA' && ctx && ctx.role !== 'server') {
+  const resolvedMeta = docMetaCache.get(path) || (await resolveExistingMeta(path));
+  if (resolvedMeta?.permissionDenied) {
+    return {
+      ok: false,
+      terminal: true,
+      errorCode: 'permission-denied',
+      message:
+        resolvedMeta.permissionMessage ||
+        `Akses ditolak Firestore untuk menghapus ${colName}/${id}.`,
+    };
+  }
+  const scopeError = validateAdminWriteScope({
+    ctx,
+    existing: resolvedMeta,
+    allowSemua: colName === 'pengumuman' || colName === 'settings',
+    entityLabel: colName,
+  });
+  if (scopeError) {
+    return scopeError;
+  }
+  if (colName === 'pengumuman' && resolvedMeta?.rt === 'SEMUA' && ctx && ctx.role !== 'server') {
     return {
       ok: false,
       terminal: true,
@@ -2823,6 +3228,9 @@ async function deleteScopedEntityDoc(
     };
   }
   const docRef = doc(db, colName, id);
+  const linkedUidToDelete = colName === 'warga' ? resolvedMeta?.linkedUid : undefined;
+  const manifestRw = normalizeRWCode(resolvedMeta?.rw, ctx?.rw || DEFAULT_RW);
+  const manifestRt = extractRTFromScope(resolvedMeta?.rt, ctx?.rt && ctx.rt !== 'SEMUA' ? ctx.rt : '', false);
 
   const executeDelete = async () => {
     try {
@@ -2848,8 +3256,22 @@ async function deleteScopedEntityDoc(
     executeDelete(),
     OperationType.DELETE,
     path,
-    () => {
+    async () => {
       docMetaCache.delete(path);
+      if (manifestRt && manifestRt !== 'SEMUA') {
+        await removeDocIdsFromManifest(manifestRw, manifestRt, { [colName]: [id] });
+      }
+      if (linkedUidToDelete && VALID_DOC_ID_RE.test(linkedUidToDelete)) {
+        try {
+          const profRef = doc(db, 'wargaProfiles', linkedUidToDelete);
+          const profSnap = await getDoc(profRef).catch(() => null);
+          if (profSnap && profSnap.exists()) {
+            await deleteDoc(profRef);
+          }
+        } catch {
+          // Non-fatal: main warga document already deleted
+        }
+      }
     },
     onSettled
   );
@@ -2863,9 +3285,18 @@ export async function saveWargaDoc(
     return { ok: false, terminal: true, errorCode: 'unauthenticated', message: 'Belum login ke Firebase.' };
   }
   const ctx = await ensureAdminContextReady();
-  const id = toValidDocId(w.id, 'w');
+  const id = resolveEntityDocId(w.id, 'w');
   const path = `warga/${id}`;
   const existing = await resolveExistingMeta(path);
+  const scopeError = validateAdminWriteScope({
+    ctx,
+    targetRw: w.rw,
+    targetRt: w.rt,
+    existing,
+    entityLabel: 'data warga',
+  });
+  if (scopeError) return scopeError;
+
   const payload = buildWargaFirestorePayload({ ...w, id }, existing, ctx);
 
   return saveScopedEntityDoc(
@@ -2880,7 +3311,353 @@ export async function saveWargaDoc(
         provisionWargaAuthAccounts([{ ...w, id }]).catch(() => {});
       }
     },
-    onSettled
+    onSettled,
+    ctx
+  );
+}
+
+export async function saveWargaWithLinkedSyncBatch(params: {
+  warga: Warga;
+  relatedTxs?: Transaction[];
+  relatedBantuan?: BantuanPemerintah[];
+  onSettled?: (res: FirestoreWriteResult) => void;
+}): Promise<FirestoreWriteResult> {
+  if (!auth.currentUser) {
+    return { ok: false, terminal: true, errorCode: 'unauthenticated', message: 'Belum login ke Firebase.' };
+  }
+  const ctx = await ensureAdminContextReady();
+  const wargaId = resolveEntityDocId(params.warga.id, 'w');
+  const wargaPath = `warga/${wargaId}`;
+  const existingWargaMeta = await resolveExistingMeta(wargaPath);
+
+  if (existingWargaMeta?.permissionDenied) {
+    return {
+      ok: false,
+      terminal: true,
+      errorCode: 'permission-denied',
+      message:
+        existingWargaMeta.permissionMessage ||
+        'Akses ditolak Firestore untuk mengubah data warga ini.',
+    };
+  }
+
+  const scopeError = validateAdminWriteScope({
+    ctx,
+    targetRw: params.warga.rw,
+    targetRt: params.warga.rt,
+    existing: existingWargaMeta,
+    entityLabel: 'data warga',
+  });
+  if (scopeError) return scopeError;
+
+  const wargaPayload = buildWargaFirestorePayload({ ...params.warga, id: wargaId }, existingWargaMeta, ctx);
+  const txsToSave = Array.isArray(params.relatedTxs) ? params.relatedTxs : [];
+  const bantuanToSave = Array.isArray(params.relatedBantuan) ? params.relatedBantuan : [];
+
+  const [txMetas, bMetas] = await Promise.all([
+    Promise.all(txsToSave.map((t) => resolveExistingMeta(`transactions/${resolveEntityDocId(t.id, 'tx')}`))),
+    Promise.all(bantuanToSave.map((b) => resolveExistingMeta(`bantuan/${resolveEntityDocId(b.id, 'b')}`))),
+  ]);
+
+  const txMetaById = new Map<string, CachedDocMeta | null>();
+  txsToSave.forEach((t, idx) => txMetaById.set(resolveEntityDocId(t.id, 'tx'), txMetas[idx]));
+  const bMetaById = new Map<string, CachedDocMeta | null>();
+  bantuanToSave.forEach((b, idx) => bMetaById.set(resolveEntityDocId(b.id, 'b'), bMetas[idx]));
+
+  const linkedUid = wargaPayload.linkedUid;
+  let profileDocSnapData: Record<string, any> | null = null;
+  if (linkedUid && VALID_DOC_ID_RE.test(linkedUid)) {
+    const profSnap = await getDoc(doc(db, 'wargaProfiles', linkedUid)).catch(() => null);
+    if (profSnap && profSnap.exists()) {
+      profileDocSnapData = profSnap.data();
+    }
+  }
+
+  const buildBatchOps = (freshCtx: AdminIdentityContext | null) => {
+    const opsList: Array<{
+      kind: 'set' | 'update';
+      ref: ReturnType<typeof doc>;
+      data: Record<string, any>;
+      metaPath?: string;
+      metaData?: Record<string, any>;
+      manifestCol?: EntityBucket;
+      manifestId?: string;
+      manifestRw?: string;
+      manifestRt?: string;
+    }> = [];
+
+    const curWargaMeta = docMetaCache.get(wargaPath) || existingWargaMeta;
+    const curWargaPayload = buildWargaFirestorePayload({ ...params.warga, id: wargaId }, curWargaMeta, freshCtx);
+    const wargaIsUpdate = Boolean(
+      curWargaMeta &&
+        !curWargaMeta.permissionDenied &&
+        (curWargaMeta.serverConfirmed || curWargaMeta.ownerUid || curWargaMeta.localCreated)
+    );
+    const wargaWriteData = wargaIsUpdate
+      ? buildEntityUpdatePatch('warga', curWargaPayload, freshCtx, curWargaMeta)
+      : buildCreateSafePayload(curWargaPayload, freshCtx?.uid);
+    opsList.push({
+      kind: wargaIsUpdate ? 'update' : 'set',
+      ref: doc(db, 'warga', wargaId),
+      data: wargaWriteData,
+      metaPath: wargaPath,
+      metaData: curWargaPayload,
+      manifestCol: 'warga',
+      manifestId: wargaId,
+      manifestRw: curWargaPayload.rw,
+      manifestRt: curWargaPayload.rt,
+    });
+
+    if (linkedUid && profileDocSnapData) {
+      const pRw = String(profileDocSnapData.rw || '');
+      const pRt = String(profileDocSnapData.rt || '');
+      const rwAllowed = !pRw || normalizeRWCode(pRw, curWargaPayload.rw) === curWargaPayload.rw;
+      const rtAllowed =
+        freshCtx?.role === 'server' ||
+        !pRt ||
+        extractRTFromScope(pRt, '', true) === curWargaPayload.rt;
+      if (rwAllowed && rtAllowed) {
+        const pPatch = stripUndefinedDeep({
+          wargaId,
+          noKK: String(curWargaPayload.noKK || params.warga.noKK || '000000').slice(0, 32) || '000000',
+          nama: curWargaPayload.nama,
+          rt: curWargaPayload.rt,
+          rw: pRw || curWargaPayload.rw,
+          rtId: curWargaPayload.rtId,
+          rwId: pRw
+            ? `rw_${/^[a-zA-Z0-9]+$/.test(pRw) ? pRw : normalizeRWCode(pRw, curWargaPayload.rw)}`
+            : curWargaPayload.rwId,
+          serverUid: curWargaPayload.serverUid,
+          updatedAt: serverTimestamp(),
+        });
+        opsList.push({
+          kind: 'update',
+          ref: doc(db, 'wargaProfiles', linkedUid),
+          data: pPatch,
+        });
+      }
+    }
+
+    for (const tx of txsToSave) {
+      const txId = resolveEntityDocId(tx.id, 'tx');
+      const txPath = `transactions/${txId}`;
+      const txMeta = docMetaCache.get(txPath) || txMetaById.get(txId) || null;
+      if (txMeta?.permissionDenied) continue;
+      if (
+        validateAdminWriteScope({
+          ctx: freshCtx,
+          targetRw: (tx as any).rw,
+          targetRt: (tx as any).rt || (tx.rtScope ? extractRTFromScope(tx.rtScope, '', true) : undefined),
+          existing: txMeta,
+          entityLabel: 'transaksi kas',
+        })
+      ) {
+        continue;
+      }
+      const txPayload = buildTransactionFirestorePayload({ ...tx, id: txId }, txMeta, freshCtx);
+      const txIsUpdate = Boolean(
+        txMeta && (txMeta.serverConfirmed || txMeta.ownerUid || txMeta.localCreated)
+      );
+      opsList.push({
+        kind: txIsUpdate ? 'update' : 'set',
+        ref: doc(db, 'transactions', txId),
+        data: txIsUpdate
+          ? buildEntityUpdatePatch('transactions', txPayload, freshCtx, txMeta)
+          : buildCreateSafePayload(txPayload, freshCtx?.uid),
+        metaPath: txPath,
+        metaData: txPayload,
+        manifestCol: 'transactions',
+        manifestId: txId,
+        manifestRw: txPayload.rw,
+        manifestRt: txPayload.rt,
+      });
+    }
+
+    for (const b of bantuanToSave) {
+      const bId = resolveEntityDocId(b.id, 'b');
+      const bPath = `bantuan/${bId}`;
+      const bMeta = docMetaCache.get(bPath) || bMetaById.get(bId) || null;
+      if (bMeta?.permissionDenied) continue;
+      if (
+        validateAdminWriteScope({
+          ctx: freshCtx,
+          targetRw: (b as any).rw,
+          targetRt: (b as any).rt || (b.rtScope ? extractRTFromScope(b.rtScope, '', true) : undefined),
+          existing: bMeta,
+          entityLabel: 'data bantuan',
+        })
+      ) {
+        continue;
+      }
+      const bPayload = buildBantuanFirestorePayload({ ...b, id: bId }, bMeta, freshCtx);
+      const bIsUpdate = Boolean(
+        bMeta && (bMeta.serverConfirmed || bMeta.ownerUid || bMeta.localCreated)
+      );
+      opsList.push({
+        kind: bIsUpdate ? 'update' : 'set',
+        ref: doc(db, 'bantuan', bId),
+        data: bIsUpdate
+          ? buildEntityUpdatePatch('bantuan', bPayload, freshCtx, bMeta)
+          : buildCreateSafePayload(bPayload, freshCtx?.uid),
+        metaPath: bPath,
+        metaData: bPayload,
+        manifestCol: 'bantuan',
+        manifestId: bId,
+        manifestRw: bPayload.rw,
+        manifestRt: bPayload.rt,
+      });
+    }
+
+    return opsList;
+  };
+
+  const commitOpsAtomically = async (
+    opsList: ReturnType<typeof buildBatchOps>,
+    confirmedNow: boolean
+  ) => {
+    for (let i = 0; i < opsList.length; i += 350) {
+      const chunk = opsList.slice(i, i + 350);
+      const batch = writeBatch(db);
+      for (const op of chunk) {
+        if (op.kind === 'update') {
+          batch.update(op.ref, op.data);
+        } else {
+          batch.set(op.ref, op.data);
+        }
+      }
+      await batch.commit();
+      for (const op of chunk) {
+        if (op.metaPath && op.metaData) {
+          recordMeta(op.metaPath, { ...op.metaData, localCreated: true }, { serverConfirmed: confirmedNow });
+        }
+      }
+    }
+  };
+
+  const prevMetas = new Map<string, CachedDocMeta | undefined>();
+  const opsPreview = buildBatchOps(ctx);
+  if (!isOnlineBrowser()) {
+    for (const op of opsPreview) {
+      if (op.metaPath && op.metaData) {
+        prevMetas.set(op.metaPath, docMetaCache.get(op.metaPath));
+        recordMeta(op.metaPath, { ...op.metaData, localCreated: true });
+      }
+    }
+  } else {
+    for (const op of opsPreview) {
+      if (op.metaPath) {
+        prevMetas.set(op.metaPath, docMetaCache.get(op.metaPath));
+      }
+    }
+  }
+
+  let committedOps = opsPreview;
+  const executeBatchWrite = async () => {
+    try {
+      await commitOpsAtomically(committedOps, isOnlineBrowser());
+    } catch (err: any) {
+      const code = extractFirestoreErrorCode(err);
+      if (isOnlineBrowser() && (code === 'not-found' || code === 'permission-denied')) {
+        // Refresh metadata directly from Firestore server once and retry atomic batch cleanly
+        const refreshTargets: Array<{ col: EntityBucket; id: string }> = [
+          { col: 'warga', id: wargaId },
+          ...txsToSave.map((t) => ({ col: 'transactions' as EntityBucket, id: resolveEntityDocId(t.id, 'tx') })),
+          ...bantuanToSave.map((b) => ({ col: 'bantuan' as EntityBucket, id: resolveEntityDocId(b.id, 'b') })),
+        ];
+        let wargaServerDenied = false;
+        await Promise.all(
+          refreshTargets.map(async ({ col, id }) => {
+            const p = `${col}/${id}`;
+            try {
+              const snap = await getDocFromServer(doc(db, col, id));
+              if (snap.exists()) {
+                recordMeta(p, { ...snap.data(), localCreated: true }, { serverConfirmed: true });
+              } else {
+                docMetaCache.delete(p);
+              }
+            } catch (getErr) {
+              if (col === 'warga' && extractFirestoreErrorCode(getErr) === 'permission-denied') {
+                wargaServerDenied = true;
+              }
+            }
+          })
+        );
+        if (wargaServerDenied) {
+          prevMetas.forEach((m, p) => {
+            if (m) docMetaCache.set(p, m);
+            else docMetaCache.delete(p);
+          });
+          throw err;
+        }
+        const freshCtx = await ensureAdminContextReady().catch(() => ctx);
+        const freshWargaMeta = docMetaCache.get(wargaPath) || null;
+        const freshScopeErr = validateAdminWriteScope({
+          ctx: freshCtx,
+          targetRw: params.warga.rw,
+          targetRt: params.warga.rt,
+          existing: freshWargaMeta,
+          entityLabel: 'data warga',
+        });
+        if (freshScopeErr) {
+          const scopeEx = new Error(freshScopeErr.message || 'Permission denied');
+          (scopeEx as any).code = 'permission-denied';
+          throw scopeEx;
+        }
+        committedOps = buildBatchOps(freshCtx);
+        try {
+          await commitOpsAtomically(committedOps, true);
+          return;
+        } catch (retryErr) {
+          prevMetas.forEach((m, p) => {
+            if (m) docMetaCache.set(p, m);
+            else docMetaCache.delete(p);
+          });
+          throw retryErr;
+        }
+      }
+      prevMetas.forEach((m, p) => {
+        if (m) docMetaCache.set(p, m);
+        else docMetaCache.delete(p);
+      });
+      throw err;
+    }
+  };
+
+  return commitTrackedWrite(
+    executeBatchWrite(),
+    OperationType.WRITE,
+    wargaPath,
+    async () => {
+      const manifestByScope = new Map<
+        string,
+        { rw: string; rt: string; bucket: Partial<Record<EntityBucket, string[]>> }
+      >();
+      for (const op of committedOps) {
+        if (!op.manifestCol || !op.manifestId || !op.manifestRt || !op.manifestRw) continue;
+        const scopeKey = `${op.manifestRw}|${op.manifestRt}`;
+        const entry = manifestByScope.get(scopeKey) || {
+          rw: op.manifestRw,
+          rt: op.manifestRt,
+          bucket: {},
+        };
+        const arr = entry.bucket[op.manifestCol] || [];
+        if (!arr.includes(op.manifestId)) arr.push(op.manifestId);
+        entry.bucket[op.manifestCol] = arr;
+        manifestByScope.set(scopeKey, entry);
+      }
+      for (const item of manifestByScope.values()) {
+        await appendDocIdsToManifest(item.rw, item.rt, item.bucket);
+        await upsertRtRegistry({
+          rw: item.rw,
+          ownerUid: wargaPayload.ownerUid,
+          addRt: item.rt,
+        });
+      }
+      if (!linkedUid) {
+        provisionWargaAuthAccounts([{ ...params.warga, id: wargaId }]).catch(() => {});
+      }
+    },
+    params.onSettled
   );
 }
 
@@ -2899,7 +3676,7 @@ export async function updateWargaSelfDoc(
   if (!auth.currentUser) {
     return { ok: false, terminal: true, errorCode: 'unauthenticated', message: 'Belum login ke Firebase.' };
   }
-  const id = toValidDocId(wargaId, 'w');
+  const id = resolveEntityDocId(wargaId, 'w');
   const path = `warga/${id}`;
   const updateBody: Record<string, any> = { updatedAt: serverTimestamp() };
   if (typeof patch.pin === 'string' && patch.pin.trim()) {
@@ -2920,35 +3697,73 @@ export async function updateWargaSelfDoc(
 export async function bulkSaveWargaAndBantuanDocs(
   wargaList: Warga[],
   bantuanList: BantuanPemerintah[],
-  onSettled?: (res: FirestoreWriteResult) => void
+  onSettled?: (res: FirestoreWriteResult) => void,
+  knownNewIds?: Set<string>
 ): Promise<FirestoreWriteResult> {
   if (!auth.currentUser) {
     return { ok: false, terminal: true, errorCode: 'unauthenticated', message: 'Belum login ke Firebase.' };
   }
   const ctx = await ensureAdminContextReady();
+  if (!ctx) {
+    return {
+      ok: false,
+      terminal: true,
+      errorCode: 'permission-denied',
+      message: 'Sesi otorisasi Admin/Server belum aktif atau akun sedang nonaktif.',
+    };
+  }
   try {
-    await Promise.all([
-      ...wargaList.map((w) => resolveExistingMeta(`warga/${toValidDocId(w.id, 'w')}`)),
-      ...bantuanList.map((b) => resolveExistingMeta(`bantuan/${toValidDocId(b.id, 'b')}`)),
-    ]);
+    const wargaMetas = await Promise.all(
+      wargaList.map((w) => {
+        const id = toValidDocId(w.id, 'w');
+        if (knownNewIds?.has(id)) return Promise.resolve<CachedDocMeta | null>(null);
+        return resolveExistingMeta(`warga/${id}`);
+      })
+    );
+    const bantuanMetas = await Promise.all(
+      bantuanList.map((b) => {
+        const id = toValidDocId(b.id, 'b');
+        if (knownNewIds?.has(id)) return Promise.resolve<CachedDocMeta | null>(null);
+        return resolveExistingMeta(`bantuan/${id}`);
+      })
+    );
 
     const manifestBucketsByRt = new Map<string, { warga: string[]; bantuan: string[] }>();
-    const rw = ctx?.rw || DEFAULT_RW;
+    const rw = ctx.rw || DEFAULT_RW;
     const writes: PendingBatchWrite[] = [];
 
-    for (const w of wargaList) {
+    for (let i = 0; i < wargaList.length; i++) {
+      const w = wargaList[i];
       const id = toValidDocId(w.id, 'w');
       const path = `warga/${id}`;
-      const existing = docMetaCache.get(path) || null;
-      if (ctx?.role === 'admin' && ctx.rt !== 'SEMUA') {
-        const wRt = normalizeRTCode(w.rt);
-        if (wRt && wRt !== ctx.rt) continue;
-        if (existing?.rw && existing.rw !== ctx.rw) continue;
-        if (existing?.rt && existing.rt !== ctx.rt) continue;
+      const existing = knownNewIds?.has(id) ? null : wargaMetas[i] || docMetaCache.get(path) || null;
+      if (existing?.permissionDenied) {
+        return {
+          ok: false,
+          terminal: true,
+          errorCode: 'permission-denied',
+          message:
+            existing.permissionMessage ||
+            `Admin RT ${ctx.rt} tidak memiliki izin memperbarui data warga (${id}).`,
+        };
+      }
+      const wScopeErr = validateAdminWriteScope({
+        ctx,
+        targetRw: w.rw,
+        targetRt: w.rt,
+        existing,
+        entityLabel: 'data warga',
+      });
+      if (wScopeErr && ctx.role === 'admin') {
+        continue;
       }
 
       const payload = buildWargaFirestorePayload({ ...w, id }, existing, ctx);
-      const isUpdate = Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated));
+      const isUpdate = Boolean(
+        existing &&
+          !existing.permissionDenied &&
+          (existing.serverConfirmed || existing.ownerUid || existing.localCreated)
+      );
       writes.push({ colName: 'warga', id, payload, rt: payload.rt, isUpdate });
 
       const entry = manifestBucketsByRt.get(payload.rt) || { warga: [], bantuan: [] };
@@ -2956,19 +3771,38 @@ export async function bulkSaveWargaAndBantuanDocs(
       manifestBucketsByRt.set(payload.rt, entry);
     }
 
-    for (const b of bantuanList) {
+    for (let i = 0; i < bantuanList.length; i++) {
+      const b = bantuanList[i];
       const id = toValidDocId(b.id, 'b');
       const path = `bantuan/${id}`;
-      const existing = docMetaCache.get(path) || null;
-      if (ctx?.role === 'admin' && ctx.rt !== 'SEMUA') {
-        const bRt = extractRTFromScope(b.rtScope, '', true);
-        if (bRt && bRt !== 'SEMUA' && bRt !== ctx.rt) continue;
-        if (existing?.rw && existing.rw !== ctx.rw) continue;
-        if (existing?.rt && existing.rt !== ctx.rt) continue;
+      const existing = knownNewIds?.has(id) ? null : bantuanMetas[i] || docMetaCache.get(path) || null;
+      if (existing?.permissionDenied) {
+        return {
+          ok: false,
+          terminal: true,
+          errorCode: 'permission-denied',
+          message:
+            existing.permissionMessage ||
+            `Admin RT ${ctx.rt} tidak memiliki izin memperbarui data bantuan (${id}).`,
+        };
+      }
+      const bScopeErr = validateAdminWriteScope({
+        ctx,
+        targetRw: (b as any).rw,
+        targetRt: (b as any).rt || (b.rtScope ? extractRTFromScope(b.rtScope, '', true) : undefined),
+        existing,
+        entityLabel: 'data bantuan',
+      });
+      if (bScopeErr && ctx.role === 'admin') {
+        continue;
       }
 
       const payload = buildBantuanFirestorePayload({ ...b, id }, existing, ctx);
-      const isUpdate = Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated));
+      const isUpdate = Boolean(
+        existing &&
+          !existing.permissionDenied &&
+          (existing.serverConfirmed || existing.ownerUid || existing.localCreated)
+      );
       writes.push({ colName: 'bantuan', id, payload, rt: payload.rt, isUpdate });
 
       const entry = manifestBucketsByRt.get(payload.rt) || { warga: [], bantuan: [] };
@@ -2982,7 +3816,9 @@ export async function bulkSaveWargaAndBantuanDocs(
       const res = await executeResilientWrites(writes, 30);
       if (res.failed.length > 0) {
         const first = res.failed[0];
-        throw new Error(first.error || `Gagal menyimpan ${res.failed.length} dokumen warga/bantuan.`);
+        const err = new Error(first.error || `Gagal menyimpan ${res.failed.length} dokumen warga/bantuan.`);
+        if (first.errorCode) (err as any).code = first.errorCode;
+        throw err;
       }
     })();
 
@@ -3002,7 +3838,8 @@ export async function bulkSaveWargaAndBantuanDocs(
         }
         provisionWargaAuthAccounts(wargaList).catch(() => {});
       },
-      onSettled
+      onSettled,
+      15000
     );
   } catch (err: any) {
     return {
@@ -3022,9 +3859,18 @@ export async function saveTransactionDoc(
     return { ok: false, terminal: true, errorCode: 'unauthenticated', message: 'Belum login ke Firebase.' };
   }
   const ctx = await ensureAdminContextReady();
-  const id = toValidDocId(tx.id, 'tx');
+  const id = resolveEntityDocId(tx.id, 'tx');
   const path = `transactions/${id}`;
   const existing = await resolveExistingMeta(path);
+  const scopeError = validateAdminWriteScope({
+    ctx,
+    targetRw: (tx as any).rw,
+    targetRt: (tx as any).rt || (tx.rtScope ? extractRTFromScope(tx.rtScope, '', true) : undefined),
+    existing,
+    entityLabel: 'transaksi kas',
+  });
+  if (scopeError) return scopeError;
+
   const payload = buildTransactionFirestorePayload({ ...tx, id }, existing, ctx);
 
   return saveScopedEntityDoc(
@@ -3035,7 +3881,8 @@ export async function saveTransactionDoc(
     async () => {
       await appendDocIdsToManifest(payload.rw, payload.rt, { transactions: [id] });
     },
-    onSettled
+    onSettled,
+    ctx
   );
 }
 
@@ -3054,9 +3901,18 @@ export async function saveBantuanDoc(
     return { ok: false, terminal: true, errorCode: 'unauthenticated', message: 'Belum login ke Firebase.' };
   }
   const ctx = await ensureAdminContextReady();
-  const id = toValidDocId(b.id, 'b');
+  const id = resolveEntityDocId(b.id, 'b');
   const path = `bantuan/${id}`;
   const existing = await resolveExistingMeta(path);
+  const scopeError = validateAdminWriteScope({
+    ctx,
+    targetRw: (b as any).rw,
+    targetRt: (b as any).rt || (b.rtScope ? extractRTFromScope(b.rtScope, '', true) : undefined),
+    existing,
+    entityLabel: 'data bantuan',
+  });
+  if (scopeError) return scopeError;
+
   const payload = buildBantuanFirestorePayload({ ...b, id }, existing, ctx);
 
   return saveScopedEntityDoc(
@@ -3067,7 +3923,8 @@ export async function saveBantuanDoc(
     async () => {
       await appendDocIdsToManifest(payload.rw, payload.rt, { bantuan: [id] });
     },
-    onSettled
+    onSettled,
+    ctx
   );
 }
 
@@ -3089,6 +3946,16 @@ export async function savePengumumanDoc(
   const id = toValidDocId(p.id, 'p');
   const path = `pengumuman/${id}`;
   const existing = await resolveExistingMeta(path);
+  const scopeError = validateAdminWriteScope({
+    ctx,
+    targetRw: (p as any).rw,
+    targetRt: (p as any).rt || (p.rtScope ? extractRTFromScope(p.rtScope, '', true) : undefined),
+    existing,
+    allowSemua: ctx?.role === 'server',
+    entityLabel: 'pengumuman',
+  });
+  if (scopeError) return scopeError;
+
   const payload = buildPengumumanFirestorePayload({ ...p, id }, existing, ctx);
 
   return saveScopedEntityDoc(
@@ -3101,7 +3968,8 @@ export async function savePengumumanDoc(
         await appendDocIdsToManifest(payload.rw, payload.rt, { pengumuman: [id] });
       }
     },
-    onSettled
+    onSettled,
+    ctx
   );
 }
 
@@ -3131,6 +3999,15 @@ export async function saveDokumenDoc(
     };
   }
   const existing = await resolveExistingMeta(path);
+  const scopeError = validateAdminWriteScope({
+    ctx,
+    targetRw: (d as any).rw,
+    targetRt: (d as any).rt || (d.rtScope ? extractRTFromScope(d.rtScope, '', true) : undefined),
+    existing,
+    entityLabel: 'dokumen PDF',
+  });
+  if (scopeError) return scopeError;
+
   const payload = buildDokumenFirestorePayload({ ...d, id }, existing, ctx);
 
   return saveScopedEntityDoc(
@@ -3141,7 +4018,8 @@ export async function saveDokumenDoc(
     async () => {
       await appendDocIdsToManifest(payload.rw, payload.rt, { dokumen: [id] });
     },
-    onSettled
+    onSettled,
+    ctx
   );
 }
 
@@ -3186,7 +4064,8 @@ export async function saveAdminAccountDoc(
         addAdminUid: payload.authUid,
       });
     },
-    onSettled
+    onSettled,
+    ctx
   );
 }
 
@@ -3208,6 +4087,15 @@ export async function saveLaporanDoc(
   const id = toValidDocId(lap.id, 'lap');
   const path = `laporanBulanan/${id}`;
   const existing = await resolveExistingMeta(path);
+  const scopeError = validateAdminWriteScope({
+    ctx,
+    targetRw: lap.rw,
+    targetRt: lap.rt,
+    existing,
+    entityLabel: 'laporan bulanan',
+  });
+  if (scopeError) return scopeError;
+
   const payload = buildLaporanFirestorePayload({ ...lap, id }, existing, ctx);
 
   return saveScopedEntityDoc(
@@ -3218,7 +4106,8 @@ export async function saveLaporanDoc(
     async () => {
       await appendDocIdsToManifest(payload.rw, payload.rt, { laporanBulanan: [id] });
     },
-    onSettled
+    onSettled,
+    ctx
   );
 }
 
@@ -3415,9 +4304,9 @@ interface PendingBatchWrite {
 async function executeResilientWrites(
   writes: PendingBatchWrite[],
   chunkSize = 25
-): Promise<{ succeeded: PendingBatchWrite[]; failed: Array<{ item: PendingBatchWrite; error: string }> }> {
+): Promise<{ succeeded: PendingBatchWrite[]; failed: Array<{ item: PendingBatchWrite; error: string; errorCode?: string }> }> {
   const succeeded: PendingBatchWrite[] = [];
-  const failed: Array<{ item: PendingBatchWrite; error: string }> = [];
+  const failed: Array<{ item: PendingBatchWrite; error: string; errorCode?: string }> = [];
 
   for (let i = 0; i < writes.length; i += chunkSize) {
     const chunk = writes.slice(i, i + chunkSize);
@@ -3429,13 +4318,20 @@ async function executeResilientWrites(
         if (w.isUpdate) {
           batch.update(ref, buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext, existing));
         } else {
-          batch.set(ref, w.payload);
+          batch.set(ref, buildCreateSafePayload(w.payload, activeAdminContext?.uid));
         }
       }
       await batch.commit();
-      chunk.forEach((w) =>
-        recordMeta(`${w.colName}/${w.id}`, { ...w.payload, localCreated: true }, { serverConfirmed: isOnlineBrowser() })
-      );
+      chunk.forEach((w) => {
+        const storedPayload = w.isUpdate
+          ? w.payload
+          : buildCreateSafePayload(w.payload, activeAdminContext?.uid);
+        recordMeta(
+          `${w.colName}/${w.id}`,
+          { ...storedPayload, localCreated: true },
+          { serverConfirmed: isOnlineBrowser() }
+        );
+      });
       succeeded.push(...chunk);
     } catch {
       const settled = await Promise.allSettled(
@@ -3445,35 +4341,34 @@ async function executeResilientWrites(
           const existing = docMetaCache.get(path) || null;
           try {
             if (!w.isUpdate) {
-              return await setDoc(ref, w.payload);
+              return await setDoc(ref, buildCreateSafePayload(w.payload, activeAdminContext?.uid));
             }
             return await updateDoc(ref, buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext, existing));
           } catch (err: any) {
-            if (isOnlineBrowser()) {
-              const serverSnap = await getDocFromServer(ref).catch(() => null);
-              if (serverSnap && !serverSnap.exists()) {
-                const currentUid = auth.currentUser?.uid || activeAdminContext?.uid || w.payload.ownerUid;
-                return setDoc(ref, {
-                  ...w.payload,
-                  ownerUid: currentUid,
-                  accessUids: Array.from(
-                    new Set([
-                      currentUid,
-                      ...(Array.isArray(w.payload.accessUids) ? w.payload.accessUids : []),
-                    ])
-                  ).slice(0, 15),
-                  createdAt: serverTimestamp(),
-                  updatedAt: serverTimestamp(),
-                });
+            const errCode = extractFirestoreErrorCode(err);
+            if (isOnlineBrowser() && (errCode === 'not-found' || errCode === 'permission-denied')) {
+              const serverSnap = await getDocFromServer(ref);
+              if (!serverSnap.exists()) {
+                return setDoc(ref, buildCreateSafePayload(w.payload, activeAdminContext?.uid));
               }
-              if (serverSnap && serverSnap.exists()) {
-                const sData = serverSnap.data();
-                recordMeta(path, { ...sData, localCreated: true }, { serverConfirmed: true });
-                return updateDoc(
-                  ref,
-                  buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext, docMetaCache.get(path) || null)
-                );
+              const sData = serverSnap.data();
+              const scopeErr = validateAdminWriteScope({
+                ctx: activeAdminContext,
+                targetRw: String(sData.rw || w.payload.rw || ''),
+                targetRt: String(sData.rt || w.payload.rt || ''),
+                allowSemua: w.colName === 'pengumuman' || w.colName === 'settings',
+                entityLabel: w.colName,
+              });
+              if (scopeErr) {
+                const errScope = new Error(scopeErr.message || 'Permission denied');
+                (errScope as any).code = 'permission-denied';
+                throw errScope;
               }
+              recordMeta(path, { ...sData, localCreated: true }, { serverConfirmed: true });
+              return updateDoc(
+                ref,
+                buildEntityUpdatePatch(w.colName, w.payload, activeAdminContext, docMetaCache.get(path) || null)
+              );
             }
             throw err;
           }
@@ -3486,7 +4381,8 @@ async function executeResilientWrites(
           succeeded.push(w);
         } else {
           const msg = res.reason?.message || String(res.reason || 'Unknown write error');
-          failed.push({ item: chunk[idx], error: msg });
+          const code = extractFirestoreErrorCode(res.reason);
+          failed.push({ item: chunk[idx], error: msg, errorCode: code });
         }
       });
     }
@@ -3674,52 +4570,60 @@ async function writeSnapshotToFirestoreInternal(
   for (const w of missing.wargaList) {
     const id = toValidDocId(w.id, 'w');
     const existing = await resolveExistingMeta(`warga/${id}`);
+    if (existing?.permissionDenied) continue;
+    if (validateAdminWriteScope({ ctx, targetRw: w.rw, targetRt: w.rt, existing, entityLabel: 'data warga' })) continue;
     const payload = buildWargaFirestorePayload({ ...w, id }, existing, ctx);
     standardWrites.push({
       colName: 'warga',
       id,
       payload,
       rt: payload.rt,
-      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+      isUpdate: Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated)),
     });
   }
 
   for (const t of missing.transactions) {
     const id = toValidDocId(t.id, 'tx');
     const existing = await resolveExistingMeta(`transactions/${id}`);
+    if (existing?.permissionDenied) continue;
+    if (validateAdminWriteScope({ ctx, targetRw: (t as any).rw, targetRt: (t as any).rt || (t.rtScope ? extractRTFromScope(t.rtScope, '', true) : undefined), existing, entityLabel: 'transaksi' })) continue;
     const payload = buildTransactionFirestorePayload({ ...t, id }, existing, ctx);
     standardWrites.push({
       colName: 'transactions',
       id,
       payload,
       rt: payload.rt,
-      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+      isUpdate: Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated)),
     });
   }
 
   for (const b of missing.bantuanList) {
     const id = toValidDocId(b.id, 'b');
     const existing = await resolveExistingMeta(`bantuan/${id}`);
+    if (existing?.permissionDenied) continue;
+    if (validateAdminWriteScope({ ctx, targetRw: (b as any).rw, targetRt: (b as any).rt || (b.rtScope ? extractRTFromScope(b.rtScope, '', true) : undefined), existing, entityLabel: 'bantuan' })) continue;
     const payload = buildBantuanFirestorePayload({ ...b, id }, existing, ctx);
     standardWrites.push({
       colName: 'bantuan',
       id,
       payload,
       rt: payload.rt,
-      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+      isUpdate: Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated)),
     });
   }
 
   for (const p of missing.pengumumanList) {
     const id = toValidDocId(p.id, 'p');
     const existing = await resolveExistingMeta(`pengumuman/${id}`);
+    if (existing?.permissionDenied) continue;
+    if (validateAdminWriteScope({ ctx, targetRw: (p as any).rw, targetRt: (p as any).rt || (p.rtScope ? extractRTFromScope(p.rtScope, '', true) : undefined), existing, allowSemua: ctx.role === 'server', entityLabel: 'pengumuman' })) continue;
     const payload = buildPengumumanFirestorePayload({ ...p, id }, existing, ctx);
     standardWrites.push({
       colName: 'pengumuman',
       id,
       payload,
       rt: payload.rt,
-      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+      isUpdate: Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated)),
     });
   }
 
@@ -3730,26 +4634,30 @@ async function writeSnapshotToFirestoreInternal(
     }
     const id = toValidDocId(d.id, 'doc');
     const existing = await resolveExistingMeta(`dokumen/${id}`);
+    if (existing?.permissionDenied) continue;
+    if (validateAdminWriteScope({ ctx, targetRw: (d as any).rw, targetRt: (d as any).rt || (d.rtScope ? extractRTFromScope(d.rtScope, '', true) : undefined), existing, entityLabel: 'dokumen' })) continue;
     const payload = buildDokumenFirestorePayload({ ...d, id }, existing, ctx);
     dokumenWrites.push({
       colName: 'dokumen',
       id,
       payload,
       rt: payload.rt,
-      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+      isUpdate: Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated)),
     });
   }
 
   for (const lap of missing.laporanBulananRT) {
     const id = toValidDocId(lap.id, 'lap');
     const existing = await resolveExistingMeta(`laporanBulanan/${id}`);
+    if (existing?.permissionDenied) continue;
+    if (validateAdminWriteScope({ ctx, targetRw: lap.rw, targetRt: lap.rt, existing, entityLabel: 'laporan bulanan' })) continue;
     const payload = buildLaporanFirestorePayload({ ...lap, id }, existing, ctx);
     standardWrites.push({
       colName: 'laporanBulanan',
       id,
       payload,
       rt: payload.rt,
-      isUpdate: Boolean(existing && (existing.ownerUid || existing.localCreated)),
+      isUpdate: Boolean(existing && (existing.serverConfirmed || existing.ownerUid || existing.localCreated)),
     });
   }
 

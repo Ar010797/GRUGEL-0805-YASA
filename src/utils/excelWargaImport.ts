@@ -600,9 +600,14 @@ export async function parseExcelWargaAndBantuan(
   }
 
   const warnings: string[] = [];
-  const defaultRt = (defaults?.rt || '08').padStart(2, '0');
-  const defaultRw = (defaults?.rw || '05').padStart(2, '0');
-  const defaultAlamat = defaults?.alamat || `RT ${defaultRt} RW ${defaultRw} Desa Kotayasa`;
+  const rawDefaultRtDigits = String(defaults?.rt || '').replace(/\D/g, '');
+  const rawDefaultRwDigits = String(defaults?.rw || '').replace(/\D/g, '');
+  const defaultRt = rawDefaultRtDigits ? rawDefaultRtDigits.padStart(2, '0').slice(-2) : '08';
+  const defaultRw = rawDefaultRwDigits ? rawDefaultRwDigits.padStart(2, '0').slice(-2) : '05';
+  const defaultAlamat =
+    defaults?.alamat && !/semua\s*rt/i.test(defaults.alamat)
+      ? defaults.alamat
+      : `RT ${defaultRt} RW ${defaultRw} Desa Kotayasa`;
   const todayISO = new Date().toISOString().split('T')[0];
 
   interface FamilyBucket {

@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { Warga, AnggotaKeluarga, BantuanPemerintah, ProfilRT } from '../types';
 import { cleanIndonesianName, cleanNIK } from '../utils/wargaHelpers';
+import type { FirestoreWriteResult } from '../utils/firebaseSync';
 import {
   downloadTemplateExcelWargaBansos,
   parseExcelWargaAndBantuan,
@@ -29,7 +30,10 @@ import {
 interface WargaModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (warga: Omit<Warga, 'id' | 'no'>) => void;
+  onSave: (warga: Omit<Warga, 'id' | 'no'>) => Promise<FirestoreWriteResult | void> | void;
+  onUpdate?: (warga: Warga) => Promise<FirestoreWriteResult | void> | void;
+  editingWarga?: Warga | null;
+  isServer?: boolean;
   onBulkImport?: (
     wargaList: Omit<Warga, 'id' | 'no'>[],
     bantuanList: Omit<BantuanPemerintah, 'id'>[],
@@ -42,9 +46,13 @@ export const WargaModal: React.FC<WargaModalProps> = ({
   isOpen,
   onClose,
   onSave,
+  onUpdate,
+  editingWarga = null,
+  isServer = false,
   onBulkImport,
   profilRT,
 }) => {
+  const isEditMode = Boolean(editingWarga);
   const [activeTab, setActiveTab] = useState<'excel' | 'manual'>('excel');
 
   // Excel bulk import state
@@ -55,33 +63,94 @@ export const WargaModal: React.FC<WargaModalProps> = ({
   const [mergeExisting, setMergeExisting] = useState<boolean>(true);
   const excelInputRef = useRef<HTMLInputElement>(null);
 
-  // Manual form values
+  const defaultRTCode =
+    profilRT?.namaRT && !/semua/i.test(profilRT.namaRT) ? profilRT.namaRT : '08';
+  const defaultRWCode = profilRT?.namaRW || '05';
+  const defaultWilayahAlamat =
+    profilRT?.sebutanWilayah && !/semua\s*rt/i.test(profilRT.sebutanWilayah)
+      ? profilRT.sebutanWilayah
+      : `RT ${defaultRTCode} RW ${defaultRWCode} ${profilRT?.desa || 'Desa Kotayasa'}`;
+
+  // Manual / Edit form values
   const [nama, setNama] = useState('');
   const [noKK, setNoKK] = useState('');
+  const [nik, setNik] = useState('');
+  const [telepon, setTelepon] = useState('');
   const [noRumah, setNoRumah] = useState('');
-  const [alamat, setAlamat] = useState(
-    profilRT?.sebutanWilayah || `RT ${profilRT?.namaRT || '08'} RW ${profilRT?.namaRW || '05'} ${profilRT?.desa || 'Desa Kotayasa'}`
-  );
-  const [rt, setRt] = useState(profilRT?.namaRT || '08');
-  const [rw, setRw] = useState(profilRT?.namaRW || '05');
+  const [alamat, setAlamat] = useState(defaultWilayahAlamat);
+  const [rt, setRt] = useState(defaultRTCode);
+  const [rw, setRw] = useState(defaultRWCode);
   const [jenisKelamin, setJenisKelamin] = useState<'Laki-laki' | 'Perempuan'>('Laki-laki');
   const [statusIuran, setStatusIuran] = useState<'Sudah' | 'Belum'>('Belum');
   const [kodePos, setKodePos] = useState(profilRT?.kodePos || '53183');
   const [tanggalDikeluarkan, setTanggalDikeluarkan] = useState('');
   const [anggotaKeluarga, setAnggotaKeluarga] = useState<AnggotaKeluarga[]>([]);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+
+  const initKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!isOpen) return;
-    const nextRT = profilRT?.namaRT || '08';
-    const nextRW = profilRT?.namaRW || '05';
-    setRt(nextRT);
-    setRw(nextRW);
-    setAlamat(
-      profilRT?.sebutanWilayah ||
-        `RT ${nextRT} RW ${nextRW} ${profilRT?.desa || 'Desa Kotayasa'}`
-    );
-    setKodePos(profilRT?.kodePos || '53183');
-  }, [isOpen, profilRT?.namaRT, profilRT?.namaRW, profilRT?.sebutanWilayah, profilRT?.desa, profilRT?.kodePos]);
+    if (!isOpen) {
+      initKeyRef.current = null;
+      setFormError(null);
+      setIsSubmitting(false);
+      return;
+    }
+
+    const nextKey = editingWarga
+      ? `edit:${editingWarga.id}`
+      : `new:${defaultRTCode}:${defaultRWCode}`;
+
+    if (initKeyRef.current === nextKey) return;
+    initKeyRef.current = nextKey;
+    setFormError(null);
+    setIsSubmitting(false);
+
+    if (editingWarga) {
+      setActiveTab('manual');
+      setNama(editingWarga.nama || '');
+      setNoKK(editingWarga.noKK || '');
+      setNik(editingWarga.nik || '');
+      setTelepon(editingWarga.telepon || '');
+      setNoRumah(editingWarga.noRumah || '');
+      setRt(editingWarga.rt || defaultRTCode);
+      setRw(editingWarga.rw || defaultRWCode);
+      setAlamat(
+        editingWarga.alamat ||
+          `RT ${editingWarga.rt || defaultRTCode} RW ${editingWarga.rw || defaultRWCode} ${profilRT?.desa || 'Desa Kotayasa'}`
+      );
+      setKodePos(editingWarga.kodePos || profilRT?.kodePos || '53183');
+      setTanggalDikeluarkan(editingWarga.tanggalDikeluarkan || '');
+      setJenisKelamin(editingWarga.jenisKelamin || 'Laki-laki');
+      setStatusIuran(editingWarga.statusIuran || 'Belum');
+      setAnggotaKeluarga(
+        editingWarga.anggotaKeluarga && editingWarga.anggotaKeluarga.length > 0
+          ? editingWarga.anggotaKeluarga.map((m) => ({ ...m }))
+          : []
+      );
+    } else {
+      const nextRT = defaultRTCode;
+      const nextRW = defaultRWCode;
+      setActiveTab('excel');
+      setNama('');
+      setNoKK('');
+      setNik('');
+      setTelepon('');
+      setNoRumah('');
+      setRt(nextRT);
+      setRw(nextRW);
+      setAlamat(defaultWilayahAlamat);
+      setKodePos(profilRT?.kodePos || '53183');
+      setTanggalDikeluarkan('');
+      setJenisKelamin('Laki-laki');
+      setStatusIuran('Belum');
+      setAnggotaKeluarga([]);
+      setImportResult(null);
+      setExcelFileName(null);
+      setExcelError(null);
+    }
+  }, [isOpen, editingWarga, profilRT]);
 
   if (!isOpen) return null;
 
@@ -162,40 +231,50 @@ export const WargaModal: React.FC<WargaModalProps> = ({
     );
   };
 
-  const handleManualSubmit = (e: React.FormEvent) => {
+  const handleManualSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setFormError(null);
+
     const cleanNama = cleanIndonesianName(nama);
     const finalNoKK = cleanNIK(noKK);
+    const finalNik = cleanNIK(nik);
 
     if (!cleanNama) {
-      alert('Silakan masukkan Nama Kepala Keluarga.');
+      setFormError('Silakan masukkan Nama Kepala Keluarga.');
       return;
     }
     if (!finalNoKK || finalNoKK.length < 16) {
-      alert('Nomor Kartu Keluarga harus tepat 16 digit angka.');
+      setFormError('Nomor Kartu Keluarga harus tepat 16 digit angka.');
+      return;
+    }
+    if (finalNik && finalNik.length !== 16) {
+      setFormError('NIK Kepala Keluarga harus 16 digit angka (atau kosongkan jika belum ada).');
       return;
     }
 
     const membersToSave: AnggotaKeluarga[] =
       anggotaKeluarga.length > 0
-        ? anggotaKeluarga.map((m) => ({
-            ...m,
-            nik: cleanNIK(m.nik),
-            nama: cleanIndonesianName(m.nama),
-            tempatLahir: m.tempatLahir || 'Banyumas',
-            tanggalLahir: m.tanggalLahir || '',
-            pendidikan: m.pendidikan || 'Tidak/Belum Sekolah',
-            pekerjaan: m.pekerjaan || 'Belum/Tidak Bekerja',
-            golonganDarah: m.golonganDarah || 'Tidak Tahu',
-            statusPerkawinan: m.statusPerkawinan || 'Belum Kawin',
-            tanggalPerkawinan: m.tanggalPerkawinan || '',
-            kewarganegaraan: m.kewarganegaraan || 'WNI',
-            namaAyah: cleanIndonesianName(m.namaAyah || ''),
-            namaIbu: cleanIndonesianName(m.namaIbu || ''),
-          }))
+        ? anggotaKeluarga
+            .filter((m) => String(m.nama || '').trim() || String(m.nik || '').trim())
+            .map((m) => ({
+              ...m,
+              nik: cleanNIK(m.nik),
+              nama: cleanIndonesianName(m.nama),
+              tempatLahir: m.tempatLahir || 'Banyumas',
+              tanggalLahir: m.tanggalLahir || '',
+              pendidikan: m.pendidikan || 'Tidak/Belum Sekolah',
+              pekerjaan: m.pekerjaan || 'Belum/Tidak Bekerja',
+              golonganDarah: m.golonganDarah || 'Tidak Tahu',
+              statusPerkawinan: m.statusPerkawinan || 'Belum Kawin',
+              tanggalPerkawinan: m.tanggalPerkawinan || '',
+              kewarganegaraan: m.kewarganegaraan || 'WNI',
+              namaAyah: cleanIndonesianName(m.namaAyah || ''),
+              namaIbu: cleanIndonesianName(m.namaIbu || ''),
+            }))
         : [
             {
-              nik: finalNoKK,
+              nik: finalNik || finalNoKK,
               nama: cleanNama,
               hubungan: 'Kepala Keluarga',
               tempatLahir: 'Banyumas',
@@ -213,23 +292,61 @@ export const WargaModal: React.FC<WargaModalProps> = ({
             },
           ];
 
-    onSave({
-      nama: cleanNama,
-      noKK: finalNoKK,
-      noRumah: noRumah || '01',
-      rt: rt || '08',
-      rw: rw || '05',
-      alamat: alamat || 'RT 08 RW 05 Desa Kotayasa',
-      kodePos: kodePos || '53183',
-      tanggalDikeluarkan: tanggalDikeluarkan || '',
-      jenisKelamin,
-      jumlahJiwa: membersToSave.length,
-      statusIuran,
-      anggotaKeluarga: membersToSave,
-      pin: '123456',
-    });
+    setIsSubmitting(true);
+    try {
+      if (editingWarga && onUpdate) {
+        const res = await onUpdate({
+          ...editingWarga,
+          nama: cleanNama,
+          noKK: finalNoKK,
+          nik: finalNik || editingWarga.nik,
+          telepon: telepon.trim(),
+          noRumah: noRumah.trim() || '01',
+          rt: rt.trim() || editingWarga.rt || '08',
+          rw: rw.trim() || editingWarga.rw || '05',
+          alamat: alamat.trim() || `RT ${rt || '08'} RW ${rw || '05'} Desa Kotayasa`,
+          kodePos: kodePos.trim() || '53183',
+          tanggalDikeluarkan: tanggalDikeluarkan.trim(),
+          jenisKelamin,
+          jumlahJiwa: membersToSave.length,
+          statusIuran,
+          anggotaKeluarga: membersToSave,
+        });
+        if (res && res.ok === false) {
+          setFormError(res.message || 'Gagal menyimpan perubahan data warga ke Cloud Firestore.');
+          return;
+        }
+        onClose();
+        return;
+      }
 
-    onClose();
+      const res = await onSave({
+        nama: cleanNama,
+        noKK: finalNoKK,
+        nik: finalNik || undefined,
+        telepon: telepon.trim() || undefined,
+        noRumah: noRumah.trim() || '01',
+        rt: rt.trim() || '08',
+        rw: rw.trim() || '05',
+        alamat: alamat.trim() || `RT ${rt || '08'} RW ${rw || '05'} Desa Kotayasa`,
+        kodePos: kodePos.trim() || '53183',
+        tanggalDikeluarkan: tanggalDikeluarkan.trim(),
+        jenisKelamin,
+        jumlahJiwa: membersToSave.length,
+        statusIuran,
+        anggotaKeluarga: membersToSave,
+        pin: '123456',
+      });
+      if (res && res.ok === false) {
+        setFormError(res.message || 'Gagal menyimpan data warga baru ke Cloud Firestore.');
+        return;
+      }
+      onClose();
+    } catch (err: any) {
+      setFormError(err?.message || 'Terjadi kesalahan saat menyimpan data warga ke server.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -243,48 +360,55 @@ export const WargaModal: React.FC<WargaModalProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold text-[#0B5D3F]">
-                Import Excel Warga & Penerimaan Bantuan
+                {isEditMode
+                  ? `Edit Data Warga & Kartu Keluarga (${editingWarga?.nama})`
+                  : 'Import Excel Warga & Penerimaan Bantuan'}
               </h3>
               <p className="text-xs text-slate-500">
-                Sekali import langsung dikelompokkan ke KK, Anggota Keluarga & Data Bansos
+                {isEditMode
+                  ? 'Perbarui data Kepala Keluarga, No KK, alamat, serta tambah/edit/hapus anggota keluarga'
+                  : 'Sekali import langsung dikelompokkan ke KK, Anggota Keluarga & Data Bansos'}
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-white text-slate-500 transition-colors cursor-pointer"
+            disabled={isSubmitting}
+            className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-white text-slate-500 transition-colors cursor-pointer disabled:opacity-50"
           >
             <X size={18} />
           </button>
         </div>
 
-        {/* Mode Tabs */}
-        <div className="flex border-b border-slate-200 bg-slate-50 p-1.5 shrink-0">
-          <button
-            type="button"
-            onClick={() => setActiveTab('excel')}
-            className={`flex-1 flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
-              activeTab === 'excel'
-                ? 'bg-white text-[#0B5D3F] shadow-xs'
-                : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <FileSpreadsheet size={15} />
-            <span>Import File Excel (Sekaligus Semua Warga & Bantuan)</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('manual')}
-            className={`flex-1 flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
-              activeTab === 'manual'
-                ? 'bg-white text-[#0B5D3F] shadow-xs'
-                : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <UserPlus size={15} />
-            <span>Tambah Manual Satu KK</span>
-          </button>
-        </div>
+        {/* Mode Tabs (hidden in Edit mode) */}
+        {!isEditMode && (
+          <div className="flex border-b border-slate-200 bg-slate-50 p-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setActiveTab('excel')}
+              className={`flex-1 flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
+                activeTab === 'excel'
+                  ? 'bg-white text-[#0B5D3F] shadow-xs'
+                  : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <FileSpreadsheet size={15} />
+              <span>Import File Excel (Sekaligus Semua Warga & Bantuan)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('manual')}
+              className={`flex-1 flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition-all cursor-pointer ${
+                activeTab === 'manual'
+                  ? 'bg-white text-[#0B5D3F] shadow-xs'
+                  : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <UserPlus size={15} />
+              <span>Tambah Manual Satu KK</span>
+            </button>
+          </div>
+        )}
 
         {/* TAB 1: IMPORT EXCEL MASSAL */}
         {activeTab === 'excel' && (
@@ -636,7 +760,36 @@ export const WargaModal: React.FC<WargaModalProps> = ({
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Wilayah RT / RW
+                    NIK Kepala Keluarga (16 Digit)
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={16}
+                    value={nik}
+                    onChange={(e) => setNik(e.target.value)}
+                    placeholder="3302210101850001 (Opsional)"
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    No. Telepon / WhatsApp
+                  </label>
+                  <input
+                    type="text"
+                    value={telepon}
+                    onChange={(e) => setTelepon(e.target.value)}
+                    placeholder="0812xxxxxxxx (Opsional)"
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800 focus:border-[#0B5D3F] outline-hidden"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Wilayah RT / RW {!isServer && <span className="text-[10px] font-medium text-slate-400">(Sesuai RT Admin)</span>}
                   </label>
                   <div className="flex gap-2">
                     <div className="flex-1 flex items-center gap-1.5 border border-slate-200 rounded-xl px-3 py-2 bg-slate-50/50">
@@ -644,9 +797,10 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                       <input
                         type="text"
                         value={rt}
+                        disabled={!isServer}
                         onChange={(e) => setRt(e.target.value)}
                         placeholder="08"
-                        className="w-full text-xs font-bold text-slate-800 outline-hidden bg-transparent"
+                        className="w-full text-xs font-bold text-slate-800 outline-hidden bg-transparent disabled:opacity-70 disabled:cursor-not-allowed"
                       />
                     </div>
                     <div className="flex-1 flex items-center gap-1.5 border border-slate-200 rounded-xl px-3 py-2 bg-slate-50/50">
@@ -654,9 +808,10 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                       <input
                         type="text"
                         value={rw}
+                        disabled={!isServer}
                         onChange={(e) => setRw(e.target.value)}
                         placeholder="05"
-                        className="w-full text-xs font-bold text-slate-800 outline-hidden bg-transparent"
+                        className="w-full text-xs font-bold text-slate-800 outline-hidden bg-transparent disabled:opacity-70 disabled:cursor-not-allowed"
                       />
                     </div>
                   </div>
@@ -985,21 +1140,36 @@ export const WargaModal: React.FC<WargaModalProps> = ({
               </div>
             </div>
 
+            {formError && (
+              <div className="flex items-start gap-2 rounded-xl bg-rose-50 border border-rose-200 p-3 text-xs font-semibold text-rose-800">
+                <AlertCircle size={16} className="shrink-0 text-rose-600 mt-0.5" />
+                <span>{formError}</span>
+              </div>
+            )}
+
             {/* Submit Footer */}
             <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-3 sticky bottom-0 bg-white py-2">
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
+                disabled={isSubmitting}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer disabled:opacity-50"
               >
                 Batal
               </button>
               <button
                 type="submit"
-                className="flex items-center gap-2 rounded-xl bg-[#0B5D3F] px-6 py-2.5 text-xs font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer"
+                disabled={isSubmitting}
+                className="flex items-center gap-2 rounded-xl bg-[#0B5D3F] px-6 py-2.5 text-xs font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer disabled:opacity-60"
               >
-                <Check size={16} strokeWidth={2.5} />
-                <span>Simpan Warga & Aktifkan Akun</span>
+                {isSubmitting ? <RefreshCw size={16} className="animate-spin" /> : <Check size={16} strokeWidth={2.5} />}
+                <span>
+                  {isSubmitting
+                    ? 'Menyimpan ke Server Firebase...'
+                    : isEditMode
+                    ? 'Simpan Perubahan Data KK'
+                    : 'Simpan Warga & Aktifkan Akun'}
+                </span>
               </button>
             </div>
           </form>

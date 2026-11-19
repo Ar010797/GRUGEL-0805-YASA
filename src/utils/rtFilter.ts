@@ -32,7 +32,7 @@ export function normalizeRTCode(value?: string | null): string {
   if (/^semua(\s+rt)?$/i.test(cleaned)) {
     return 'SEMUA';
   }
-  const rtMatch = cleaned.match(/RT\s*0*([0-9]+)/i);
+  const rtMatch = cleaned.match(/RT[\s.\-:_]*0*([0-9]+)/i);
   if (rtMatch) {
     return rtMatch[1].padStart(2, '0');
   }
@@ -40,14 +40,14 @@ export function normalizeRTCode(value?: string | null): string {
   if (numMatch) {
     return numMatch[1].padStart(2, '0');
   }
-  return cleaned.toUpperCase();
+  return cleaned.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 10);
 }
 
 export function normalizeRWCode(value?: string | null, fallback = '05'): string {
   if (!value) return fallback;
   const cleaned = value.trim();
   if (!cleaned) return fallback;
-  const rwMatch = cleaned.match(/RW\s*0*([0-9]+)/i);
+  const rwMatch = cleaned.match(/RW[\s.\-:_]*0*([0-9]+)/i);
   if (rwMatch) {
     return rwMatch[1].padStart(2, '0');
   }
@@ -55,7 +55,8 @@ export function normalizeRWCode(value?: string | null, fallback = '05'): string 
   if (numMatch) {
     return numMatch[1].padStart(2, '0');
   }
-  return cleaned.toUpperCase();
+  const sanitized = cleaned.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 10);
+  return sanitized || fallback;
 }
 
 export interface ResidentOption {

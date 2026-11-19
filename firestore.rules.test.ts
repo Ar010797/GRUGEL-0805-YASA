@@ -1,9 +1,15 @@
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import {
+  buildBantuanFirestorePayload,
   buildScopeIds,
+  buildTransactionFirestorePayload,
+  buildWargaFirestorePayload,
+  resolveEntityDocId,
   RW05_RT_CODES,
 } from './src/utils/firebaseSync';
+import * as XLSX from 'xlsx';
+import { parseExcelWargaAndBantuan } from './src/utils/excelWargaImport';
 import {
   buildServerFilteredViewData,
   collectRegisteredRTs,
@@ -51,8 +57,11 @@ const dirtyDozenChecks: { name: string; assertFn: () => void }[] = [
     assertFn: () => assert.match(rules, /request\.auth\.token\.email_verified == true/),
   },
   {
-    name: '3. Bootstrapped admin email included cleanly',
-    assertFn: () => assert.match(rules, /request\.auth\.token\.email == 'ar01071997@gmail\.com'/),
+    name: '3. Bootstrapped admin email included cleanly with case-insensitive string guard',
+    assertFn: () => {
+      assert.match(rules, /request\.auth\.token\.email is string/);
+      assert.match(rules, /request\.auth\.token\.email\.lower\(\) == 'ar01071997@gmail\.com'/);
+    },
   },
   {
     name: '4. No blanket allow read/write on any collection',
@@ -847,9 +856,363 @@ const unitLogicChecks: { name: string; assertFn: () => void }[] = [
       assert.equal(friendly.includes('{'), false);
     },
   },
+  {
+    name: '29. Hardened normCodeStr & sameCode rules handle RT/RW prefixes without cross-RT leak and enforce wargaProfiles rw immutability',
+    assertFn: () => {
+      assert.match(rules, /function normCodeStr\(val\)/);
+      assert.match(rules, /function sameCode\(a, b\)/);
+      assert.match(
+        rules,
+        /match \/wargaProfiles\/\{uid\}[\s\S]*allow update:[\s\S]*incoming\(\)\.rw == existing\(\)\.rw[\s\S]*isAssignedAdmin\(existing\(\)\.rw, existing\(\)\.rt\)[\s\S]*isAssignedAdmin\(incoming\(\)\.rw, incoming\(\)\.rt\)/
+      );
+      assert.match(
+        rules,
+        /function isValidRwScope\(data\)[\s\S]*sameCode\(data\.rwId\.replace\('\^rw_', ''\), data\.rw\)/
+      );
+      assert.match(
+        rules,
+        /function isValidRwRtScope\(data\)[\s\S]*sameCode\(data\.rtId\.replace\('\^rt_', ''\), data\.rt\)/
+      );
+    },
+  },
+  {
+    name: '30. resolveEntityDocId preserves exact valid Firestore doc IDs up to 128 chars',
+    assertFn: () => {
+      const exact125 = 'w_' + 'a'.repeat(123);
+      assert.equal(exact125.length, 125);
+      assert.equal(resolveEntityDocId(exact125, 'w'), exact125);
+      assert.equal(resolveEntityDocId('warga-rt03_kk_001', 'w'), 'warga-rt03_kk_001');
+      assert.match(resolveEntityDocId('id with spaces!', 'w'), /^id_with_spaces_$/);
+    },
+  },
+  {
+    name: '31. Server RW payload builders preserve non-default RT (e.g. RT 03) on linked Transaction and Bantuan updates',
+    assertFn: () => {
+      const serverCtx = {
+        uid: 'server_uid_1',
+        role: 'server' as const,
+        rt: 'SEMUA',
+        rw: '05',
+        email: 'ar01071997@gmail.com',
+        username: 'server',
+        displayName: 'Super Admin RW 05',
+        serverUid: 'server_uid_1',
+        adminsByRt: {},
+      };
+      const txRt03: Transaction = {
+        id: 'tx_rt03_001',
+        tanggal: '2026-10-18',
+        kategori: 'Iuran Warga',
+        keterangan: 'Iuran RT 03',
+        nominal: 30000,
+        tipe: 'masuk',
+        residentId: 'w_rt03_1',
+        namaWarga: 'Suharto',
+        noKK: '3302030000000001',
+        rtScope: 'RT 03 RW 05',
+      };
+      const builtTx = buildTransactionFirestorePayload(txRt03, null, serverCtx);
+      assert.equal(builtTx.rt, '03');
+      assert.equal(builtTx.rtId, 'rt_03');
+      assert.equal(builtTx.rw, '05');
+      assert.equal(builtTx.rwId, 'rw_05');
+      assert.equal(builtTx.rtScope, 'RT 03 RW 05');
+
+      const bantuanRt03 = {
+        id: 'b_rt03_001',
+        jenisBantuan: 'BLT Desa',
+        namaPenerima: 'Suharto',
+        noKK: '3302030000000001',
+        nominalAtauBarang: 'Rp 300.000',
+        tanggal: '2026-10-18',
+        status: 'Sudah Disalurkan' as const,
+        rtScope: 'RT 03 RW 05',
+      };
+      const builtBantuan = buildBantuanFirestorePayload(bantuanRt03, null, serverCtx);
+      assert.equal(builtBantuan.rt, '03');
+      assert.equal(builtBantuan.rtId, 'rt_03');
+      assert.equal(builtBantuan.rw, '05');
+      assert.equal(builtBantuan.rwId, 'rw_05');
+    },
+  },
+  {
+    name: '32. Anggota KK add/remove & Kepala Keluarga edit keep member count, NIK cleanliness, and linked records consistent',
+    assertFn: () => {
+      const warga: Warga = {
+        id: 'w_kk_edit_test',
+        no: 1,
+        nama: 'Hendra Wijaya',
+        noKK: '3302080101850001',
+        nik: '3302080101850011',
+        noRumah: '08',
+        rt: '08',
+        rw: '05',
+        jenisKelamin: 'Laki-laki',
+        jumlahJiwa: 2,
+        statusIuran: 'Sudah',
+        anggotaKeluarga: [
+          { nik: '3302080101850011', nama: 'Hendra Wijaya', hubungan: 'Kepala Keluarga', jenisKelamin: 'Laki-laki' },
+          { nik: '3302085205880012', nama: 'Dewi Lestari', hubungan: 'Istri', jenisKelamin: 'Perempuan' },
+        ],
+      };
+
+      // Simulate add member + remove member -> jumlahJiwa reflects active member count
+      const afterAdd = [
+        ...(warga.anggotaKeluarga || []),
+        { nik: '3302081010150013', nama: 'Rafi Wijaya', hubungan: 'Anak', jenisKelamin: 'Laki-laki' as const },
+      ];
+      assert.equal(afterAdd.length, 3);
+      const afterRemove = afterAdd.filter((m) => m.nama !== 'Hendra Wijaya');
+      assert.equal(afterRemove.length, 2);
+      assert.equal(afterRemove.some((m) => m.nama === 'Dewi Lestari'), true);
+      assert.equal(afterRemove.some((m) => m.nama === 'Rafi Wijaya'), true);
+    },
+  },
+  {
+    name: '33. normalizeRTCode & normalizeRWCode sanitize dots, slashes, and spaces so rwId/rtId always pass Firestore regex',
+    assertFn: () => {
+      assert.equal(normalizeRTCode('RT 08/05'), '08');
+      assert.equal(normalizeRTCode('rt.03'), '03');
+      assert.equal(normalizeRTCode('RT-07'), '07');
+      assert.equal(normalizeRTCode('Semua RT'), 'SEMUA');
+      assert.equal(normalizeRTCode('A-1.B'), 'A1B');
+      assert.equal(normalizeRWCode('RW. 05'), '05');
+      assert.equal(normalizeRWCode('RW 05/Kota'), '05');
+      assert.equal(normalizeRWCode('05/Kota'), '05KOTA');
+      const { rwId, rtId } = buildScopeIds('08', 'RW. 05');
+      assert.match(rwId, /^rw_[a-zA-Z0-9]+$/);
+      assert.match(rtId, /^rt_[a-zA-Z0-9]+$/);
+    },
+  },
+  {
+    name: '34. parseExcelWargaAndBantuan handles "Semua RT" Super Admin default without emitting invalid RT 00',
+    assertFn: () => {
+      const ws = XLSX.utils.aoa_to_sheet([
+        ['No KK', 'NIK', 'Nama Lengkap', 'Hubungan', 'Alamat'],
+        ['3302080101900001', '3302080101900011', 'Budi Santoso', 'Kepala Keluarga', 'Jl. Mawar'],
+        ['3302080101900002', '3302080101900012', 'Slamet Riyadi', 'Kepala Keluarga', ''],
+      ]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Warga');
+      const arrayBuf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+      const mockFile = {
+        arrayBuffer: async () => arrayBuf,
+      } as unknown as File;
+
+      return parseExcelWargaAndBantuan(mockFile, {
+        rt: 'Semua RT',
+        rw: '05',
+        alamat: 'Semua RT Desa Kotayasa',
+      }).then((parsed) => {
+        assert.equal(parsed.wargaList.length, 2);
+        assert.equal(parsed.wargaList[0].rt, '08');
+        assert.equal(parsed.wargaList[0].rw, '05');
+        assert.equal(parsed.wargaList[0].alamat, 'Jl. Mawar');
+        assert.equal(parsed.wargaList[1].rt, '08');
+        assert.match(parsed.wargaList[1].alamat || '', /RT 08 RW 05/);
+      });
+    },
+  },
+  {
+    name: '35. buildWargaFirestorePayload for bulk Excel-imported Warga produces all required valid isValidWarga fields',
+    assertFn: () => {
+      const serverCtx = {
+        uid: 'ak49V3uyONMqWdqWOeVViDaQ4nu2',
+        role: 'server' as const,
+        rt: 'SEMUA',
+        rw: '05',
+        email: 'ar01071997@gmail.com',
+        username: 'server',
+        displayName: 'Super Admin RW 05',
+        serverUid: 'ak49V3uyONMqWdqWOeVViDaQ4nu2',
+        adminsByRt: {},
+      };
+      const imported: Warga = {
+        id: 'w_1794912162578_0_uhrb',
+        no: 1,
+        nama: 'Budi Santoso',
+        noKK: '3302080101900001',
+        nik: '3302080101900011',
+        noRumah: '01',
+        rt: '08',
+        rw: '05',
+        alamat: 'RT 08 RW 05 Desa Kotayasa',
+        jenisKelamin: 'Laki-laki',
+        jumlahJiwa: 1,
+        statusIuran: 'Belum',
+        statusIuranPerTahun: { 2026: 'Belum' },
+        pin: '123456',
+        anggotaKeluarga: [
+          {
+            nik: '3302080101900011',
+            nama: 'Budi Santoso',
+            hubungan: 'Kepala Keluarga',
+            jenisKelamin: 'Laki-laki',
+          },
+        ],
+        updatedAt: new Date().toISOString(),
+      };
+      const payload = buildWargaFirestorePayload(imported, null, serverCtx);
+      assert.equal(payload.id, 'w_1794912162578_0_uhrb');
+      assert.equal(payload.rt, '08');
+      assert.equal(payload.rw, '05');
+      assert.equal(payload.rtId, 'rt_08');
+      assert.equal(payload.rwId, 'rw_05');
+      assert.equal(payload.ownerUid, serverCtx.uid);
+      assert.equal(Array.isArray(payload.accessUids), true);
+      assert.equal(payload.accessUids.includes(serverCtx.uid), true);
+      assert.equal(Array.isArray(payload.anggotaKeluarga), true);
+      assert.equal(Boolean(payload.createdAt), true);
+      assert.equal(Boolean(payload.updatedAt), true);
+    },
+  },
+  {
+    name: '36. Security rules support punctuated RT/RW normalization and Server RW repair on /admins/{uid}',
+    assertFn: () => {
+      assert.match(rules, /function normCodeStr\(val\)[\s\S]*\^\(RT\|RW\)\[\\\\s\.:_-\]\*/);
+      assert.match(rules, /match \/admins\/\{uid\}[\s\S]*sameCode\(incoming\(\)\.rw, existing\(\)\.rw\)/);
+      assert.match(rules, /match \/admins\/\{uid\}[\s\S]*affectedKeys\(\)\.hasOnly\(\['email', 'displayName', 'username', 'role', 'rt', 'rw', 'rtId', 'rwId', 'rtScope', 'status', 'updatedAt'\]\)/);
+    },
+  },
+  {
+    name: '37. Admin RT 08 buildWargaFirestorePayload avoids "null" strings and preserves existing ownerUid/rw/rt on Excel-imported Warga updates',
+    assertFn: () => {
+      const adminRt08Ctx = {
+        uid: 'brXUxS9dzRhF0T5L6i4I7FXtB2N2',
+        role: 'admin' as const,
+        rt: '08',
+        rw: '05',
+        email: 'admin.adminrt08@rt.kotayasa.desa.id',
+        username: 'AdminRT08',
+        displayName: 'Admin RT 08',
+        serverUid: 'ak49V3uyONMqWdqWOeVViDaQ4nu2',
+        adminsByRt: { '08': ['brXUxS9dzRhF0T5L6i4I7FXtB2N2'] },
+      };
+      const existingMeta = {
+        ownerUid: 'ak49V3uyONMqWdqWOeVViDaQ4nu2',
+        createdAt: { seconds: 1794993675, nanoseconds: 0 },
+        rw: '05',
+        rt: '08',
+        serverConfirmed: true,
+      };
+      const wargaUpdate = {
+        id: 'w_1794993675714_0_acbd',
+        no: 1,
+        nama: 'Budi Santoso',
+        noKK: '3302080101900001',
+        nik: null as unknown as string,
+        noRumah: '01',
+        rt: '08',
+        rw: '05',
+        alamat: null as unknown as string,
+        jenisKelamin: 'Laki-laki' as const,
+        jumlahJiwa: 1,
+        statusIuran: 'Sudah' as const,
+      };
+      const payload = buildWargaFirestorePayload(wargaUpdate, existingMeta, adminRt08Ctx);
+      assert.equal(payload.id, 'w_1794993675714_0_acbd');
+      assert.equal(payload.ownerUid, 'ak49V3uyONMqWdqWOeVViDaQ4nu2');
+      assert.equal('nik' in payload, false);
+      assert.equal('alamat' in payload, false);
+      assert.equal(payload.rt, '08');
+      assert.equal(payload.rw, '05');
+      assert.equal(payload.rtId, 'rt_08');
+      assert.equal(payload.rwId, 'rw_05');
+      assert.equal(payload.accessUids.includes('brXUxS9dzRhF0T5L6i4I7FXtB2N2'), true);
+      assert.equal(payload.accessUids.includes('ak49V3uyONMqWdqWOeVViDaQ4nu2'), true);
+    },
+  },
+  {
+    name: '38. Security rules normCodeStr strips trailing RW/RT suffixes without cross-RT match',
+    assertFn: () => {
+      assert.equal(
+        rules.includes(".replace('\\\\s*[/,-]?\\\\s*(RW|RT)[\\\\s.:_-]*.*$', '')"),
+        true
+      );
+      const jsNormCodeStr = (val: string) =>
+        val
+          .trim()
+          .toUpperCase()
+          .replace(/^(RT|RW)[\s.:_-]*/i, '')
+          .replace(/\s*[/,-]?\s*(RW|RT)[\s.:_-]*.*$/i, '')
+          .replace(/^0+/, '');
+      assert.equal(jsNormCodeStr('RT 08 RW 05'), '8');
+      assert.equal(jsNormCodeStr('RT 08 / RW 05'), '8');
+      assert.equal(jsNormCodeStr('RT.08 - RW.05'), '8');
+      assert.equal(jsNormCodeStr('RT 01 RW 08'), '1');
+      assert.notEqual(jsNormCodeStr('RT 01 RW 08'), jsNormCodeStr('RT 08 RW 05'));
+    },
+  },
+  {
+    name: '39. buildWargaFirestorePayload ignores unconfirmed or permissionDenied meta ownerUid/createdAt',
+    assertFn: () => {
+      const adminRt08Ctx = {
+        uid: 'brXUxS9dzRhF0T5L6i4I7FXtB2N2',
+        role: 'admin' as const,
+        rt: '08',
+        rw: '05',
+        email: 'admin.adminrt08@rt.kotayasa.desa.id',
+        username: 'AdminRT08',
+        displayName: 'Admin RT 08',
+        serverUid: 'ak49V3uyONMqWdqWOeVViDaQ4nu2',
+        adminsByRt: { '08': ['brXUxS9dzRhF0T5L6i4I7FXtB2N2'] },
+      };
+      const wargaSample: Warga = {
+        id: 'w_1794993675714_1_acbd',
+        no: 2,
+        nama: 'Siti Aminah',
+        noKK: '3302080101900002',
+        noRumah: '02',
+        rt: '08',
+        rw: '05',
+        jenisKelamin: 'Perempuan',
+        jumlahJiwa: 2,
+        statusIuran: 'Belum',
+      };
+      const staleCreated = { seconds: 1700000000, nanoseconds: 0 };
+      const unconfirmedPayload = buildWargaFirestorePayload(
+        wargaSample,
+        {
+          ownerUid: 'someone_else_uid',
+          createdAt: staleCreated,
+          serverConfirmed: false,
+        } as any,
+        adminRt08Ctx
+      );
+      assert.equal(unconfirmedPayload.ownerUid, 'brXUxS9dzRhF0T5L6i4I7FXtB2N2');
+      assert.notDeepEqual(unconfirmedPayload.createdAt, staleCreated);
+
+      const deniedPayload = buildWargaFirestorePayload(
+        wargaSample,
+        {
+          ownerUid: 'someone_else_uid',
+          createdAt: staleCreated,
+          serverConfirmed: true,
+          permissionDenied: true,
+        } as any,
+        adminRt08Ctx
+      );
+      assert.equal(deniedPayload.ownerUid, 'brXUxS9dzRhF0T5L6i4I7FXtB2N2');
+      assert.notDeepEqual(deniedPayload.createdAt, staleCreated);
+    },
+  },
+  {
+    name: '40. firebaseSync guards permissionDenied metadata and validates scope across edit, delete, batch, and bulk writes',
+    assertFn: () => {
+      const syncSource = readFileSync('./src/utils/firebaseSync.ts', 'utf8');
+      assert.match(syncSource, /async function resolveExistingMeta[\s\S]*permissionDenied:\s*true/);
+      assert.match(syncSource, /function buildCreateSafePayload/);
+      assert.match(syncSource, /saveScopedEntityDoc[\s\S]*effectiveExisting\?\.permissionDenied/);
+      assert.match(syncSource, /deleteScopedEntityDoc[\s\S]*resolvedMeta\?\.permissionDenied/);
+      assert.match(syncSource, /saveWargaWithLinkedSyncBatch[\s\S]*validateAdminWriteScope/);
+      assert.match(syncSource, /bulkSaveWargaAndBantuanDocs[\s\S]*permissionDenied/);
+    },
+  },
 ];
 
-for (const check of [...dirtyDozenChecks, ...unitLogicChecks]) {
-  check.assertFn();
-  console.log(`PASS: ${check.name}`);
-}
+Promise.resolve().then(async () => {
+  for (const check of [...dirtyDozenChecks, ...unitLogicChecks]) {
+    await check.assertFn();
+    console.log(`PASS: ${check.name}`);
+  }
+});

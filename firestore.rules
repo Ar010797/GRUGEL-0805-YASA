@@ -30,7 +30,8 @@ service cloud.firestore {
         ('email_verified' in request.auth.token) &&
         request.auth.token.email_verified == true &&
         ('email' in request.auth.token) &&
-        request.auth.token.email == 'ar01071997@gmail.com';
+        request.auth.token.email is string &&
+        request.auth.token.email.lower() == 'ar01071997@gmail.com';
     }
 
     function hasAdminDoc() {
@@ -41,12 +42,20 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/admins/$(request.auth.uid)).data;
     }
 
+    function normCodeStr(val) {
+      return val is string
+        ? val.trim().upper()
+            .replace('^(RT|RW)[\\s.:_-]*', '')
+            .replace('\\s*[/,-]?\\s*(RW|RT)[\\s.:_-]*.*$', '')
+            .replace('^0+', '')
+        : '';
+    }
+
     function sameCode(a, b) {
       return a == b || (
-        a is string && b is string && (
-          (a.size() == 1 && b == '0' + a) ||
-          (b.size() == 1 && a == '0' + b)
-        )
+        a is string && b is string &&
+        normCodeStr(a) != '' &&
+        normCodeStr(a) == normCodeStr(b)
       );
     }
 
@@ -137,7 +146,8 @@ service cloud.firestore {
       return !('rwId' in data) || (
         data.rwId is string && (
           data.rwId == 'rw_' + data.rw ||
-          (data.rw is string && data.rw.size() == 1 && data.rwId == 'rw_0' + data.rw)
+          (data.rw is string && data.rw.size() == 1 && data.rwId == 'rw_0' + data.rw) ||
+          (data.rwId.matches('^rw_[a-zA-Z0-9]+$') && sameCode(data.rwId.replace('^rw_', ''), data.rw))
         )
       );
     }
@@ -149,7 +159,8 @@ service cloud.firestore {
           (data.rt == 'SEMUA' && data.rtId == 'SEMUA') ||
           (data.rt != 'SEMUA' && (
             data.rtId == 'rt_' + data.rt ||
-            (data.rt is string && data.rt.size() == 1 && data.rtId == 'rt_0' + data.rt)
+            (data.rt is string && data.rt.size() == 1 && data.rtId == 'rt_0' + data.rt) ||
+            (data.rtId.matches('^rt_[a-zA-Z0-9]+$') && sameCode(data.rtId.replace('^rt_', ''), data.rt))
           ))
         ))
       );
@@ -671,8 +682,8 @@ service cloud.firestore {
         (
           (
             isServerInRW(existing().rw) &&
-            incoming().rw == existing().rw &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'username', 'role', 'rt', 'rtId', 'rwId', 'rtScope', 'status', 'updatedAt'])
+            sameCode(incoming().rw, existing().rw) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'username', 'role', 'rt', 'rw', 'rtId', 'rwId', 'rtScope', 'status', 'updatedAt'])
           ) ||
           (
             request.auth.uid == uid &&
@@ -711,6 +722,7 @@ service cloud.firestore {
         isValidWargaProfile(incoming()) &&
         incoming().uid == existing().uid &&
         incoming().ownerUid == existing().ownerUid &&
+        incoming().rw == existing().rw &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
         isAssignedAdmin(existing().rw, existing().rt) &&

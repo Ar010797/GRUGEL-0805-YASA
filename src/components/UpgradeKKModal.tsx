@@ -17,6 +17,7 @@ import {
 import { Warga, AnggotaKeluarga, Transaction } from '../types';
 import { cleanIndonesianName, cleanNIK } from '../utils/wargaHelpers';
 import { parseExcelWargaAndBantuan } from '../utils/excelWargaImport';
+import type { FirestoreWriteResult } from '../utils/firebaseSync';
 
 interface UpgradeKKModalProps {
   isOpen: boolean;
@@ -24,6 +25,7 @@ interface UpgradeKKModalProps {
   wargaList: Warga[];
   transactions: Transaction[];
   initialTargetWarga?: Warga | null;
+  isServer?: boolean;
   onApplyUpgrade: (payload: {
     wargaId: string;
     oldWarga: Warga;
@@ -42,7 +44,7 @@ interface UpgradeKKModalProps {
     keterangan: string;
     catatSantunanKematian: boolean;
     namaMeninggal?: string;
-  }) => void;
+  }) => Promise<FirestoreWriteResult | void> | void;
 }
 
 export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
@@ -51,6 +53,7 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
   wargaList,
   transactions,
   initialTargetWarga,
+  isServer = false,
   onApplyUpgrade,
 }) => {
   const [selectedWargaId, setSelectedWargaId] = useState<string>(initialTargetWarga?.id || '');
@@ -60,6 +63,8 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
   const [excelFamilies, setExcelFamilies] = useState<Omit<Warga, 'id' | 'no'>[]>([]);
   const [importSuccess, setImportSuccess] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Updated KK Data
   const [newNama, setNewNama] = useState('');
@@ -79,31 +84,55 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
   const [namaMeninggal, setNamaMeninggal] = useState('');
 
   const excelInputRef = useRef<HTMLInputElement>(null);
+  const wasOpenRef = useRef<boolean>(false);
+  const populatedIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (initialTargetWarga) {
-      setSelectedWargaId(initialTargetWarga.id);
-    } else if (wargaList.length > 0 && !selectedWargaId) {
-      setSelectedWargaId(wargaList[0].id);
+    if (!isOpen) {
+      wasOpenRef.current = false;
+      populatedIdRef.current = null;
+      setFormError(null);
+      setIsSubmitting(false);
+      return;
     }
-  }, [initialTargetWarga, wargaList]);
+
+    if (!wasOpenRef.current) {
+      wasOpenRef.current = true;
+      populatedIdRef.current = null;
+      setImportSuccess(false);
+      setImportError(null);
+      setFormError(null);
+      setIsSubmitting(false);
+      setExcelFamilies([]);
+      setKeterangan('');
+      setCatatSantunanKematian(false);
+      setNamaMeninggal('');
+      setSelectedWargaId(initialTargetWarga?.id || wargaList[0]?.id || '');
+    } else if (!selectedWargaId && wargaList.length > 0) {
+      setSelectedWargaId(initialTargetWarga?.id || wargaList[0].id);
+    }
+  }, [isOpen, initialTargetWarga?.id, wargaList, selectedWargaId]);
 
   const targetWarga = wargaList.find((w) => w.id === selectedWargaId) || null;
 
-  // Populate editable fields whenever targetWarga changes (unless Excel already loaded)
+  // Populate editable fields ONLY when modal opens or user selects a different KK (prevents onSnapshot wiping user edits)
   useEffect(() => {
-    if (targetWarga && !importSuccess) {
-      setNewNama(targetWarga.nama || '');
-      setNewNoKK(targetWarga.noKK || '');
-      setNewRt(targetWarga.rt || '08');
-      setNewRw(targetWarga.rw || '05');
-      setNewAlamat(targetWarga.alamat || 'RT 08 RW 05 Desa Kotayasa');
-      setNewKodePos(targetWarga.kodePos || '53183');
-      setNewTanggalDikeluarkan(targetWarga.tanggalDikeluarkan || '');
-      setNewJenisKelamin(targetWarga.jenisKelamin || 'Laki-laki');
-      setNewAnggota(targetWarga.anggotaKeluarga ? [...targetWarga.anggotaKeluarga] : []);
-    }
-  }, [selectedWargaId, targetWarga]);
+    if (!isOpen || !targetWarga || importSuccess) return;
+    if (populatedIdRef.current === targetWarga.id) return;
+    populatedIdRef.current = targetWarga.id;
+
+    setNewNama(targetWarga.nama || '');
+    setNewNoKK(targetWarga.noKK || '');
+    setNewRt(targetWarga.rt || '08');
+    setNewRw(targetWarga.rw || '05');
+    setNewAlamat(targetWarga.alamat || `RT ${targetWarga.rt || '08'} RW ${targetWarga.rw || '05'} Desa Kotayasa`);
+    setNewKodePos(targetWarga.kodePos || '53183');
+    setNewTanggalDikeluarkan(targetWarga.tanggalDikeluarkan || '');
+    setNewJenisKelamin(targetWarga.jenisKelamin || 'Laki-laki');
+    setNewAnggota(
+      targetWarga.anggotaKeluarga ? targetWarga.anggotaKeluarga.map((m) => ({ ...m })) : []
+    );
+  }, [isOpen, targetWarga, importSuccess]);
 
   if (!isOpen) return null;
 
@@ -213,61 +242,78 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
 
   const isKepalaBerubah = targetWarga && newNama && targetWarga.nama.toLowerCase() !== newNama.toLowerCase();
 
-  const handleConfirmSubmit = (e: React.FormEvent) => {
+  const handleConfirmSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setFormError(null);
+
     if (!targetWarga) {
-      alert('Silakan pilih data KK yang ingin diperbarui.');
+      setFormError('Silakan pilih data KK yang ingin diperbarui.');
       return;
     }
     const cleanName = cleanIndonesianName(newNama);
     const cleanNoKKDigits = cleanNIK(newNoKK);
 
     if (!cleanName) {
-      alert('Silakan masukkan Nama Kepala Keluarga baru.');
+      setFormError('Silakan masukkan Nama Kepala Keluarga baru.');
       return;
     }
     if (!cleanNoKKDigits || cleanNoKKDigits.length < 16) {
-      alert('Nomor Kartu Keluarga baru harus tepat 16 digit angka.');
+      setFormError('Nomor Kartu Keluarga baru harus tepat 16 digit angka.');
       return;
     }
 
-    const finalMembers = newAnggota.map((m) => ({
-      ...m,
-      nama: cleanIndonesianName(m.nama),
-      nik: cleanNIK(m.nik),
-      tempatLahir: m.tempatLahir || 'Banyumas',
-      tanggalLahir: m.tanggalLahir || '',
-      pendidikan: m.pendidikan || 'Tidak/Belum Sekolah',
-      pekerjaan: m.pekerjaan || 'Belum/Tidak Bekerja',
-      golonganDarah: m.golonganDarah || 'Tidak Tahu',
-      statusPerkawinan: m.statusPerkawinan || 'Belum Kawin',
-      tanggalPerkawinan: m.tanggalPerkawinan || '',
-      kewarganegaraan: m.kewarganegaraan || 'WNI',
-      namaAyah: cleanIndonesianName(m.namaAyah || ''),
-      namaIbu: cleanIndonesianName(m.namaIbu || ''),
-    }));
+    const finalMembers = newAnggota
+      .filter((m) => String(m.nama || '').trim() || String(m.nik || '').trim())
+      .map((m) => ({
+        ...m,
+        nama: cleanIndonesianName(m.nama),
+        nik: cleanNIK(m.nik),
+        tempatLahir: m.tempatLahir || 'Banyumas',
+        tanggalLahir: m.tanggalLahir || '',
+        pendidikan: m.pendidikan || 'Tidak/Belum Sekolah',
+        pekerjaan: m.pekerjaan || 'Belum/Tidak Bekerja',
+        golonganDarah: m.golonganDarah || 'Tidak Tahu',
+        statusPerkawinan: m.statusPerkawinan || 'Belum Kawin',
+        tanggalPerkawinan: m.tanggalPerkawinan || '',
+        kewarganegaraan: m.kewarganegaraan || 'WNI',
+        namaAyah: cleanIndonesianName(m.namaAyah || ''),
+        namaIbu: cleanIndonesianName(m.namaIbu || ''),
+      }));
 
-    onApplyUpgrade({
-      wargaId: targetWarga.id,
-      oldWarga: targetWarga,
-      newKKData: {
-        nama: cleanName,
-        noKK: cleanNoKKDigits,
-        rt: newRt,
-        rw: newRw,
-        alamat: newAlamat,
-        kodePos: newKodePos,
-        tanggalDikeluarkan: newTanggalDikeluarkan,
-        jenisKelamin: newJenisKelamin,
-        anggotaKeluarga: finalMembers,
-      },
-      alasan,
-      keterangan: keterangan || `Pembaruan data KK (${alasan})`,
-      catatSantunanKematian,
-      namaMeninggal: namaMeninggal.trim() || undefined,
-    });
+    setIsSubmitting(true);
+    try {
+      const res = await onApplyUpgrade({
+        wargaId: targetWarga.id,
+        oldWarga: targetWarga,
+        newKKData: {
+          nama: cleanName,
+          noKK: cleanNoKKDigits,
+          rt: newRt,
+          rw: newRw,
+          alamat: newAlamat,
+          kodePos: newKodePos,
+          tanggalDikeluarkan: newTanggalDikeluarkan,
+          jenisKelamin: newJenisKelamin,
+          anggotaKeluarga: finalMembers,
+        },
+        alasan,
+        keterangan: keterangan || `Pembaruan data KK (${alasan})`,
+        catatSantunanKematian,
+        namaMeninggal: namaMeninggal.trim() || undefined,
+      });
 
-    onClose();
+      if (res && res.ok === false) {
+        setFormError(res.message || 'Gagal memperbarui data KK di server Cloud Firestore.');
+        return;
+      }
+
+      onClose();
+    } catch (err: any) {
+      setFormError(err?.message || 'Terjadi kesalahan saat menyinkronkan pembaruan KK.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -486,6 +532,31 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                           className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-mono font-bold text-slate-900 focus:border-[#0B5D3F] outline-hidden"
                         />
                       </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-600 block mb-0.5">
+                            Wilayah RT {!isServer && <span className="font-normal text-slate-400">(Terkunci)</span>}
+                          </label>
+                          <input
+                            type="text"
+                            value={newRt}
+                            disabled={!isServer}
+                            onChange={(e) => setNewRt(e.target.value)}
+                            className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs font-bold text-slate-900 focus:border-[#0B5D3F] outline-hidden disabled:bg-slate-100 disabled:text-slate-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-600 block mb-0.5">
+                            Alamat KK
+                          </label>
+                          <input
+                            type="text"
+                            value={newAlamat}
+                            onChange={(e) => setNewAlamat(e.target.value)}
+                            className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-900 focus:border-[#0B5D3F] outline-hidden"
+                          />
+                        </div>
+                      </div>
                       <div>
                         <div className="flex items-center justify-between mb-1">
                           <span className="text-[10px] font-bold text-slate-700">
@@ -667,6 +738,13 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                   </div>
                 </div>
 
+                {formError && (
+                  <div className="flex items-start gap-2 rounded-xl bg-rose-50 border border-rose-200 p-3 text-xs font-semibold text-rose-800">
+                    <AlertCircle size={16} className="shrink-0 text-rose-600 mt-0.5" />
+                    <span>{formError}</span>
+                  </div>
+                )}
+
                 {/* Final Action Buttons */}
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
                   <div className="flex items-center gap-2 text-xs font-semibold text-[#0B5D3F]">
@@ -678,16 +756,22 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
                     <button
                       type="button"
                       onClick={onClose}
-                      className="flex-1 sm:flex-none rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+                      disabled={isSubmitting}
+                      className="flex-1 sm:flex-none rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer disabled:opacity-50"
                     >
                       Batal
                     </button>
                     <button
                       type="submit"
-                      className="flex-1 sm:flex-none rounded-xl bg-[#0B5D3F] px-5 py-2.5 text-xs font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                      disabled={isSubmitting}
+                      className="flex-1 sm:flex-none rounded-xl bg-[#0B5D3F] px-5 py-2.5 text-xs font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-60"
                     >
-                      <RefreshCw size={14} />
-                      <span>Terapkan Pembaruan KK & Pindahkan Data Kas</span>
+                      <RefreshCw size={14} className={isSubmitting ? 'animate-spin' : ''} />
+                      <span>
+                        {isSubmitting
+                          ? 'Menyimpan Upgrade KK ke Server...'
+                          : 'Terapkan Pembaruan KK & Pindahkan Data Kas'}
+                      </span>
                     </button>
                   </div>
                 </div>
