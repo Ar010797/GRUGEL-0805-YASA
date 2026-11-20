@@ -58,15 +58,25 @@ export function isSqlNetworkOrUnavailableError(err: unknown): boolean {
   return false;
 }
 
+function isPostgresConnectionString(val: string): boolean {
+  return /^postgres(ql)?:\/\//i.test(val.trim());
+}
+
 function getConnectionString(): string {
-  return String(
-    process.env.DATABASE_URL ||
-      process.env.POSTGRES_URL ||
-      process.env.POSTGRES_PRISMA_URL ||
-      process.env.NEON_DATABASE_URL ||
-      process.env.CLOUD_SQL_URL ||
-      ''
-  ).trim();
+  const candidates = [
+    process.env.DATABASE_URL,
+    process.env.POSTGRES_URL,
+    process.env.POSTGRES_PRISMA_URL,
+    process.env.NEON_DATABASE_URL,
+    process.env.CLOUD_SQL_URL,
+  ];
+  for (const candidate of candidates) {
+    const trimmed = String(candidate || '').trim();
+    if (trimmed && isPostgresConnectionString(trimmed)) {
+      return trimmed;
+    }
+  }
+  return '';
 }
 
 function isUnixSocketAvailable(socketPath: string): boolean {
@@ -102,9 +112,9 @@ export function getDatabaseConfigStatus(): DatabaseConfigStatus {
       return {
         configured: false,
         mode: 'unconfigured',
-        engineLabel: 'Firebase Auth & Cloud Firestore (Socket Cloud SQL tidak terpasang)',
+        engineLabel: 'PostgreSQL (Socket Cloud SQL tidak terpasang)',
         errorMessage:
-          'Socket Cloud SQL tidak terpasang pada runtime ini (aplikasi berjalan menggunakan Firebase Authentication & Cloud Firestore).',
+          'Socket PostgreSQL/Cloud SQL tidak terpasang pada runtime ini.',
       };
     }
     return {
@@ -117,9 +127,9 @@ export function getDatabaseConfigStatus(): DatabaseConfigStatus {
   return {
     configured: false,
     mode: 'unconfigured',
-    engineLabel: 'Firebase Auth & Cloud Firestore (PostgreSQL Belum Terkonfigurasi)',
+    engineLabel: 'PostgreSQL (Belum Terkonfigurasi)',
     errorMessage:
-      'Database PostgreSQL belum dikonfigurasi pada runtime ini (aplikasi berjalan menggunakan Firebase Authentication & Cloud Firestore).',
+      'Database PostgreSQL belum dikonfigurasi pada runtime ini.',
   };
 }
 

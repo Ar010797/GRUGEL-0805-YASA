@@ -40,6 +40,7 @@ export const appSettings = pgTable('app_settings', {
   >(),
   profilRT: jsonb('profil_rt').$type<ProfilRT>(),
   updatedAt: text('updated_at').notNull(),
+  version: integer('version').notNull().default(1),
 });
 
 export const adminAccounts = pgTable('admin_accounts', {
@@ -55,6 +56,7 @@ export const adminAccounts = pgTable('admin_accounts', {
   terakhirLogin: text('terakhir_login'),
   terakhirSinkronisasi: text('terakhir_sinkronisasi'),
   updatedAt: text('updated_at').notNull(),
+  version: integer('version').notNull().default(1),
 });
 
 export const warga = pgTable('warga', {
@@ -87,6 +89,7 @@ export const warga = pgTable('warga', {
   pinLockedUntil: bigint('pin_locked_until', { mode: 'number' }),
   riwayatPerubahanKK: jsonb('riwayat_perubahan_kk').$type<RiwayatPerubahanKK[]>(),
   updatedAt: text('updated_at').notNull(),
+  version: integer('version').notNull().default(1),
 });
 
 export const transactions = pgTable('transactions', {
@@ -96,6 +99,7 @@ export const transactions = pgTable('transactions', {
   keterangan: text('keterangan').notNull().default(''),
   nominal: bigint('nominal', { mode: 'number' }).notNull().default(0),
   tipe: text('tipe').notNull().default('masuk'),
+  residentId: text('resident_id'),
   namaWarga: text('nama_warga'),
   nomorRumah: text('nomor_rumah'),
   noKK: text('no_kk'),
@@ -103,6 +107,7 @@ export const transactions = pgTable('transactions', {
   tahun: integer('tahun').default(2026),
   rtScope: text('rt_scope'),
   updatedAt: text('updated_at').notNull(),
+  version: integer('version').notNull().default(1),
 });
 
 export const bantuan = pgTable('bantuan', {
@@ -118,6 +123,7 @@ export const bantuan = pgTable('bantuan', {
   keterangan: text('keterangan'),
   rtScope: text('rt_scope'),
   updatedAt: text('updated_at').notNull(),
+  version: integer('version').notNull().default(1),
 });
 
 export const pengumuman = pgTable('pengumuman', {
@@ -137,7 +143,12 @@ export const pengumuman = pgTable('pengumuman', {
   tempatAcara: text('tempat_acara'),
   keteranganTambahan: text('keterangan_tambahan'),
   rtScope: text('rt_scope'),
+  targetRts: jsonb('target_rts').$type<string[]>(),
+  senderRt: text('sender_rt'),
+  senderRw: text('sender_rw'),
+  senderRole: text('sender_role'),
   updatedAt: text('updated_at').notNull(),
+  version: integer('version').notNull().default(1),
 });
 
 export const dokumen = pgTable('dokumen', {
@@ -151,6 +162,7 @@ export const dokumen = pgTable('dokumen', {
   dataBase64: text('data_base64'),
   rtScope: text('rt_scope'),
   updatedAt: text('updated_at').notNull(),
+  version: integer('version').notNull().default(1),
 });
 
 export const laporanBulanan = pgTable('laporan_bulanan', {
@@ -173,6 +185,7 @@ export const laporanBulanan = pgTable('laporan_bulanan', {
   catatanKhusus: text('catatan_khusus'),
   statusVerifikasi: text('status_verifikasi').notNull().default('Menunggu Verifikasi'),
   updatedAt: text('updated_at').notNull(),
+  version: integer('version').notNull().default(1),
 });
 
 export const deletedEntities = pgTable('deleted_entities', {
@@ -197,5 +210,63 @@ export const authSessions = pgTable('auth_sessions', {
   wargaId: text('warga_id'),
   rtScope: text('rt_scope'),
   expiresAt: bigint('expires_at', { mode: 'number' }).notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
+export const notifications = pgTable('notifications', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  body: text('body').notNull(),
+  category: text('category').notNull(),
+  entityType: text('entity_type'),
+  entityId: text('entity_id'),
+  rwId: text('rw_id').notNull().default('05'),
+  targetRts: jsonb('target_rts').$type<string[]>().notNull(),
+  targetRoles: jsonb('target_roles').$type<string[]>(),
+  createdBy: text('created_by').notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
+export const notificationReads = pgTable('notification_reads', {
+  id: text('id').primaryKey(), // `${notificationId}:${userKey}`
+  notificationId: text('notification_id').notNull(),
+  userKey: text('user_key').notNull(),
+  readAt: text('read_at').notNull(),
+});
+
+export const pushSubscriptions = pgTable('push_subscriptions', {
+  id: text('id').primaryKey(), // sha256(endpoint)
+  userKey: text('user_key').notNull(),
+  role: text('role').notNull(),
+  rtId: text('rt_id').notNull().default('SEMUA'),
+  rwId: text('rw_id').notNull().default('05'),
+  endpoint: text('endpoint').notNull().unique(),
+  p256dh: text('p256dh').notNull(),
+  auth: text('auth').notNull(),
+  userAgent: text('user_agent'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const auditLogs = pgTable('audit_logs', {
+  id: text('id').primaryKey(),
+  actorUsername: text('actor_username').notNull(),
+  actorRole: text('actor_role').notNull(),
+  actorRt: text('actor_rt').notNull(),
+  actorRw: text('actor_rw').notNull(),
+  action: text('action').notNull(),
+  entityType: text('entity_type').notNull(),
+  entityId: text('entity_id').notNull(),
+  rtScope: text('rt_scope'),
+  summary: text('summary').notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
+export const processedMutations = pgTable('processed_mutations', {
+  mutationId: text('mutation_id').primaryKey(),
+  userKey: text('user_key').notNull(),
+  entityType: text('entity_type').notNull(),
+  entityId: text('entity_id').notNull(),
+  revision: bigint('revision', { mode: 'number' }).notNull().default(1),
   createdAt: text('created_at').notNull(),
 });

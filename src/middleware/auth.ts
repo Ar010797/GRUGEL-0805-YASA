@@ -48,18 +48,16 @@ export function createRequireAuth(options?: { allowQueryToken?: boolean }) {
       }
       return res.status(401).json({
         success: false,
-        code: 'REAUTH_FIREBASE',
-        message:
-          'Sesi login lama tidak valid atau telah berakhir. Aplikasi kini menggunakan Firebase Authentication — silakan login ulang.',
+        code: 'INVALID_SESSION',
+        message: 'Sesi login tidak valid atau telah berakhir. Silakan login kembali.',
       });
     } catch (err: any) {
       if (isSqlUnavailable(err) || isSqlNetworkOrUnavailableError(err)) {
-        console.info('Legacy SQL auth session verification skipped (Firebase mode active).');
-        return res.status(401).json({
+        return res.status(503).json({
           success: false,
-          code: 'REAUTH_FIREBASE',
+          code: 'DB_UNAVAILABLE',
           message:
-            'Sesi lama tidak dapat diverifikasi karena autentikasi telah beralih ke Firebase Authentication. Silakan muat ulang aplikasi.',
+            'Koneksi database server sedang tidak tersedia. Silakan coba beberapa saat lagi.',
         });
       }
       console.error('SQL auth session verification error:', err);
@@ -87,6 +85,22 @@ export function requireAdminOrServer(req: AuthRequest, res: Response, next: Next
     return res.status(403).json({
       success: false,
       message: 'Hak akses ditolak: Operasi ini hanya diperbolehkan untuk Admin RT atau Server.',
+    });
+  }
+  return next();
+}
+
+export function requireServerOnly(req: AuthRequest, res: Response, next: NextFunction) {
+  if (!req.authUser) {
+    return res.status(401).json({
+      success: false,
+      message: 'Autentikasi diperlukan.',
+    });
+  }
+  if (req.authUser.role !== 'server') {
+    return res.status(403).json({
+      success: false,
+      message: 'Hak akses ditolak: Operasi ini khusus Super Admin Server RW 05.',
     });
   }
   return next();

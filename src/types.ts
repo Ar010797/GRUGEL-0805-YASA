@@ -15,6 +15,7 @@ export interface Transaction {
   tahun?: number; // Tahun pembukuan (default: 2026)
   rtScope?: string; // Scope RT (misal 'RT 08')
   updatedAt?: string;
+  version?: number;
 }
 
 export interface AnggotaKeluarga {
@@ -69,6 +70,7 @@ export interface Warga {
   pinLockedUntil?: number; // timestamp jika salah 3x
   riwayatPerubahanKK?: RiwayatPerubahanKK[];
   updatedAt?: string;
+  version?: number;
 }
 
 export interface RiwayatPerubahanKK {
@@ -109,6 +111,7 @@ export interface AdminRTAccount {
   terakhirLogin?: string;
   terakhirSinkronisasi?: string;
   updatedAt?: string;
+  version?: number;
 }
 
 // Data pembaruan bulanan yang dikirimkan Admin RT ke Server Pusat Desa
@@ -132,6 +135,7 @@ export interface PembaruanBulananRT {
   catatanKhusus?: string;
   statusVerifikasi: 'Diterima' | 'Menunggu Verifikasi' | 'Perlu Klarifikasi';
   updatedAt?: string;
+  version?: number;
 }
 
 export interface PengumumanRT {
@@ -151,7 +155,12 @@ export interface PengumumanRT {
   tempatAcara?: string;
   keteranganTambahan?: string;
   rtScope?: string; // 'Semua RT' atau RT tertentu
+  targetRts?: string[]; // Daftar RT target: ['SEMUA'] atau ['01', '02']
+  senderRt?: string;
+  senderRw?: string;
+  senderRole?: 'server' | 'admin';
   updatedAt?: string;
+  version?: number;
 }
 
 // Profil Identitas RT & Format Kop Surat Resmi
@@ -191,6 +200,7 @@ export interface PengaturanKas {
   // Profil RT & Pengaturan Kop Surat Resmi
   profilRT?: ProfilRT;
   updatedAt?: string;
+  version?: number;
 }
 
 // Bantuan Pemerintah fleksibel: pilihan preset + input manual bebas
@@ -207,6 +217,7 @@ export interface BantuanPemerintah {
   keterangan?: string;
   rtScope?: string;
   updatedAt?: string;
+  version?: number;
 }
 
 export const PRESET_JENIS_BANTUAN = [
@@ -233,4 +244,64 @@ export interface DokumenPdfWarga {
   dataBase64?: string;
   rtScope?: string;
   updatedAt?: string;
+  version?: number;
+}
+
+export interface AppNotification {
+  id: string;
+  title: string;
+  body: string;
+  category:
+    | 'pengumuman'
+    | 'warga'
+    | 'kas'
+    | 'iuran'
+    | 'kematian'
+    | 'laporan'
+    | 'pengaturan'
+    | 'akun'
+    | 'sistem';
+  entityType?: string;
+  entityId?: string;
+  rwId: string;
+  targetRts: string[]; // ['SEMUA'] or ['01', '02']
+  targetRoles?: Array<'server' | 'admin' | 'warga'>;
+  createdBy: string;
+  createdAt: string;
+  isRead?: boolean;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  actorUsername: string;
+  actorRole: string;
+  actorRt: string;
+  actorRw: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  rtScope?: string;
+  summary: string;
+  createdAt: string;
+}
+
+export interface RealtimeDeltaEvent {
+  revision: number;
+  entityType:
+    | 'warga'
+    | 'transaction'
+    | 'bantuan'
+    | 'pengumuman'
+    | 'dokumen'
+    | 'laporan'
+    | 'settings'
+    | 'admin_account'
+    | 'snapshot';
+  action: 'upsert' | 'delete' | 'upgrade_kk' | 'bulk_import' | 'sync';
+  entityId?: string;
+  rtScope?: string;
+  targetRts?: string[];
+  wargaId?: string;
+  payload?: any;
+  updatedAt: string;
 }

@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { Warga, AnggotaKeluarga, BantuanPemerintah, ProfilRT } from '../types';
 import { cleanIndonesianName, cleanNIK } from '../utils/wargaHelpers';
-import type { FirestoreWriteResult } from '../utils/firebaseSync';
+import type { ServerWriteResult } from '../utils/cloudSync';
 import {
   downloadTemplateExcelWargaBansos,
   parseExcelWargaAndBantuan,
@@ -30,8 +30,8 @@ import {
 interface WargaModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (warga: Omit<Warga, 'id' | 'no'>) => Promise<FirestoreWriteResult | void> | void;
-  onUpdate?: (warga: Warga) => Promise<FirestoreWriteResult | void> | void;
+  onSave: (warga: Omit<Warga, 'id' | 'no'>) => Promise<ServerWriteResult | void> | void;
+  onUpdate?: (warga: Warga) => Promise<ServerWriteResult | void> | void;
   editingWarga?: Warga | null;
   isServer?: boolean;
   onBulkImport?: (
@@ -313,7 +313,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
           anggotaKeluarga: membersToSave,
         });
         if (res && res.ok === false) {
-          setFormError(res.message || 'Gagal menyimpan perubahan data warga ke Cloud Firestore.');
+          setFormError(res.message || 'Gagal menyimpan perubahan data warga ke Database Server.');
           return;
         }
         onClose();
@@ -338,7 +338,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
         pin: '123456',
       });
       if (res && res.ok === false) {
-        setFormError(res.message || 'Gagal menyimpan data warga baru ke Cloud Firestore.');
+        setFormError(res.message || 'Gagal menyimpan data warga baru ke Database Server.');
         return;
       }
       onClose();
@@ -1165,7 +1165,7 @@ export const WargaModal: React.FC<WargaModalProps> = ({
                 {isSubmitting ? <RefreshCw size={16} className="animate-spin" /> : <Check size={16} strokeWidth={2.5} />}
                 <span>
                   {isSubmitting
-                    ? 'Menyimpan ke Server Firebase...'
+                    ? 'Menyimpan ke Server Pusat...'
                     : isEditMode
                     ? 'Simpan Perubahan Data KK'
                     : 'Simpan Warga & Aktifkan Akun'}

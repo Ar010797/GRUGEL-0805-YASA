@@ -732,10 +732,10 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-slate-900">
-                    Firebase Authentication &amp; Cloud Firestore Real-Time
+                    Database Server Pusat (PostgreSQL) &amp; Socket.IO Real-Time
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Seluruh perangkat (AI Studio, Vercel Web, HP Browser, dan APK Median) terhubung ke satu database Cloud Firestore yang sama secara real-time
+                    Seluruh perangkat (PC/Laptop, Android, iPhone/iOS, Web) terhubung ke satu database PostgreSQL pusat yang sama secara real-time
                   </p>
                 </div>
               </div>
@@ -750,12 +750,12 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                 <Wifi size={12} />
                 <span>
                   {cloudSyncBusy
-                    ? 'Menghubungkan...'
+                    ? 'Menunggu Sinkronisasi...'
                     : !serverConnected
                     ? 'Gagal Sinkronisasi'
                     : sseConnected
-                    ? 'Tersinkronisasi'
-                    : 'Menghubungkan...'}
+                    ? 'Terhubung'
+                    : 'Menunggu Sinkronisasi...'}
                 </span>
               </span>
             </div>
@@ -764,7 +764,7 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                   <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-                    Status Koneksi &amp; Sinkronisasi Cloud Firestore
+                    Status Koneksi &amp; Sinkronisasi Server Pusat
                   </span>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
                     <span
@@ -773,8 +773,8 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                       }`}
                     >
                       {serverConnected
-                        ? 'Tersinkronisasi ke Cloud Firestore Pusat (laughing-azimuth-807pf)'
-                        : 'Gagal Sinkronisasi ke Cloud Firestore'}
+                        ? 'Terhubung ke Database Server Pusat RW 05'
+                        : 'Gagal Terhubung ke Server Pusat'}
                     </span>
                     <span
                       className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
@@ -786,10 +786,10 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                       }`}
                     >
                       {!serverConnected
-                        ? 'Gagal Sinkronisasi'
+                        ? 'Gagal'
                         : sseConnected && !cloudSyncBusy
-                        ? 'Tersinkronisasi Real-Time'
-                        : 'Menghubungkan...'}
+                        ? 'Terhubung Real-Time'
+                        : 'Menunggu Sinkronisasi'}
                     </span>
                   </div>
                 </div>
@@ -826,13 +826,13 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
               <div>
                 <h3 className="text-sm font-bold text-slate-900">Penyimpanan Terpusat &amp; Cadangan JSON</h3>
                 <p className="text-xs text-slate-500">
-                  Data kas, iuran, pengumuman, bansos, dan warga tersimpan permanen di Cloud Firestore
+                  Data kas, iuran, pengumuman, bansos, dan warga tersimpan permanen di Server Pusat (PostgreSQL)
                 </p>
               </div>
             </div>
 
             <p className="text-xs text-slate-600 leading-relaxed">
-              Setiap perubahan dari HP Admin, akun Warga, maupun Server Pusat dikirim langsung ke <strong>Cloud Firestore</strong> dan disinkronkan real-time (onSnapshot) ke semua perangkat lain yang aktif. Data tetap utuh saat logout, ganti HP, atau instal ulang APK Median.
+              Setiap perubahan dari HP Admin, akun Warga, maupun Super Admin RW diproses atomik di <strong>Server Pusat</strong> dan disinkronkan real-time (Socket.IO) ke semua perangkat yang berhak. Data tetap utuh saat logout, ganti perangkat, atau buka ulang aplikasi.
             </p>
 
             <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">

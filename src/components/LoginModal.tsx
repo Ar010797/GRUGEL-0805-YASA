@@ -22,16 +22,15 @@ import {
 import { AuthUser, AdminRTAccount, PengaturanKas } from '../types';
 import { HouseLogo } from './HouseLogo';
 import {
+  checkServerHealth,
   clearLegacyLocalCache,
+  loginWithGoogleTokenOnServer,
+  loginWithServer,
+  migrateLegacyLocalDataToServer,
   readLegacyLocalCacheForMigration,
+  syncAdminAccountToServer,
+  type ServerHealthDiagnostic,
 } from '../utils/cloudSync';
-import {
-  loginWithFirebase,
-  loginWithGoogleServer,
-  registerAndSyncAdminWithFirebase,
-  testFirestoreConnection,
-} from '../utils/firebaseSync';
-import type { FirebaseConnectionDiagnostic } from '../lib/firebase';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -101,7 +100,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [regPin, setRegPin] = useState('');
   const [pendingSyncPin, setPendingSyncPin] = useState('');
   const [syncAccountBusy, setSyncAccountBusy] = useState(false);
-  const [diagnosticResult, setDiagnosticResult] = useState<FirebaseConnectionDiagnostic | null>(null);
+  const [diagnosticResult, setDiagnosticResult] = useState<ServerHealthDiagnostic | null>(null);
 
   // Warga form: Username = Nama Asli, Password = Nomor KK (16 digit)
   const [wargaUsername, setWargaUsername] = useState('');
@@ -116,7 +115,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Handle Server Submit via Firebase Authentication
+  // Handle Server Submit via PostgreSQL Central Server
   const handleServerSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setServerError('');
@@ -130,7 +129,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     setServerChecking(true);
     try {
-      const res = await loginWithFirebase({ role: 'server', username: u, password: p });
+      const res = await loginWithServer('server', u, p);
       if (res.ok && res.user) {
         onLoginSuccess(res.user);
         onClose();
@@ -148,7 +147,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setServerError('');
     setGoogleChecking(true);
     try {
-      const res = await loginWithGoogleServer();
+      const res = await loginWithGoogleTokenOnServer();
       if (res.ok && res.user) {
         onLoginSuccess(res.user);
         onClose();
@@ -171,18 +170,19 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setSyncAccountBusy(true);
     try {
       const legacyCache = readLegacyLocalCacheForMigration();
-      const res = await registerAndSyncAdminWithFirebase({
+      const res = await syncAdminAccountToServer({
         account: accountToSync,
         securityPin: cleanPin,
-        legacyData: legacyCache,
+        syncData: legacyCache || undefined,
       });
 
       if (!res.ok || !res.user) {
-        setAdminError(res.message || 'Gagal mendaftarkan & menyinkronkan akun admin ke Firebase.');
+        setAdminError(res.message || 'Gagal mendaftarkan & menyinkronkan akun admin ke Server Pusat.');
         return;
       }
 
-      if (legacyCache && res.migrationOk !== false) {
+      if (legacyCache) {
+        await migrateLegacyLocalDataToServer(legacyCache).catch(() => {});
         clearLegacyLocalCache();
       }
       setPendingSyncAdmin(null);
@@ -194,7 +194,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     }
   };
 
-  // Handle Admin RT Submit via Firebase Auth + Cloud Firestore
+  // Handle Admin RT Submit via Central Server
   const handleAdminSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAdminError('');
@@ -214,14 +214,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     setAdminChecking(true);
     try {
-      const res = await loginWithFirebase({ role: 'admin', username: u, password: p });
+      const res = await loginWithServer('admin', u, p);
       if (res.ok && res.user) {
         onLoginSuccess(res.user);
         onClose();
         return;
       }
 
-      // Check legacy pre-migration local cache only if Firebase account wasn't registered yet
       const legacyCache = readLegacyLocalCacheForMigration();
       const legacyAdmins = Array.isArray(legacyCache?.adminAccounts) ? legacyCache.adminAccounts : [];
       const matchedLegacy = legacyAdmins.find(
@@ -232,14 +231,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         setPendingSyncAdmin(matchedLegacy);
         setShowRegisterAdminBox(false);
         setAdminError(
-          `Akun Admin "${matchedLegacy.username}" ditemukan pada data lama perangkat ini. Masukkan PIN Pengurus dan klik "Daftarkan ke Firebase & Masuk" untuk memigrasikan akun & data ke Cloud Firestore.`
+          `Akun Admin "${matchedLegacy.username}" ditemukan pada data lama perangkat ini. Masukkan PIN Pengurus dan klik "Daftarkan ke Server & Masuk" untuk memigrasikan akun & data ke Server Pusat.`
         );
         return;
       }
 
       setAdminError(
         res.message ||
-          `Akun Admin "${u}" tidak ditemukan di Firebase. Periksa password atau daftarkan akun baru di bawah jika memiliki PIN Keamanan Pengurus.`
+          `Akun Admin "${u}" tidak ditemukan di Server Pusat. Periksa password atau daftarkan akun baru di bawah jika memiliki PIN Keamanan Pengurus.`
       );
       setShowRegisterAdminBox(false);
     } finally {
@@ -247,7 +246,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     }
   };
 
-  // Handle Warga Submit via Firebase Authentication + Cloud Firestore
+  // Handle Warga Submit via Central Server
   const handleWargaSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setWargaError('');
@@ -267,14 +266,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     setWargaChecking(true);
     try {
-      const res = await loginWithFirebase({ role: 'warga', username: name, password: noKKRaw });
+      const res = await loginWithServer('warga', name, noKKRaw);
       if (res.ok && res.user) {
         onLoginSuccess(res.user);
         onClose();
       } else {
         setWargaError(
           res.message ||
-            `Data warga "${name}" dengan No KK tersebut tidak ditemukan di Cloud Firestore. Silakan hubungi Admin RT.`
+            `Data warga "${name}" dengan No KK tersebut tidak ditemukan di Server Pusat. Silakan hubungi Admin RT.`
         );
       }
     } finally {
@@ -446,7 +445,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       <span>Akses Server Pusat Desa:</span>
                     </p>
                     <p className="text-[11px] text-indigo-800 mt-1 leading-relaxed">
-                      Menerima data seluruh RT, menambahkan Admin untuk mengelola tiap RT, mengontrol pembukuan desa, dan sinkronisasi real-time via Cloud Firestore.
+                      Menerima data seluruh RT, menambahkan Admin untuk mengelola tiap RT, mengontrol pembukuan RW, dan sinkronisasi real-time antar-perangkat.
                     </p>
                   </div>
 
@@ -510,7 +509,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     className="w-full rounded-xl bg-indigo-600 py-3 text-sm font-bold text-white shadow-md hover:bg-indigo-700 active:scale-95 transition-all cursor-pointer disabled:opacity-60"
                   >
                     {serverChecking
-                      ? 'Memverifikasi ke Firebase Auth...'
+                      ? 'Memverifikasi ke Server Pusat...'
                       : 'Masuk Sebagai Server RW 05'}
                   </button>
 
@@ -534,7 +533,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       <span>Akses Pengurus RT:</span>
                     </p>
                     <p className="text-[11px] text-emerald-800 mt-1 leading-relaxed">
-                      Mengelola data warga 1 RT, mencatat kas/kematian, input bansos, dan sinkronisasi otomatis ke Cloud Firestore antar-perangkat.
+                      Mengelola data warga 1 RT, mencatat kas/kematian, input bansos, dan sinkronisasi real-time otomatis ke Database Server Pusat.
                     </p>
                   </div>
 
@@ -581,14 +580,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                             className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] py-2.5 px-3 text-xs font-bold text-white shadow-xs transition-all cursor-pointer disabled:opacity-60"
                           >
                             <CloudUpload size={14} />
-                            <span>
-                              {syncAccountBusy
-                                ? 'Mendaftarkan Akun & Data ke Firebase...'
-                                : 'Daftarkan ke Firebase & Masuk'}
-                            </span>
-                          </button>
-                        </div>
-                      )}
+                              <span>
+                                {syncAccountBusy
+                                  ? 'Mendaftarkan Akun & Data ke Server...'
+                                  : 'Daftarkan ke Server & Masuk'}
+                              </span>
+                            </button>
+                          </div>
+                        )}
 
                       {!pendingSyncAdmin && adminUsername.trim() && adminPassword.trim() && (
                         <div className="pt-1 border-t border-rose-200/70 flex flex-wrap items-center justify-between gap-2">
@@ -617,10 +616,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       <div className="text-[11px] text-indigo-900">
                         <p className="font-extrabold flex items-center gap-1.5">
                           <CloudUpload size={13} className="text-indigo-700" />
-                          <span>Daftarkan Akun Admin RT ke Firebase</span>
+                          <span>Daftarkan Akun Admin RT ke Server Pusat</span>
                         </p>
                         <p className="mt-0.5 text-indigo-800 leading-relaxed">
-                          Akun akan disimpan permanen di Firebase Authentication & Cloud Firestore agar bisa login di semua perangkat.
+                          Akun akan disimpan permanen di Database Server Pusat agar dapat digunakan secara real-time di semua perangkat.
                         </p>
                       </div>
 
@@ -740,7 +739,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         <CloudUpload size={13} />
                         <span>
                           {syncAccountBusy
-                            ? 'Mendaftarkan ke Firebase...'
+                            ? 'Mendaftarkan ke Server...'
                             : 'Daftarkan Akun & Masuk'}
                         </span>
                       </button>
@@ -799,7 +798,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       </button>
                     </div>
                     <p className="mt-1 text-[11px] text-slate-400">
-                      Akun diverifikasi langsung ke Firebase Authentication & Cloud Firestore.
+                      Akun diverifikasi langsung ke Database Server Pusat RW 05.
                     </p>
                   </div>
 
@@ -808,7 +807,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     disabled={adminChecking || syncAccountBusy}
                     className="w-full rounded-xl bg-[#0B5D3F] py-3 text-sm font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer disabled:opacity-60"
                   >
-                    {adminChecking ? 'Memeriksa Akun di Firebase...' : 'Masuk Sebagai Admin RT'}
+                    {adminChecking ? 'Memeriksa Akun di Server...' : 'Masuk Sebagai Admin RT'}
                   </button>
                 </form>
               ) : (
@@ -817,7 +816,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   <div className="rounded-2xl bg-amber-50 p-3 text-xs text-amber-900 border border-amber-200/80">
                     <p className="font-bold">Privasi Warga Terlindungi (Sesuai UU PDP):</p>
                     <p className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">
-                      Warga hanya dapat melihat data keluarganya sendiri berdasarkan Nomor Kartu Keluarga (16 digit) yang tersinkron di Cloud Firestore.
+                      Warga hanya dapat melihat data keluarganya sendiri berdasarkan Nomor Kartu Keluarga (16 digit) yang tersinkron di Server Pusat.
                     </p>
                   </div>
 
@@ -893,7 +892,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     disabled={wargaChecking}
                     className="w-full rounded-xl bg-[#0B5D3F] py-3 text-sm font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer disabled:opacity-60"
                   >
-                    {wargaChecking ? 'Memeriksa Data di Firebase...' : 'Masuk Sebagai Warga'}
+                    {wargaChecking ? 'Memeriksa Data di Server...' : 'Masuk Sebagai Warga'}
                   </button>
                 </form>
               )}
@@ -909,7 +908,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 setIsRefreshing(true);
                 setSyncNotice(null);
                 try {
-                  const health = await testFirestoreConnection();
+                  const health = await checkServerHealth();
                   setDiagnosticResult(health);
                   if (health.connected) {
                     if (onRefreshSync) await onRefreshSync();
@@ -924,8 +923,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               <RefreshCw size={12} className={isRefreshing ? 'animate-spin' : ''} />
               <span>
                 {isRefreshing
-                  ? 'Memeriksa koneksi Firebase...'
-                  : 'Periksa Koneksi Firebase Cloud'}
+                  ? 'Memeriksa koneksi Server Pusat...'
+                  : 'Periksa Koneksi Database Server'}
               </span>
             </button>
 
@@ -937,7 +936,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 </p>
                 {diagnosticResult && (
                   <p className="text-[10px] text-emerald-700 break-all">
-                    Proyek Firebase: {diagnosticResult.projectId}
+                    Mesin Database: {diagnosticResult.engine || 'PostgreSQL (Cloud SQL)'}
+                    {typeof diagnosticResult.totalWarga === 'number'
+                      ? ` • ${diagnosticResult.totalWarga} KK terdaftar`
+                      : ''}
                   </p>
                 )}
               </div>

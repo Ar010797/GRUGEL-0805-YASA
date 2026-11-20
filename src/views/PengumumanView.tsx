@@ -186,7 +186,7 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
                 </div>
 
                 <div className="flex items-center justify-between gap-2 mb-2">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <span
                       className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
                         p.kategori === 'Kegiatan'
@@ -200,13 +200,31 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
                     >
                       {p.kategori}
                     </span>
+                    <span
+                      className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold border ${
+                        (p.targetRts && p.targetRts.includes('SEMUA')) ||
+                        /^semua(\s+rt)?$/i.test(String(p.rtScope || '').trim())
+                          ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                          : 'bg-emerald-50 text-[#0B5D3F] border-emerald-200'
+                      }`}
+                    >
+                      {p.targetRts && p.targetRts.length > 0
+                        ? p.targetRts.includes('SEMUA')
+                          ? `Semua RT RW ${rwStr}`
+                          : `Tujuan: ${p.targetRts.map((r) => `RT ${r}`).join(', ')}`
+                        : p.rtScope
+                        ? /^semua/i.test(p.rtScope)
+                          ? `Semua RT RW ${rwStr}`
+                          : p.rtScope
+                        : `Khusus RT ${rtStr}`}
+                    </span>
                     {p.penting && (
                       <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
                         ★ Surat Resmi Penting
                       </span>
                     )}
                   </div>
-                  <span className="text-[11px] text-slate-400 font-semibold">{p.tanggal}</span>
+                  <span className="text-[11px] text-slate-400 font-semibold shrink-0">{p.tanggal}</span>
                 </div>
 
                 <h3 className="text-base font-extrabold text-slate-900 leading-snug">
@@ -273,15 +291,19 @@ export const PengumumanView: React.FC<PengumumanViewProps> = ({
                   </button>
                 </div>
 
-                {isAdmin && (isServerRole || !/^semua(\s+rt)?$/i.test(String(p.rtScope || '').trim())) && (
-                  <button
-                    onClick={() => onDeletePengumuman(p.id)}
-                    className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                    title="Hapus pengumuman ini"
-                  >
-                    <Trash2 size={15} />
-                  </button>
-                )}
+                {isAdmin &&
+                  (isServerRole ||
+                    (!/^semua(\s+rt)?$/i.test(String(p.rtScope || '').trim()) &&
+                      !(p.targetRts && p.targetRts.includes('SEMUA')) &&
+                      p.senderRole !== 'server')) && (
+                    <button
+                      onClick={() => onDeletePengumuman(p.id)}
+                      className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                      title="Hapus pengumuman ini"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  )}
               </div>
             </div>
           ))

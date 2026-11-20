@@ -1,3 +1,5 @@
+import { GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import { auth } from '../lib/firebase';
 import {
   Warga,
   Transaction,
@@ -8,6 +10,9 @@ import {
   AdminRTAccount,
   PembaruanBulananRT,
   AuthUser,
+  AppNotification,
+  AuditLogEntry,
+  RiwayatPerubahanKK,
 } from '../types';
 
 export interface DeletedIdsMap {
@@ -44,6 +49,29 @@ export interface AppDatabaseSchema {
   adminAccounts: AdminRTAccount[];
   laporanBulananRT: PembaruanBulananRT[];
   deletedIds?: Partial<DeletedIdsMap>;
+}
+
+export interface ServerWriteResult {
+  ok: boolean;
+  status?: number;
+  code?: string;
+  errorCode?: string;
+  terminal?: boolean;
+  pending?: boolean;
+  currentVersion?: number;
+  message?: string;
+  revision?: number;
+  warga?: Warga;
+  transaction?: Transaction;
+  pengumuman?: PengumumanRT;
+  bantuan?: BantuanPemerintah;
+  dokumen?: DokumenPdfWarga;
+  laporan?: PembaruanBulananRT;
+  pengaturanKas?: PengaturanKas;
+  account?: AdminRTAccount;
+  updatedTransactions?: Transaction[];
+  createdTransactions?: Transaction[];
+  updatedBantuan?: BantuanPemerintah[];
 }
 
 const LEGACY_LOCAL_STORAGE_KEY = 'kas_rt08_rw05_database_v2';
@@ -122,8 +150,8 @@ async function readApiJsonSafely(
     return {
       json: null,
       errorMessage: isAuthRedirect
-        ? `Akses ke ${endpointUrl} dialihkan ke halaman autentikasi AI Studio (HTTP ${res.status}). APK/perangkat luar memerlukan URL Server Publik (Shared/Production URL) yang dapat diakses tanpa login browser AI Studio.`
-        : `Server mengembalikan HTML (HTTP ${res.status}) bukan JSON API pada ${endpointUrl}. Pastikan backend Node.js/Vercel /api aktif dan URL Server sudah benar.`,
+        ? `Akses ke ${endpointUrl} dialihkan ke halaman autentikasi AI Studio (HTTP ${res.status}). Perangkat luar memerlukan URL Server Publik yang dapat diakses tanpa login browser AI Studio.`
+        : `Server mengembalikan HTML (HTTP ${res.status}) bukan JSON API pada ${endpointUrl}. Pastikan server backend aktif.`,
     };
   }
 
@@ -132,7 +160,7 @@ async function readApiJsonSafely(
       json: null,
       errorMessage:
         res.status === 404
-          ? `Endpoint API tidak ditemukan (HTTP 404) pada ${endpointUrl}. Hosting domain ini belum menjalankan backend /api (redeploy versi terbaru dengan folder /api + DATABASE_URL, atau atur Alamat Server API).`
+          ? `Endpoint API tidak ditemukan (HTTP 404) pada ${endpointUrl}.`
           : `Server merespons kosong (HTTP ${res.status}) pada ${endpointUrl}.`,
     };
   }
@@ -144,12 +172,6 @@ async function readApiJsonSafely(
       errorMessage: parsed?.message,
     };
   } catch {
-    if (res.status === 404) {
-      return {
-        json: null,
-        errorMessage: `Endpoint API tidak ditemukan (HTTP 404, bukan JSON) pada ${endpointUrl}. Domain ini baru menayangkan frontend statis: redeploy versi terbaru (yang memiliki folder /api & vercel.json + DATABASE_URL) atau masukkan URL server backend aktif di Pengaturan Alamat Server API.`,
-      };
-    }
     return {
       json: null,
       errorMessage: `Respons server tidak valid (HTTP ${res.status}, bukan JSON) dari ${endpointUrl}.`,
@@ -163,9 +185,45 @@ function formatNetworkError(err: any, endpointUrl: string): string {
     return `Koneksi ke server (${endpointUrl}) timeout melebihi batas waktu.`;
   }
   if (/failed to fetch|networkerror|load failed|network request failed/i.test(raw)) {
-    return `Gagal menjangkau server (${endpointUrl}). Kemungkinan: server belum aktif, CORS/SSL diblokir WebView, atau URL API tidak dapat diakses dari jaringan ini.`;
+    return `Gagal menjangkau server (${endpointUrl}). Koneksi jaringan terputus atau server belum merespons.`;
   }
   return `Gagal terhubung ke ${endpointUrl}${raw ? `: ${raw}` : '.'}`;
+}
+
+function mapHttpWriteFailure(
+  res: Response,
+  json: any,
+  errorMessage: string | undefined,
+  fallbackMessage: string
+): ServerWriteResult {
+  const status = res.status;
+  const code = typeof json?.code === 'string' ? json.code : undefined;
+  const isTerminal =
+    status === 400 ||
+    status === 401 ||
+    status === 403 ||
+    status === 404 ||
+    status === 409;
+  return {
+    ok: false,
+    status,
+    code,
+    errorCode:
+      status === 403
+        ? 'permission-denied'
+        : status === 401
+        ? 'unauthenticated'
+        : status === 409
+        ? 'version-conflict'
+        : status === 400
+        ? 'invalid-argument'
+        : status === 404
+        ? 'not-found'
+        : code || 'unavailable',
+    terminal: isTerminal,
+    currentVersion: typeof json?.currentVersion === 'number' ? json.currentVersion : undefined,
+    message: errorMessage || `${fallbackMessage} (HTTP ${status}).`,
+  };
 }
 
 export function getAuthToken(): string | null {
@@ -202,10 +260,6 @@ export function authHeaders(extra?: Record<string, string>): Record<string, stri
   return headers;
 }
 
-/**
- * Reads any legacy pre-migration HP Admin cache so it can be migrated once to Central SQL Database.
- * Never used as the active database store.
- */
 const LEGACY_LOCAL_STORAGE_FALLBACK_KEYS = [
   LEGACY_LOCAL_STORAGE_KEY,
   'kas_rt08_rw05_database_v1',
@@ -248,9 +302,6 @@ function unionIds(a: string[] = [], b: string[] = []): string[] {
   return Array.from(new Set([...a, ...b]));
 }
 
-/**
- * Deduplicates a single entity array by id (and optional altMatch like noKK/username), keeping the newest updatedAt.
- */
 export function dedupeEntityList<T extends { id: string; updatedAt?: string }>(
   list: T[],
   deletedIds: string[] = [],
@@ -277,10 +328,6 @@ export function dedupeEntityList<T extends { id: string; updatedAt?: string }>(
   return result;
 }
 
-/**
- * Merges two entity arrays preserving newer edits by updatedAt and respecting tombstones.
- * Always guarantees unique ids (and unique altMatch keys) in the returned array.
- */
 export function mergeEntityList<T extends { id: string; updatedAt?: string }>(
   primaryList: T[],
   secondaryList: T[],
@@ -424,6 +471,7 @@ export interface ServerHealthDiagnostic {
   revision?: number;
   totalWarga?: number;
   totalAdminAccounts?: number;
+  socketConnectedCount?: number;
   message: string;
   errorDetail?: string;
 }
@@ -458,6 +506,8 @@ export async function checkServerHealth(): Promise<ServerHealthDiagnostic> {
       totalWarga: typeof json.totalWarga === 'number' ? json.totalWarga : undefined,
       totalAdminAccounts:
         typeof json.totalAdminAccounts === 'number' ? json.totalAdminAccounts : undefined,
+      socketConnectedCount:
+        typeof json.socketConnectedCount === 'number' ? json.socketConnectedCount : undefined,
       message: `Terhubung ke ${json.engine || 'PostgreSQL (Cloud SQL)'} (${latencyMs} ms)`,
     };
   } catch (err: any) {
@@ -528,6 +578,59 @@ export async function loginWithServer(
   }
 }
 
+export async function loginWithGoogleTokenOnServer(): Promise<{
+  ok: boolean;
+  status?: number;
+  token?: string;
+  user?: AuthUser;
+  message?: string;
+}> {
+  const endpointUrl = getResolvedEndpointDisplay('/api/auth/firebase-google');
+  try {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    const cred = await signInWithPopup(auth, provider);
+    const idToken = await cred.user.getIdToken(true);
+
+    const res = await fetch(apiUrl('/api/auth/firebase-google'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    });
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
+    if (!res.ok || !json?.success || !json?.token || !json?.user) {
+      await signOut(auth).catch(() => {});
+      return {
+        ok: false,
+        status: res.status,
+        message:
+          errorMessage ||
+          `Akun Google (${cred.user.email || '-'}) tidak berhak sebagai Super Admin RW 05.`,
+      };
+    }
+
+    setAuthToken(json.token);
+    return {
+      ok: true,
+      status: res.status,
+      token: json.token,
+      user: json.user as AuthUser,
+    };
+  } catch (err: any) {
+    const code = String(err?.code || '');
+    if (code === 'auth/popup-closed-by-user') {
+      return { ok: false, message: 'Jendela login Google ditutup sebelum selesai.' };
+    }
+    if (code === 'auth/popup-blocked') {
+      return { ok: false, message: 'Popup Google diblokir browser. Izinkan popup lalu coba lagi.' };
+    }
+    return {
+      ok: false,
+      message: err?.message || formatNetworkError(err, endpointUrl),
+    };
+  }
+}
+
 export async function verifySavedSession(): Promise<{
   ok: boolean;
   user?: AuthUser;
@@ -564,6 +667,7 @@ export async function logoutFromServer(): Promise<void> {
         headers: authHeaders(),
       }).catch(() => {});
     }
+    await signOut(auth).catch(() => {});
   } finally {
     clearAuthToken();
   }
@@ -589,6 +693,37 @@ export async function checkServerRevision(
       changed: Boolean(json.changed),
       revision: json.revision,
       hasData: Boolean(json.hasData),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchDeltaSinceRevision(sinceRevision: number): Promise<{
+  ok: boolean;
+  status?: number;
+  changed?: boolean;
+  revision?: number;
+  data?: AppDatabaseSchema;
+} | null> {
+  if (!getAuthToken()) return null;
+  try {
+    const res = await fetch(
+      apiUrl(`/api/sync/delta?sinceRevision=${encodeURIComponent(String(sinceRevision))}&t=${Date.now()}`),
+      {
+        method: 'GET',
+        headers: authHeaders(),
+        cache: 'no-store',
+      }
+    );
+    if (!res.ok) return { ok: false, status: res.status };
+    const { json } = await readApiJsonSafely(res, getResolvedEndpointDisplay('/api/sync/delta'));
+    if (!json?.success) return { ok: false };
+    return {
+      ok: true,
+      changed: Boolean(json.changed),
+      revision: Number(json.revision) || sinceRevision,
+      data: json.data as AppDatabaseSchema | undefined,
     };
   } catch {
     return null;
@@ -753,6 +888,66 @@ export async function fetchServerAdminAccounts(): Promise<{
   }
 }
 
+export async function createAdminAccountOnServer(
+  account: AdminRTAccount
+): Promise<ServerWriteResult> {
+  const endpointUrl = getResolvedEndpointDisplay('/api/admin-accounts');
+  try {
+    const res = await fetch(apiUrl('/api/admin-accounts'), {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ account }),
+    });
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
+    if (!res.ok || !json?.success) {
+      return mapHttpWriteFailure(res, json, errorMessage, 'Gagal membuat akun Admin RT.');
+    }
+    return { ok: true, status: res.status, account: json.account, revision: json.revision };
+  } catch (err: any) {
+    return { ok: false, errorCode: 'unavailable', message: formatNetworkError(err, endpointUrl) };
+  }
+}
+
+export async function updateAdminAccountOnServer(
+  account: AdminRTAccount,
+  expectedVersion?: number
+): Promise<ServerWriteResult> {
+  const path = `/api/admin-accounts/${encodeURIComponent(account.id)}`;
+  const endpointUrl = getResolvedEndpointDisplay(path);
+  try {
+    const res = await fetch(apiUrl(path), {
+      method: 'PUT',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ account, expectedVersion: expectedVersion ?? account.version }),
+    });
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
+    if (!res.ok || !json?.success) {
+      return mapHttpWriteFailure(res, json, errorMessage, 'Gagal memperbarui akun Admin RT.');
+    }
+    return { ok: true, status: res.status, account: json.account, revision: json.revision };
+  } catch (err: any) {
+    return { ok: false, errorCode: 'unavailable', message: formatNetworkError(err, endpointUrl) };
+  }
+}
+
+export async function deleteAdminAccountOnServer(id: string): Promise<ServerWriteResult> {
+  const path = `/api/admin-accounts/${encodeURIComponent(id)}`;
+  const endpointUrl = getResolvedEndpointDisplay(path);
+  try {
+    const res = await fetch(apiUrl(path), {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
+    if (!res.ok || !json?.success) {
+      return mapHttpWriteFailure(res, json, errorMessage, 'Gagal menghapus akun Admin RT.');
+    }
+    return { ok: true, status: res.status, revision: json.revision };
+  } catch (err: any) {
+    return { ok: false, errorCode: 'unavailable', message: formatNetworkError(err, endpointUrl) };
+  }
+}
+
 export async function syncAdminAccountToServer(params: {
   account: AdminRTAccount;
   syncData?: AppDatabaseSchema;
@@ -834,27 +1029,6 @@ export function flushSaveAppDataKeepalive(
         body: fullPayloadStr,
         keepalive: true,
       }).catch(() => {});
-      return;
-    }
-
-    const compactPayloadStr = JSON.stringify({
-      ...updatedData,
-      dokumenList: [],
-      isHardReset: false,
-      deletedIds: deletedIds || {},
-    });
-    const compactLength =
-      typeof TextEncoder !== 'undefined'
-        ? new TextEncoder().encode(compactPayloadStr).length
-        : compactPayloadStr.length;
-
-    if (compactLength <= 60000) {
-      fetch(apiUrl('/api/data'), {
-        method: 'POST',
-        headers: authHeaders({ 'Content-Type': 'application/json' }),
-        body: compactPayloadStr,
-        keepalive: true,
-      }).catch(() => {});
     }
   } catch {
     // ignore unload flush error
@@ -908,7 +1082,7 @@ export function subscribeServerStream(
           reconnectTimer = setTimeout(() => {
             reconnectTimer = null;
             connect();
-          }, 4000);
+          }, 5000);
         }
       };
     } catch {
@@ -949,30 +1123,87 @@ export async function searchWargaOnServer(q: string, rt = ''): Promise<Warga[] |
 }
 
 export async function saveSingleWargaToServer(
-  warga: Warga
-): Promise<{ ok: boolean; warga?: Warga; message?: string }> {
-  const endpointUrl = getResolvedEndpointDisplay('/api/warga');
+  warga: Warga,
+  options?: { isUpdate?: boolean; expectedVersion?: number; clientMutationId?: string }
+): Promise<ServerWriteResult> {
+  const isUpdate = Boolean(options?.isUpdate);
+  const path = isUpdate ? `/api/warga/${encodeURIComponent(warga.id)}` : '/api/warga';
+  const endpointUrl = getResolvedEndpointDisplay(path);
   try {
-    const res = await fetch(apiUrl('/api/warga'), {
-      method: 'POST',
+    const res = await fetch(apiUrl(path), {
+      method: isUpdate ? 'PUT' : 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         warga: {
           ...warga,
           updatedAt: warga.updatedAt || new Date().toISOString(),
         },
+        expectedVersion: options?.expectedVersion ?? warga.version,
+        clientMutationId: options?.clientMutationId,
       }),
     });
     const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
-    if (!res.ok) {
-      return {
-        ok: false,
-        message: errorMessage || `Gagal menyimpan data warga ke server (HTTP ${res.status}).`,
-      };
+    if (!res.ok || !json?.success) {
+      return mapHttpWriteFailure(res, json, errorMessage, 'Gagal menyimpan data warga ke server.');
     }
-    return { ok: true, warga: json?.warga as Warga | undefined };
+    return {
+      ok: true,
+      status: res.status,
+      warga: json?.warga as Warga | undefined,
+      revision: Number(json?.revision) || undefined,
+      message: json?.message,
+    };
   } catch (err: any) {
-    return { ok: false, message: formatNetworkError(err, endpointUrl) };
+    return { ok: false, errorCode: 'unavailable', message: formatNetworkError(err, endpointUrl) };
+  }
+}
+
+export async function putWargaToServer(
+  warga: Warga,
+  options?: { expectedVersion?: number; clientMutationId?: string }
+): Promise<ServerWriteResult> {
+  return saveSingleWargaToServer(warga, {
+    isUpdate: true,
+    expectedVersion: options?.expectedVersion ?? warga.version,
+    clientMutationId: options?.clientMutationId,
+  });
+}
+
+export async function upgradeWargaKKOnServer(params: {
+  wargaId: string;
+  updatedWarga: Warga;
+  historyRecord: RiwayatPerubahanKK;
+  oldNoKK?: string;
+  oldKepalaNama?: string;
+  catatSantunanKematian?: boolean;
+  nominalSantunanKematian?: number;
+  expectedVersion?: number;
+  clientMutationId?: string;
+}): Promise<ServerWriteResult> {
+  const path = `/api/warga/${encodeURIComponent(params.wargaId)}/upgrade-kk`;
+  const endpointUrl = getResolvedEndpointDisplay(path);
+  try {
+    const res = await fetch(apiUrl(path), {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(params),
+    });
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
+    if (!res.ok || !json?.success) {
+      return mapHttpWriteFailure(res, json, errorMessage, 'Gagal memproses Upgrade KK di server.');
+    }
+    return {
+      ok: true,
+      status: res.status,
+      warga: json.warga as Warga | undefined,
+      updatedTransactions: json.updatedTransactions as Transaction[] | undefined,
+      createdTransactions: json.createdTransactions as Transaction[] | undefined,
+      updatedBantuan: json.updatedBantuan as BantuanPemerintah[] | undefined,
+      revision: Number(json.revision) || undefined,
+      message: json.message,
+    };
+  } catch (err: any) {
+    return { ok: false, errorCode: 'unavailable', message: formatNetworkError(err, endpointUrl) };
   }
 }
 
@@ -981,7 +1212,16 @@ export async function bulkImportWargaOnServer(params: {
   bantuanList: Array<Omit<BantuanPemerintah, 'id'> & { id?: string }>;
   mergeExisting: boolean;
   tahunAktif: number;
-}): Promise<{ ok: boolean; addedKK?: number; updatedKK?: number; addedBantuan?: number; message?: string }> {
+  clientMutationId?: string;
+}): Promise<{
+  ok: boolean;
+  status?: number;
+  addedKK?: number;
+  updatedKK?: number;
+  addedBantuan?: number;
+  revision?: number;
+  message?: string;
+}> {
   const endpointUrl = getResolvedEndpointDisplay('/api/warga/bulk');
   try {
     const res = await fetch(apiUrl('/api/warga/bulk'), {
@@ -991,13 +1231,19 @@ export async function bulkImportWargaOnServer(params: {
     });
     const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
     if (!res.ok || !json?.success) {
-      return { ok: false, message: errorMessage || `Gagal mengimpor Excel ke server (HTTP ${res.status}).` };
+      return {
+        ok: false,
+        status: res.status,
+        message: errorMessage || `Gagal mengimpor Excel ke server (HTTP ${res.status}).`,
+      };
     }
     return {
       ok: true,
+      status: res.status,
       addedKK: json.addedKK,
       updatedKK: json.updatedKK,
       addedBantuan: json.addedBantuan,
+      revision: json.revision,
     };
   } catch (err: any) {
     return { ok: false, message: formatNetworkError(err, endpointUrl) };
@@ -1005,29 +1251,39 @@ export async function bulkImportWargaOnServer(params: {
 }
 
 export async function deleteWargaFromServer(
-  id: string
-): Promise<{ ok: boolean; message?: string }> {
+  id: string,
+  options?: { expectedVersion?: number; clientMutationId?: string }
+): Promise<ServerWriteResult> {
   const path = `/api/warga/${encodeURIComponent(id)}`;
   const endpointUrl = getResolvedEndpointDisplay(path);
   try {
     const res = await fetch(apiUrl(path), {
       method: 'DELETE',
-      headers: authHeaders(),
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        expectedVersion: options?.expectedVersion,
+        clientMutationId: options?.clientMutationId,
+      }),
     });
-    const { errorMessage } = await readApiJsonSafely(res, endpointUrl);
-    if (!res.ok) {
-      return { ok: false, message: errorMessage || `Gagal menghapus data warga di server (HTTP ${res.status}).` };
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
+    if (!res.ok || !json?.success) {
+      return mapHttpWriteFailure(
+        res,
+        json,
+        errorMessage,
+        'Gagal menghapus data warga dari server.'
+      );
     }
-    return { ok: true };
+    return { ok: true, status: res.status, revision: json.revision, message: json.message };
   } catch (err: any) {
-    return { ok: false, message: formatNetworkError(err, endpointUrl) };
+    return { ok: false, errorCode: 'unavailable', message: formatNetworkError(err, endpointUrl) };
   }
 }
 
 export async function updateWargaSelfOnServer(patch: {
   pin?: string;
   telepon?: string;
-}): Promise<{ ok: boolean; message?: string }> {
+}): Promise<ServerWriteResult> {
   const endpointUrl = getResolvedEndpointDisplay('/api/warga/self');
   try {
     const res = await fetch(apiUrl('/api/warga/self'), {
@@ -1035,76 +1291,306 @@ export async function updateWargaSelfOnServer(patch: {
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(patch),
     });
-    const { errorMessage } = await readApiJsonSafely(res, endpointUrl);
-    if (!res.ok) {
-      return { ok: false, message: errorMessage || `Gagal memperbarui PIN warga di server (HTTP ${res.status}).` };
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
+    if (!res.ok || !json?.success) {
+      return mapHttpWriteFailure(
+        res,
+        json,
+        errorMessage,
+        'Gagal memperbarui PIN warga di server.'
+      );
     }
-    return { ok: true };
+    return { ok: true, status: res.status, warga: json.warga, revision: json.revision };
   } catch (err: any) {
-    return { ok: false, message: formatNetworkError(err, endpointUrl) };
+    return { ok: false, errorCode: 'unavailable', message: formatNetworkError(err, endpointUrl) };
   }
 }
 
-async function postEntity(url: string, body: unknown, errMsg: string): Promise<{ ok: boolean; message?: string }> {
+async function sendMutation(
+  method: 'POST' | 'PUT' | 'DELETE',
+  url: string,
+  body: unknown | undefined,
+  errMsg: string
+): Promise<ServerWriteResult & { json?: any }> {
   const endpointUrl = getResolvedEndpointDisplay(url);
   try {
     const res = await fetch(apiUrl(url), {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(body),
+      method,
+      headers: authHeaders(body !== undefined ? { 'Content-Type': 'application/json' } : undefined),
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-    const { errorMessage } = await readApiJsonSafely(res, endpointUrl);
-    if (!res.ok) return { ok: false, message: errorMessage || `${errMsg} (HTTP ${res.status})` };
-    return { ok: true };
+    const { json, errorMessage } = await readApiJsonSafely(res, endpointUrl);
+    if (!res.ok || !json?.success) {
+      return mapHttpWriteFailure(res, json, errorMessage, errMsg);
+    }
+    return {
+      ok: true,
+      status: res.status,
+      revision: Number(json?.revision) || undefined,
+      json,
+    };
   } catch (err: any) {
-    return { ok: false, message: formatNetworkError(err, endpointUrl) };
+    return { ok: false, errorCode: 'unavailable', message: formatNetworkError(err, endpointUrl) };
   }
 }
 
-async function deleteEntity(url: string, errMsg: string): Promise<{ ok: boolean; message?: string }> {
-  const endpointUrl = getResolvedEndpointDisplay(url);
-  try {
-    const res = await fetch(apiUrl(url), {
-      method: 'DELETE',
-      headers: authHeaders(),
-    });
-    const { errorMessage } = await readApiJsonSafely(res, endpointUrl);
-    if (!res.ok) return { ok: false, message: errorMessage || `${errMsg} (HTTP ${res.status})` };
-    return { ok: true };
-  } catch (err: any) {
-    return { ok: false, message: formatNetworkError(err, endpointUrl) };
-  }
+export async function saveTransactionOnServer(
+  tx: Transaction,
+  options?: { isUpdate?: boolean; expectedVersion?: number; clientMutationId?: string }
+): Promise<ServerWriteResult> {
+  const isUpdate = Boolean(options?.isUpdate);
+  const res = await sendMutation(
+    isUpdate ? 'PUT' : 'POST',
+    isUpdate ? `/api/transactions/${encodeURIComponent(tx.id)}` : '/api/transactions',
+    {
+      transaction: tx,
+      expectedVersion: options?.expectedVersion ?? tx.version,
+      clientMutationId: options?.clientMutationId,
+    },
+    'Gagal menyimpan transaksi kas ke server.'
+  );
+  return { ...res, transaction: res.json?.transaction };
 }
 
-export const saveTransactionOnServer = (tx: Transaction) =>
-  postEntity('/api/transactions', { transaction: tx }, 'Gagal menyimpan transaksi kas ke server.');
+export const putTransactionOnServer = (
+  tx: Transaction,
+  options?: { expectedVersion?: number; clientMutationId?: string }
+) => saveTransactionOnServer(tx, { ...options, isUpdate: true });
 
-export const deleteTransactionOnServer = (id: string) =>
-  deleteEntity(`/api/transactions/${encodeURIComponent(id)}`, 'Gagal menghapus transaksi dari server.');
+export const deleteTransactionOnServer = (id: string, expectedVersion?: number) =>
+  sendMutation(
+    'DELETE',
+    `/api/transactions/${encodeURIComponent(id)}`,
+    expectedVersion !== undefined ? { expectedVersion } : undefined,
+    'Gagal menghapus transaksi dari server.'
+  );
 
-export const savePengumumanOnServer = (p: PengumumanRT) =>
-  postEntity('/api/pengumuman', { pengumuman: p }, 'Gagal menyimpan pengumuman ke server.');
+export async function savePengumumanOnServer(
+  p: PengumumanRT,
+  options?: { isUpdate?: boolean; expectedVersion?: number; clientMutationId?: string }
+): Promise<ServerWriteResult> {
+  const isUpdate = Boolean(options?.isUpdate);
+  const res = await sendMutation(
+    isUpdate ? 'PUT' : 'POST',
+    isUpdate ? `/api/pengumuman/${encodeURIComponent(p.id)}` : '/api/pengumuman',
+    {
+      pengumuman: p,
+      expectedVersion: options?.expectedVersion ?? p.version,
+      clientMutationId: options?.clientMutationId,
+    },
+    'Gagal menyimpan pengumuman ke server.'
+  );
+  return { ...res, pengumuman: res.json?.pengumuman };
+}
+
+export const putPengumumanOnServer = (
+  p: PengumumanRT,
+  options?: { expectedVersion?: number; clientMutationId?: string }
+) => savePengumumanOnServer(p, { ...options, isUpdate: true });
 
 export const deletePengumumanOnServer = (id: string) =>
-  deleteEntity(`/api/pengumuman/${encodeURIComponent(id)}`, 'Gagal menghapus pengumuman dari server.');
+  sendMutation(
+    'DELETE',
+    `/api/pengumuman/${encodeURIComponent(id)}`,
+    undefined,
+    'Gagal menghapus pengumuman dari server.'
+  );
 
-export const saveBantuanOnServer = (b: BantuanPemerintah) =>
-  postEntity('/api/bantuan', { bantuan: b }, 'Gagal menyimpan data bantuan ke server.');
+export async function saveBantuanOnServer(
+  b: BantuanPemerintah,
+  options?: { isUpdate?: boolean; expectedVersion?: number }
+): Promise<ServerWriteResult> {
+  const isUpdate = Boolean(options?.isUpdate);
+  const res = await sendMutation(
+    isUpdate ? 'PUT' : 'POST',
+    isUpdate ? `/api/bantuan/${encodeURIComponent(b.id)}` : '/api/bantuan',
+    { bantuan: b, expectedVersion: options?.expectedVersion ?? b.version },
+    'Gagal menyimpan data bantuan ke server.'
+  );
+  return { ...res, bantuan: res.json?.bantuan };
+}
 
 export const deleteBantuanOnServer = (id: string) =>
-  deleteEntity(`/api/bantuan/${encodeURIComponent(id)}`, 'Gagal menghapus data bantuan dari server.');
+  sendMutation(
+    'DELETE',
+    `/api/bantuan/${encodeURIComponent(id)}`,
+    undefined,
+    'Gagal menghapus data bantuan dari server.'
+  );
 
-export const saveDokumenOnServer = (d: DokumenPdfWarga) =>
-  postEntity('/api/dokumen', { dokumen: d }, 'Gagal menyimpan dokumen ke server.');
+export async function saveDokumenOnServer(d: DokumenPdfWarga): Promise<ServerWriteResult> {
+  const res = await sendMutation(
+    'POST',
+    '/api/dokumen',
+    { dokumen: d },
+    'Gagal menyimpan dokumen ke server.'
+  );
+  return { ...res, dokumen: res.json?.dokumen };
+}
 
 export const deleteDokumenOnServer = (id: string) =>
-  deleteEntity(`/api/dokumen/${encodeURIComponent(id)}`, 'Gagal menghapus dokumen dari server.');
+  sendMutation(
+    'DELETE',
+    `/api/dokumen/${encodeURIComponent(id)}`,
+    undefined,
+    'Gagal menghapus dokumen dari server.'
+  );
 
-export const saveLaporanOnServer = (l: PembaruanBulananRT) =>
-  postEntity('/api/laporan-bulanan', { laporan: l }, 'Gagal mengirim laporan bulanan ke server.');
+export async function saveLaporanOnServer(l: PembaruanBulananRT): Promise<ServerWriteResult> {
+  const res = await sendMutation(
+    'POST',
+    '/api/laporan-bulanan',
+    { laporan: l },
+    'Gagal mengirim laporan bulanan ke server.'
+  );
+  return { ...res, laporan: res.json?.laporan };
+}
 
-export const saveSettingsOnServer = (pengaturanKas: PengaturanKas, tahunAktif?: number) =>
-  postEntity('/api/settings', { pengaturanKas, tahunAktif }, 'Gagal menyimpan pengaturan ke server.');
+export async function saveSettingsOnServer(
+  pengaturanKas: PengaturanKas,
+  tahunAktif?: number,
+  expectedVersion?: number
+): Promise<ServerWriteResult> {
+  const res = await sendMutation(
+    'POST',
+    '/api/settings',
+    {
+      pengaturanKas,
+      tahunAktif,
+      expectedVersion: expectedVersion ?? pengaturanKas.version,
+    },
+    'Gagal menyimpan pengaturan ke server.'
+  );
+  return { ...res, pengaturanKas: res.json?.pengaturanKas };
+}
+
+// Notifications & Web Push API helpers
+export async function fetchNotificationsFromServer(limit = 60): Promise<{
+  ok: boolean;
+  notifications: AppNotification[];
+  unreadCount: number;
+}> {
+  if (!getAuthToken()) return { ok: false, notifications: [], unreadCount: 0 };
+  try {
+    const res = await fetch(apiUrl(`/api/notifications?limit=${limit}&t=${Date.now()}`), {
+      method: 'GET',
+      headers: authHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return { ok: false, notifications: [], unreadCount: 0 };
+    const { json } = await readApiJsonSafely(res, getResolvedEndpointDisplay('/api/notifications'));
+    if (!json?.success) return { ok: false, notifications: [], unreadCount: 0 };
+    return {
+      ok: true,
+      notifications: Array.isArray(json.notifications) ? json.notifications : [],
+      unreadCount: Number(json.unreadCount) || 0,
+    };
+  } catch {
+    return { ok: false, notifications: [], unreadCount: 0 };
+  }
+}
+
+export async function markNotificationReadOnServer(id: string): Promise<boolean> {
+  const res = await sendMutation(
+    'POST',
+    `/api/notifications/${encodeURIComponent(id)}/read`,
+    {},
+    'Gagal menandai notifikasi dibaca.'
+  );
+  return res.ok;
+}
+
+export async function markAllNotificationsReadOnServer(): Promise<boolean> {
+  const res = await sendMutation(
+    'POST',
+    '/api/notifications/read-all',
+    {},
+    'Gagal menandai semua notifikasi dibaca.'
+  );
+  return res.ok;
+}
+
+export async function fetchVapidPublicKeyFromServer(): Promise<string | null> {
+  try {
+    const res = await fetch(apiUrl(`/api/push/vapid-public-key?t=${Date.now()}`), {
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const { json } = await readApiJsonSafely(
+      res,
+      getResolvedEndpointDisplay('/api/push/vapid-public-key')
+    );
+    return typeof json?.publicKey === 'string' && json.publicKey ? json.publicKey : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function subscribePushOnServer(
+  subscription: PushSubscriptionJSON
+): Promise<ServerWriteResult> {
+  return sendMutation(
+    'POST',
+    '/api/push/subscribe',
+    { subscription },
+    'Gagal mendaftarkan langganan notifikasi push.'
+  );
+}
+
+export async function unsubscribePushOnServer(endpoint?: string): Promise<ServerWriteResult> {
+  return sendMutation(
+    'POST',
+    '/api/push/unsubscribe',
+    endpoint ? { endpoint } : {},
+    'Gagal menonaktifkan langganan notifikasi push.'
+  );
+}
+
+export async function fetchAuditLogsFromServer(limit = 100): Promise<AuditLogEntry[]> {
+  if (!getAuthToken()) return [];
+  try {
+    const res = await fetch(apiUrl(`/api/audit-logs?limit=${limit}&t=${Date.now()}`), {
+      method: 'GET',
+      headers: authHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return [];
+    const { json } = await readApiJsonSafely(res, getResolvedEndpointDisplay('/api/audit-logs'));
+    return json?.success && Array.isArray(json.logs) ? json.logs : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function exportBackupFromServer(): Promise<AppDatabaseSchema | null> {
+  if (!getAuthToken()) return null;
+  try {
+    const res = await fetch(apiUrl(`/api/backup/export?t=${Date.now()}`), {
+      method: 'GET',
+      headers: authHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const { json } = await readApiJsonSafely(res, getResolvedEndpointDisplay('/api/backup/export'));
+    if (!json?.success) return null;
+    return {
+      version: 2,
+      revision: json.revision,
+      lastUpdated: json.exportedAt || new Date().toISOString(),
+      tahunAktif: json.tahunAktif || 2026,
+      pengaturanKas: json.pengaturanKas,
+      wargaList: Array.isArray(json.wargaList) ? json.wargaList : [],
+      transactions: Array.isArray(json.transactions) ? json.transactions : [],
+      bantuanList: Array.isArray(json.bantuanList) ? json.bantuanList : [],
+      pengumumanList: Array.isArray(json.pengumumanList) ? json.pengumumanList : [],
+      dokumenList: Array.isArray(json.dokumenList) ? json.dokumenList : [],
+      adminAccounts: Array.isArray(json.adminAccounts) ? json.adminAccounts : [],
+      laporanBulananRT: Array.isArray(json.laporanBulananRT) ? json.laporanBulananRT : [],
+    };
+  } catch {
+    return null;
+  }
+}
 
 export async function clearAppData(preserveAdminAccounts: AdminRTAccount[] = []): Promise<boolean> {
   clearLegacyLocalCache();

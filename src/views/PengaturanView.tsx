@@ -1034,31 +1034,33 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
                 Baca Kebijakan Privasi Lengkap
               </button>
 
-              <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <h4 className="text-xs font-bold text-slate-800">Reset & Pengosongan Data Aplikasi</h4>
-                  <p className="text-[11px] text-slate-400">
-                    Hapus seluruh data kas, warga, bansos, dan arsip untuk memulai pembukuan baru yang bersih.
-                  </p>
+              {currentUser?.role === 'server' && (
+                <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-800">Reset & Pengosongan Data Aplikasi</h4>
+                    <p className="text-[11px] text-slate-400">
+                      Hapus seluruh data kas, warga, bansos, dan arsip untuk memulai pembukuan baru yang bersih (khusus Super Admin RW).
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmDialog({
+                        isOpen: true,
+                        title: 'Reset Total & Hapus Seluruh Data',
+                        message: 'PERINGATAN KERAS! Tindakan ini akan menghapus permanen seluruh data warga, transaksi kas masuk/keluar, bansos, arsip dokumen, dan laporan bulanan di Database Server Pusat. Data tidak dapat dipulihkan kembali. Apakah Anda yakin ingin melakukan reset total?',
+                        targetName: 'HAPUS PERMANEN SEMUA DATA APLIKASI',
+                        variant: 'danger',
+                        confirmText: 'Ya, Hapus Semua Data',
+                        onConfirm: onResetEmpty,
+                      });
+                    }}
+                    className="rounded-xl border border-rose-300 bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer shrink-0"
+                  >
+                    Reset Total Semua Data
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setConfirmDialog({
-                      isOpen: true,
-                      title: 'Reset Total & Hapus Seluruh Data',
-                      message: 'PERINGATAN KERAS! Tindakan ini akan menghapus permanen seluruh data warga, transaksi kas masuk/keluar, bansos, arsip dokumen, dan laporan bulanan baik dari memori perangkat maupun server backend. Data tidak dapat dipulihkan kembali. Apakah Anda yakin ingin melakukan reset total?',
-                      targetName: 'HAPUS PERMANEN SEMUA DATA APLIKASI',
-                      variant: 'danger',
-                      confirmText: 'Ya, Hapus Semua Data',
-                      onConfirm: onResetEmpty,
-                    });
-                  }}
-                  className="rounded-xl border border-rose-300 bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer shrink-0"
-                >
-                  Reset Total Semua Data
-                </button>
-              </div>
+              )}
             </div>
           </div>
         </div>

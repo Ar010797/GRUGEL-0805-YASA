@@ -1,18 +1,26 @@
 import 'dotenv/config';
+import http from 'node:http';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createApiApp } from './src/serverApp.ts';
+import { initSocketServer } from './src/realtime/socketServer.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const app = createApiApp();
-const PORT = Number(process.env.PORT) || 3000;
+const isProd = process.env.NODE_ENV === 'production';
+const PORT = isProd ? Number(process.env.PORT) || 3000 : 3000;
 
-// Start Full-Stack Server (Local Dev & Cloud Run)
 async function start() {
-  const isProd = process.env.NODE_ENV === 'production';
+
+  // Create HTTP server early so Socket.IO attaches alongside Express on port 3000
+  const rootRouter = express();
+  const httpServer = http.createServer(rootRouter);
+  const realtime = initSocketServer(httpServer);
+
+  const apiApp = createApiApp({ realtime });
+  rootRouter.use(apiApp);
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
@@ -24,20 +32,20 @@ async function start() {
       },
       appType: 'spa',
     });
-    app.use(vite.middlewares);
+    rootRouter.use(vite.middlewares);
   } else {
-    app.use(express.static(path.join(__dirname, 'dist')));
-    app.get('*', (req, res) => {
+    rootRouter.use(express.static(path.join(__dirname, 'dist')));
+    rootRouter.get('*', (_req, res) => {
       res.sendFile(path.join(__dirname, 'dist', 'index.html'));
     });
   }
 
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server Rukun Tetangga (PostgreSQL) berjalan aktif di port ${PORT}`);
+  httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server Administrasi RW 05 (PostgreSQL + Socket.IO) berjalan aktif di port ${PORT}`);
   });
 
   const shutdown = () => {
-    server.close(() => {
+    httpServer.close(() => {
       process.exit(0);
     });
   };

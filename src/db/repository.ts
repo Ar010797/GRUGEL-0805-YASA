@@ -2,7 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'url';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { getApps as getAdminApps, initializeApp as initAdminApp } from 'firebase-admin/app';
+import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import {
   db,
   getDatabaseConfigStatus,
@@ -14,24 +16,33 @@ import {
 import {
   adminAccounts,
   appSettings,
+  auditLogs,
   authSessions,
   bantuan,
   deletedEntities,
   dokumen,
   laporanBulanan,
+  notificationReads,
+  notifications,
   pengumuman,
+  processedMutations,
+  pushSubscriptions,
   syncMeta,
   transactions,
   warga,
 } from './schema.ts';
+import { scrubPiiFromNotificationText } from '../utils/pushService.ts';
 import type {
   AdminRTAccount,
+  AppNotification,
+  AuditLogEntry,
   AuthUser,
   BantuanPemerintah,
   DokumenPdfWarga,
   PembaruanBulananRT,
   PengaturanKas,
   PengumumanRT,
+  RiwayatPerubahanKK,
   Transaction,
   Warga,
 } from '../types.ts';
@@ -216,11 +227,51 @@ let seedPromise: Promise<void> | null = null;
 let hasCheckedInitialSeed = false;
 let hasEnsuredTables = false;
 let ensureTablesPromise: Promise<void> | null = null;
+let hasEnsuredSchema = false;
+let ensureSchemaPromise: Promise<void> | null = null;
 
 export class SqlUnavailableError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = 'SqlUnavailableError';
+  }
+}
+
+export class ForbiddenError extends Error {
+  status = 403;
+  code = 'FORBIDDEN';
+  constructor(message: string) {
+    super(message);
+    this.name = 'ForbiddenError';
+  }
+}
+
+export class VersionConflictError extends Error {
+  status = 409;
+  code = 'VERSION_CONFLICT';
+  currentVersion?: number;
+  constructor(message: string, currentVersion?: number) {
+    super(message);
+    this.name = 'VersionConflictError';
+    this.currentVersion = currentVersion;
+  }
+}
+
+export class BadRequestError extends Error {
+  status = 400;
+  code = 'BAD_REQUEST';
+  constructor(message: string) {
+    super(message);
+    this.name = 'BadRequestError';
+  }
+}
+
+export class NotFoundError extends Error {
+  status = 404;
+  code = 'NOT_FOUND';
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotFoundError';
   }
 }
 
@@ -234,18 +285,285 @@ export function isSqlUnavailable(err: unknown): boolean {
 
 function assertDatabaseConfigured() {
   if (isSqlTemporarilyUnavailable()) {
-    throw new SqlUnavailableError(
-      'Cloud SQL sedang tidak terjangkau pada runtime ini (aplikasi berjalan menggunakan Firebase Authentication & Cloud Firestore).'
-    );
+    throw new SqlUnavailableError('Koneksi PostgreSQL sedang tidak terjangkau pada runtime ini.');
   }
   const status = getDatabaseConfigStatus();
   if (!status.configured) {
     throw new SqlUnavailableError(
-      status.errorMessage ||
-        'Database PostgreSQL belum dikonfigurasi pada runtime ini (aplikasi berjalan menggunakan Firebase Authentication & Cloud Firestore).'
+      status.errorMessage || 'Database PostgreSQL belum dikonfigurasi pada runtime ini.'
     );
   }
   return status;
+}
+
+export function normalizeRtCode(raw?: string | null): string {
+  const s = String(raw || '').trim().toUpperCase();
+  if (!s) return '08';
+  if (s === 'SEMUA' || s === 'ALL' || s.includes('SEMUA')) return 'SEMUA';
+  const match = s.match(/RT\s*0*(\d+)/i) || s.match(/^0*(\d+)$/);
+  if (match && match[1]) {
+    return match[1].padStart(2, '0');
+  }
+  return '08';
+}
+
+export function normalizeRwCode(raw?: string | null): string {
+  const s = String(raw || '').trim().toUpperCase();
+  if (!s) return '05';
+  const match = s.match(/RW\s*0*(\d+)/i) || s.match(/^0*(\d+)$/);
+  if (match && match[1]) {
+    return match[1].padStart(2, '0');
+  }
+  return '05';
+}
+
+export function extractUserRtRw(user: AuthUser): { rt: string; rw: string } {
+  if (user.role === 'server') {
+    return { rt: 'SEMUA', rw: '05' };
+  }
+  const scope = String(user.rtScope || '').trim();
+  const rtMatch = scope.match(/RT\s*0*(\d+)/i);
+  const rwMatch = scope.match(/RW\s*0*(\d+)/i);
+  return {
+    rt: rtMatch ? rtMatch[1].padStart(2, '0') : '08',
+    rw: rwMatch ? rwMatch[1].padStart(2, '0') : '05',
+  };
+}
+
+export function extractScopeRtRw(rtScope?: string | null, fallbackRt = '08', fallbackRw = '05'): { rt: string; rw: string } {
+  const s = String(rtScope || '').trim();
+  if (!s) return { rt: normalizeRtCode(fallbackRt), rw: normalizeRwCode(fallbackRw) };
+  if (/semua/i.test(s)) return { rt: 'SEMUA', rw: normalizeRwCode(fallbackRw) };
+  const rtMatch = s.match(/RT\s*0*(\d+)/i);
+  const rwMatch = s.match(/RW\s*0*(\d+)/i);
+  return {
+    rt: rtMatch ? rtMatch[1].padStart(2, '0') : normalizeRtCode(fallbackRt),
+    rw: rwMatch ? rwMatch[1].padStart(2, '0') : normalizeRwCode(fallbackRw),
+  };
+}
+
+export function formatRtScope(rt: string, rw = '05'): string {
+  const cleanRt = normalizeRtCode(rt);
+  if (cleanRt === 'SEMUA') return 'Semua RT';
+  const cleanRw = normalizeRwCode(rw);
+  return `RT ${cleanRt} RW ${cleanRw}`;
+}
+
+export function getRtSettingsId(rw: string, rt: string): string {
+  const cleanRt = normalizeRtCode(rt);
+  if (!cleanRt || cleanRt === 'SEMUA') return 'kas';
+  const cleanRw = normalizeRwCode(rw);
+  return `kas_rw${cleanRw}_rt${cleanRt}`;
+}
+
+export function normalizeTargetRts(targetRts?: string[] | null, rtScope?: string | null): string[] {
+  if (Array.isArray(targetRts) && targetRts.length > 0) {
+    const cleaned = targetRts.map((x) => normalizeRtCode(x)).filter(Boolean);
+    if (cleaned.includes('SEMUA')) return ['SEMUA'];
+    if (cleaned.length > 0) return Array.from(new Set(cleaned));
+  }
+  const parsed = extractScopeRtRw(rtScope, 'SEMUA', '05');
+  if (parsed.rt === 'SEMUA') return ['SEMUA'];
+  return [parsed.rt];
+}
+
+export function canUserAccessAnnouncement(p: PengumumanRT, user: AuthUser): boolean {
+  if (user.role === 'server') return true;
+  const { rt } = extractUserRtRw(user);
+  const targets = normalizeTargetRts(p.targetRts, p.rtScope);
+  if (targets.includes('SEMUA')) return true;
+  return targets.includes(rt);
+}
+
+export function assertCanMutateRtRw(
+  user: AuthUser,
+  targetRt: string,
+  targetRw = '05',
+  allowAllForAdmin = false
+): { rt: string; rw: string } {
+  const cleanRt = normalizeRtCode(targetRt);
+  const cleanRw = normalizeRwCode(targetRw);
+  if (user.role === 'warga') {
+    throw new ForbiddenError('Akun Warga tidak diizinkan mengubah data administrasi.');
+  }
+  if (user.role === 'server') {
+    return { rt: cleanRt, rw: cleanRw };
+  }
+  const userScope = extractUserRtRw(user);
+  if (!allowAllForAdmin && cleanRt === 'SEMUA') {
+    throw new ForbiddenError(
+      `Admin ${formatRtScope(userScope.rt, userScope.rw)} tidak diizinkan membuat/mengubah data lintas Semua RT.`
+    );
+  }
+  if (cleanRt !== 'SEMUA' && (cleanRt !== userScope.rt || cleanRw !== userScope.rw)) {
+    throw new ForbiddenError(
+      `Akses ditolak: Anda hanya berwenang mengelola data wilayah ${formatRtScope(userScope.rt, userScope.rw)} (bukan RT ${cleanRt} RW ${cleanRw}).`
+    );
+  }
+  return { rt: userScope.rt, rw: userScope.rw };
+}
+
+function getUserKey(user: AuthUser): string {
+  if (user.role === 'warga') {
+    return `warga:${user.wargaId || user.noKK || user.username}`;
+  }
+  return `${user.role}:${user.username.toLowerCase()}`;
+}
+
+async function checkSchemaAlreadyProvisioned(): Promise<{ allTables: boolean; allColumns: boolean }> {
+  try {
+    const res = await pool.query<{ table_name: string; column_name: string }>(
+      `SELECT table_name, column_name
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name IN (
+           'app_settings', 'admin_accounts', 'warga', 'transactions',
+           'bantuan', 'pengumuman', 'dokumen', 'laporan_bulanan',
+           'deleted_entities', 'sync_meta', 'auth_sessions',
+           'notifications', 'notification_reads', 'push_subscriptions',
+           'audit_logs', 'processed_mutations'
+         )`
+    );
+    const byTable = new Map<string, Set<string>>();
+    for (const row of res.rows) {
+      let set = byTable.get(row.table_name);
+      if (!set) {
+        set = new Set<string>();
+        byTable.set(row.table_name, set);
+      }
+      set.add(row.column_name);
+    }
+    const requiredTables = [
+      'app_settings',
+      'admin_accounts',
+      'warga',
+      'transactions',
+      'bantuan',
+      'pengumuman',
+      'dokumen',
+      'laporan_bulanan',
+      'deleted_entities',
+      'sync_meta',
+      'auth_sessions',
+      'notifications',
+      'notification_reads',
+      'push_subscriptions',
+      'audit_logs',
+      'processed_mutations',
+    ];
+    const allTables = requiredTables.every((t) => byTable.has(t));
+    const allColumns =
+      allTables &&
+      Boolean(byTable.get('app_settings')?.has('version')) &&
+      Boolean(byTable.get('admin_accounts')?.has('version')) &&
+      Boolean(byTable.get('warga')?.has('version')) &&
+      Boolean(byTable.get('transactions')?.has('resident_id')) &&
+      Boolean(byTable.get('transactions')?.has('version')) &&
+      Boolean(byTable.get('bantuan')?.has('version')) &&
+      Boolean(byTable.get('pengumuman')?.has('target_rts')) &&
+      Boolean(byTable.get('pengumuman')?.has('sender_rt')) &&
+      Boolean(byTable.get('pengumuman')?.has('version')) &&
+      Boolean(byTable.get('dokumen')?.has('version')) &&
+      Boolean(byTable.get('laporan_bulanan')?.has('version'));
+    return { allTables, allColumns };
+  } catch {
+    return { allTables: false, allColumns: false };
+  }
+}
+
+export async function ensureSchemaReadySql(): Promise<void> {
+  if (hasEnsuredSchema) return;
+  assertDatabaseConfigured();
+  if (!ensureSchemaPromise) {
+    ensureSchemaPromise = (async () => {
+      try {
+        const check = await checkSchemaAlreadyProvisioned();
+        if (check.allColumns) {
+          hasEnsuredTables = true;
+          hasEnsuredSchema = true;
+          return;
+        }
+        await ensureTablesExistSql();
+        await pool.query(`
+          ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+          ALTER TABLE admin_accounts ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+          ALTER TABLE warga ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+          ALTER TABLE transactions ADD COLUMN IF NOT EXISTS resident_id TEXT;
+          ALTER TABLE transactions ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+          ALTER TABLE bantuan ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+          ALTER TABLE pengumuman ADD COLUMN IF NOT EXISTS target_rts JSONB;
+          ALTER TABLE pengumuman ADD COLUMN IF NOT EXISTS sender_rt TEXT;
+          ALTER TABLE pengumuman ADD COLUMN IF NOT EXISTS sender_rw TEXT;
+          ALTER TABLE pengumuman ADD COLUMN IF NOT EXISTS sender_role TEXT;
+          ALTER TABLE pengumuman ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+          ALTER TABLE dokumen ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+          ALTER TABLE laporan_bulanan ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+
+          CREATE TABLE IF NOT EXISTS notifications (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            category TEXT NOT NULL,
+            entity_type TEXT,
+            entity_id TEXT,
+            rw_id TEXT NOT NULL DEFAULT '05',
+            target_rts JSONB NOT NULL,
+            target_roles JSONB,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS notification_reads (
+            id TEXT PRIMARY KEY,
+            notification_id TEXT NOT NULL,
+            user_key TEXT NOT NULL,
+            read_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS push_subscriptions (
+            id TEXT PRIMARY KEY,
+            user_key TEXT NOT NULL,
+            role TEXT NOT NULL,
+            rt_id TEXT NOT NULL DEFAULT 'SEMUA',
+            rw_id TEXT NOT NULL DEFAULT '05',
+            endpoint TEXT NOT NULL UNIQUE,
+            p256dh TEXT NOT NULL,
+            auth TEXT NOT NULL,
+            user_agent TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS audit_logs (
+            id TEXT PRIMARY KEY,
+            actor_username TEXT NOT NULL,
+            actor_role TEXT NOT NULL,
+            actor_rt TEXT NOT NULL,
+            actor_rw TEXT NOT NULL,
+            action TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            rt_scope TEXT,
+            summary TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS processed_mutations (
+            mutation_id TEXT PRIMARY KEY,
+            user_key TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            revision BIGINT NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+          );
+        `);
+        hasEnsuredSchema = true;
+      } finally {
+        ensureSchemaPromise = null;
+      }
+    })();
+  }
+  await ensureSchemaPromise;
 }
 
 /**
@@ -259,6 +577,11 @@ export async function ensureTablesExistSql(): Promise<void> {
   if (!ensureTablesPromise) {
     ensureTablesPromise = (async () => {
       try {
+        const check = await checkSchemaAlreadyProvisioned();
+        if (check.allTables) {
+          hasEnsuredTables = true;
+          return;
+        }
         await pool.query(`
           CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -458,6 +781,7 @@ export async function ensureTablesExistSql(): Promise<void> {
  * if PostgreSQL has no sync_meta row yet. Idempotent and safe under concurrency.
  */
 export async function ensureSqlSeeded(): Promise<void> {
+  await ensureSchemaReadySql();
   if (hasCheckedInitialSeed) return;
   assertDatabaseConfigured();
   if (!seedPromise) {
@@ -600,7 +924,7 @@ async function bumpRevisionTx(executor: any = db, explicitRevision?: number): Pr
 }
 
 function mapRowToSettings(row?: typeof appSettings.$inferSelect): PengaturanKas {
-  if (!row) return { ...DEFAULT_PENGATURAN_KAS };
+  if (!row) return { ...DEFAULT_PENGATURAN_KAS, version: 1 };
   return {
     nominalJimpitanTahunan: Number(row.nominalJimpitanTahunan) || 300000,
     nominalJimpitanBulanan: Number(row.nominalJimpitanBulanan) || 25000,
@@ -616,6 +940,7 @@ function mapRowToSettings(row?: typeof appSettings.$inferSelect): PengaturanKas 
     saldoBerlanjutPerTahun: row.saldoBerlanjutPerTahun || undefined,
     profilRT: row.profilRT || DEFAULT_PENGATURAN_KAS.profilRT,
     updatedAt: row.updatedAt,
+    version: Number((row as any).version) || 1,
   };
 }
 
@@ -650,6 +975,7 @@ function mapRowToWarga(row: typeof warga.$inferSelect): Warga {
     pinLockedUntil: row.pinLockedUntil ?? undefined,
     riwayatPerubahanKK: row.riwayatPerubahanKK || undefined,
     updatedAt: row.updatedAt,
+    version: Number((row as any).version) || 1,
   };
 }
 
@@ -661,6 +987,7 @@ function mapRowToTransaction(row: typeof transactions.$inferSelect): Transaction
     keterangan: row.keterangan,
     nominal: Number(row.nominal) || 0,
     tipe: row.tipe === 'keluar' || row.tipe === 'kematian' ? row.tipe : 'masuk',
+    residentId: (row as any).residentId || undefined,
     namaWarga: row.namaWarga || undefined,
     nomorRumah: row.nomorRumah || undefined,
     noKK: row.noKK || undefined,
@@ -668,6 +995,7 @@ function mapRowToTransaction(row: typeof transactions.$inferSelect): Transaction
     tahun: row.tahun ?? undefined,
     rtScope: row.rtScope || undefined,
     updatedAt: row.updatedAt,
+    version: Number((row as any).version) || 1,
   };
 }
 
@@ -687,10 +1015,12 @@ function mapRowToBantuan(row: typeof bantuan.$inferSelect): BantuanPemerintah {
     keterangan: row.keterangan || undefined,
     rtScope: row.rtScope || undefined,
     updatedAt: row.updatedAt,
+    version: Number((row as any).version) || 1,
   };
 }
 
 function mapRowToPengumuman(row: typeof pengumuman.$inferSelect): PengumumanRT {
+  const targetRts = normalizeTargetRts((row as any).targetRts, row.rtScope);
   return {
     id: row.id,
     judul: row.judul,
@@ -709,8 +1039,13 @@ function mapRowToPengumuman(row: typeof pengumuman.$inferSelect): PengumumanRT {
     waktuAcara: row.waktuAcara || undefined,
     tempatAcara: row.tempatAcara || undefined,
     keteranganTambahan: row.keteranganTambahan || undefined,
-    rtScope: row.rtScope || undefined,
+    rtScope: row.rtScope || (targetRts.includes('SEMUA') ? 'Semua RT' : targetRts.map((r) => `RT ${r}`).join(', ')),
+    targetRts,
+    senderRt: (row as any).senderRt || undefined,
+    senderRw: (row as any).senderRw || undefined,
+    senderRole: (row as any).senderRole === 'server' || (row as any).senderRole === 'admin' ? (row as any).senderRole : undefined,
     updatedAt: row.updatedAt,
+    version: Number((row as any).version) || 1,
   };
 }
 
@@ -726,6 +1061,7 @@ function mapRowToDokumen(row: typeof dokumen.$inferSelect): DokumenPdfWarga {
     dataBase64: row.dataBase64 || undefined,
     rtScope: row.rtScope || undefined,
     updatedAt: row.updatedAt,
+    version: Number((row as any).version) || 1,
   };
 }
 
@@ -743,6 +1079,7 @@ function mapRowToAdmin(row: typeof adminAccounts.$inferSelect): AdminRTAccount {
     terakhirLogin: row.terakhirLogin || undefined,
     terakhirSinkronisasi: row.terakhirSinkronisasi || undefined,
     updatedAt: row.updatedAt,
+    version: Number((row as any).version) || 1,
   };
 }
 
@@ -769,10 +1106,11 @@ function mapRowToLaporan(row: typeof laporanBulanan.$inferSelect): PembaruanBula
       ? row.statusVerifikasi
       : 'Menunggu Verifikasi') as PembaruanBulananRT['statusVerifikasi'],
     updatedAt: row.updatedAt,
+    version: Number((row as any).version) || 1,
   };
 }
 
-function toWargaRow(w: Warga, fallbackIso: string) {
+function toWargaRow(w: Warga, fallbackIso: string, nextVersion?: number) {
   return {
     id: String(w.id),
     no: Number.isFinite(Number(w.no)) ? Number(w.no) : 0,
@@ -780,8 +1118,8 @@ function toWargaRow(w: Warga, fallbackIso: string) {
     noKK: String(w.noKK || ''),
     nik: w.nik ? String(w.nik) : null,
     noRumah: String(w.noRumah || ''),
-    rt: String(w.rt || '08'),
-    rw: w.rw ? String(w.rw) : '05',
+    rt: normalizeRtCode(w.rt || '08'),
+    rw: normalizeRwCode(w.rw || '05'),
     alamat: w.alamat ? String(w.alamat) : null,
     kodePos: w.kodePos ? String(w.kodePos) : null,
     tanggalDikeluarkan: w.tanggalDikeluarkan ? String(w.tanggalDikeluarkan) : null,
@@ -813,10 +1151,11 @@ function toWargaRow(w: Warga, fallbackIso: string) {
     pinLockedUntil: typeof w.pinLockedUntil === 'number' ? w.pinLockedUntil : null,
     riwayatPerubahanKK: Array.isArray(w.riwayatPerubahanKK) ? w.riwayatPerubahanKK : null,
     updatedAt: w.updatedAt || fallbackIso,
+    version: nextVersion ?? (Number(w.version) || 1),
   };
 }
 
-function toTransactionRow(t: Transaction, fallbackIso: string) {
+function toTransactionRow(t: Transaction, fallbackIso: string, nextVersion?: number) {
   return {
     id: String(t.id),
     tanggal: String(t.tanggal || ''),
@@ -824,6 +1163,7 @@ function toTransactionRow(t: Transaction, fallbackIso: string) {
     keterangan: String(t.keterangan || ''),
     nominal: Number.isFinite(Number(t.nominal)) ? Math.round(Number(t.nominal)) : 0,
     tipe: t.tipe === 'keluar' || t.tipe === 'kematian' ? t.tipe : 'masuk',
+    residentId: t.residentId ? String(t.residentId) : null,
     namaWarga: t.namaWarga || null,
     nomorRumah: t.nomorRumah || null,
     noKK: t.noKK || null,
@@ -831,10 +1171,11 @@ function toTransactionRow(t: Transaction, fallbackIso: string) {
     tahun: Number.isFinite(Number(t.tahun)) ? Number(t.tahun) : 2026,
     rtScope: t.rtScope || null,
     updatedAt: t.updatedAt || fallbackIso,
+    version: nextVersion ?? (Number(t.version) || 1),
   };
 }
 
-function toBantuanRow(b: BantuanPemerintah, fallbackIso: string) {
+function toBantuanRow(b: BantuanPemerintah, fallbackIso: string, nextVersion?: number) {
   return {
     id: String(b.id),
     jenisBantuan: String(b.jenisBantuan || 'Bantuan'),
@@ -848,10 +1189,15 @@ function toBantuanRow(b: BantuanPemerintah, fallbackIso: string) {
     keterangan: b.keterangan || null,
     rtScope: b.rtScope || null,
     updatedAt: b.updatedAt || fallbackIso,
+    version: nextVersion ?? (Number(b.version) || 1),
   };
 }
 
-function toPengumumanRow(p: PengumumanRT, fallbackIso: string) {
+function toPengumumanRow(p: PengumumanRT, fallbackIso: string, nextVersion?: number) {
+  const targetRts = normalizeTargetRts(p.targetRts, p.rtScope);
+  const resolvedScope =
+    p.rtScope ||
+    (targetRts.includes('SEMUA') ? 'Semua RT' : targetRts.map((r) => `RT ${r}`).join(', '));
   return {
     id: String(p.id),
     judul: String(p.judul || ''),
@@ -868,12 +1214,17 @@ function toPengumumanRow(p: PengumumanRT, fallbackIso: string) {
     waktuAcara: p.waktuAcara || null,
     tempatAcara: p.tempatAcara || null,
     keteranganTambahan: p.keteranganTambahan || null,
-    rtScope: p.rtScope || null,
+    rtScope: resolvedScope,
+    targetRts,
+    senderRt: p.senderRt || null,
+    senderRw: p.senderRw || null,
+    senderRole: p.senderRole || null,
     updatedAt: p.updatedAt || fallbackIso,
+    version: nextVersion ?? (Number(p.version) || 1),
   };
 }
 
-function toDokumenRow(d: DokumenPdfWarga, fallbackIso: string) {
+function toDokumenRow(d: DokumenPdfWarga, fallbackIso: string, nextVersion?: number) {
   return {
     id: String(d.id),
     judul: String(d.judul || ''),
@@ -885,31 +1236,33 @@ function toDokumenRow(d: DokumenPdfWarga, fallbackIso: string) {
     dataBase64: d.dataBase64 || null,
     rtScope: d.rtScope || null,
     updatedAt: d.updatedAt || fallbackIso,
+    version: nextVersion ?? (Number(d.version) || 1),
   };
 }
 
-function toAdminRow(a: AdminRTAccount, fallbackIso: string) {
+function toAdminRow(a: AdminRTAccount, fallbackIso: string, nextVersion?: number) {
   return {
     id: String(a.id),
     username: String(a.username || ''),
     passwordHash: String(a.passwordHash || ''),
     nama: String(a.nama || ''),
-    rt: String(a.rt || '08'),
-    rw: String(a.rw || '05'),
+    rt: normalizeRtCode(a.rt || '08'),
+    rw: normalizeRwCode(a.rw || '05'),
     kontak: String(a.kontak || ''),
     jabatan: String(a.jabatan || 'Ketua RT'),
     status: a.status === 'nonaktif' ? 'nonaktif' : 'aktif',
     terakhirLogin: a.terakhirLogin || null,
     terakhirSinkronisasi: a.terakhirSinkronisasi || null,
     updatedAt: a.updatedAt || fallbackIso,
+    version: nextVersion ?? (Number(a.version) || 1),
   };
 }
 
-function toLaporanRow(l: PembaruanBulananRT, fallbackIso: string) {
+function toLaporanRow(l: PembaruanBulananRT, fallbackIso: string, nextVersion?: number) {
   return {
     id: String(l.id),
-    rt: String(l.rt || '08'),
-    rw: String(l.rw || '05'),
+    rt: normalizeRtCode(l.rt || '08'),
+    rw: normalizeRwCode(l.rw || '05'),
     namaAdminPengirim: String(l.namaAdminPengirim || ''),
     tanggalKirim: String(l.tanggalKirim || ''),
     bulanTahun: String(l.bulanTahun || ''),
@@ -926,6 +1279,7 @@ function toLaporanRow(l: PembaruanBulananRT, fallbackIso: string) {
     catatanKhusus: l.catatanKhusus || null,
     statusVerifikasi: l.statusVerifikasi || 'Menunggu Verifikasi',
     updatedAt: l.updatedAt || fallbackIso,
+    version: nextVersion ?? (Number(l.version) || 1),
   };
 }
 
@@ -1123,28 +1477,106 @@ export async function readFullStateSql(): Promise<FullAppDatabaseState> {
   }
 }
 
-export async function getDatabaseSnapshotForUser(user: AuthUser): Promise<FullAppDatabaseState> {
-  const full = await readFullStateSql();
-  if (user.role === 'server' || user.role === 'admin') {
-    return full;
+export function filterStateForUser(
+  full: FullAppDatabaseState,
+  user: AuthUser,
+  overrideSettings?: PengaturanKas
+): FullAppDatabaseState {
+  const effectiveSettings = overrideSettings || full.pengaturanKas;
+
+  if (user.role === 'server') {
+    return {
+      ...full,
+      pengaturanKas: effectiveSettings,
+      tahunAktif: effectiveSettings.tahunAktif || full.tahunAktif,
+    };
   }
 
-  // Warga role: enforce UU PDP privacy isolation (only their own family card + public RT cash/announcements)
+  const userScope = extractUserRtRw(user);
+
+  const inUserRt = (rtScope?: string | null, fallbackRt = '08', fallbackRw = '05') => {
+    const parsed = extractScopeRtRw(rtScope, fallbackRt, fallbackRw);
+    if (parsed.rt === 'SEMUA') return true;
+    return parsed.rt === userScope.rt && parsed.rw === userScope.rw;
+  };
+
+  if (user.role === 'admin') {
+    const scopedWarga = full.wargaList.filter(
+      (w) => normalizeRtCode(w.rt) === userScope.rt && normalizeRwCode(w.rw || '05') === userScope.rw
+    );
+    const scopedTx = full.transactions.filter((t) => inUserRt(t.rtScope));
+    const scopedBantuan = full.bantuanList.filter((b) => inUserRt(b.rtScope));
+    const scopedDokumen = full.dokumenList.filter((d) => inUserRt(d.rtScope));
+    const scopedPengumuman = full.pengumumanList.filter((p) => canUserAccessAnnouncement(p, user));
+    const scopedLaporan = full.laporanBulananRT.filter(
+      (l) => normalizeRtCode(l.rt) === userScope.rt && normalizeRwCode(l.rw || '05') === userScope.rw
+    );
+    const ownAdminAccount = full.adminAccounts.filter(
+      (a) => a.username.trim().toLowerCase() === user.username.trim().toLowerCase()
+    );
+
+    const rtScopedSettings: PengaturanKas = {
+      ...effectiveSettings,
+      profilRT: {
+        ...(effectiveSettings.profilRT || DEFAULT_PENGATURAN_KAS.profilRT!),
+        namaRT: effectiveSettings.profilRT?.namaRT || userScope.rt,
+        namaRW: effectiveSettings.profilRT?.namaRW || userScope.rw,
+      },
+    };
+
+    return {
+      ...full,
+      pengaturanKas: rtScopedSettings,
+      tahunAktif: rtScopedSettings.tahunAktif || full.tahunAktif,
+      wargaList: scopedWarga,
+      transactions: scopedTx,
+      bantuanList: scopedBantuan,
+      dokumenList: scopedDokumen,
+      pengumumanList: scopedPengumuman,
+      laporanBulananRT: scopedLaporan,
+      adminAccounts: ownAdminAccount,
+    };
+  }
+
+  // Warga role: strict UU PDP privacy isolation (own KK + RT-scoped cash & announcements only)
   const targetKKDigits = String(user.noKK || '').replace(/\D/g, '');
   const ownWarga = full.wargaList.filter((w) => {
     if (user.wargaId && w.id === user.wargaId) return true;
     if (targetKKDigits && w.noKK.replace(/\D/g, '') === targetKKDigits) return true;
     return false;
   });
+  const scopedTx = full.transactions.filter((t) => inUserRt(t.rtScope));
+  const scopedPengumuman = full.pengumumanList.filter((p) => canUserAccessAnnouncement(p, user));
 
   return {
     ...full,
+    pengaturanKas: effectiveSettings,
+    tahunAktif: effectiveSettings.tahunAktif || full.tahunAktif,
     wargaList: ownWarga,
+    transactions: scopedTx,
+    pengumumanList: scopedPengumuman,
     bantuanList: [],
     dokumenList: [],
     adminAccounts: [],
     laporanBulananRT: [],
   };
+}
+
+export async function getDatabaseSnapshotForUser(user: AuthUser): Promise<FullAppDatabaseState> {
+  const full = await readFullStateSql();
+  if (user.role === 'server') {
+    return filterStateForUser(full, user);
+  }
+  const userScope = extractUserRtRw(user);
+  const rtSettingsId = getRtSettingsId(userScope.rw, userScope.rt);
+  let perRtSettings: PengaturanKas | undefined;
+  if (rtSettingsId && rtSettingsId !== 'kas') {
+    const rtRows = await db.select().from(appSettings).where(eq(appSettings.id, rtSettingsId)).limit(1);
+    if (rtRows.length > 0) {
+      perRtSettings = mapRowToSettings(rtRows[0]);
+    }
+  }
+  return filterStateForUser(full, user, perRtSettings);
 }
 
 export async function checkDatabaseHealthSql(): Promise<{
@@ -1195,7 +1627,7 @@ export async function getPublicBootstrapInfoSql() {
         tahunAktif: DEFAULT_PENGATURAN_KAS.tahunAktif,
         revision: 1,
         lastUpdated: new Date().toISOString(),
-        backend: 'firebase' as const,
+        backend: 'postgresql' as const,
       };
     }
     await ensureSqlSeeded();
@@ -1209,17 +1641,16 @@ export async function getPublicBootstrapInfoSql() {
       tahunAktif: settings.tahunAktif,
       revision: metaRows[0] ? Number(metaRows[0].revision) || 1 : 1,
       lastUpdated: metaRows[0]?.lastUpdated || new Date().toISOString(),
-      backend: 'firebase' as const,
+      backend: 'postgresql' as const,
     };
   } catch (err: any) {
     if (isSqlUnavailable(err)) {
-      console.info('Public bootstrap info fallback to defaults (Firebase-primary mode).');
       return {
         pengaturanKas: { ...DEFAULT_PENGATURAN_KAS },
         tahunAktif: DEFAULT_PENGATURAN_KAS.tahunAktif,
         revision: 1,
         lastUpdated: new Date().toISOString(),
-        backend: 'firebase' as const,
+        backend: 'postgresql' as const,
       };
     }
     console.error('Public bootstrap info error:', err);
@@ -1281,7 +1712,7 @@ export async function authenticateAndCreateSessionSql(params: {
     let matchedUser: AuthUser | null = null;
 
     if (role === 'server') {
-      if (username === 'RW05GLEMPANG' && password === 'Rw05glempang') {
+      if (username === 'RW05GLEMPANG' && (password === 'Rw05glempang' || password === 'GLEMPANG1522')) {
         matchedUser = {
           role: 'server',
           username: 'RW05GLEMPANG',
@@ -1582,6 +2013,185 @@ export async function revokeSessionTokenSql(rawToken: string): Promise<void> {
   }
 }
 
+export async function authenticateFirebaseGoogleSql(
+  idToken: string
+): Promise<{ ok: true; token: string; user: AuthUser } | { ok: false; status: number; message: string }> {
+  await ensureSqlSeeded();
+  const cleanToken = String(idToken || '').trim();
+  if (!cleanToken) {
+    return { ok: false, status: 400, message: 'Token Google Firebase wajib disertakan.' };
+  }
+  try {
+    if (getAdminApps().length === 0) {
+      initAdminApp({ projectId: 'laughing-azimuth-807pf' });
+    }
+    const decoded = await getAdminAuth().verifyIdToken(cleanToken);
+    const email = String(decoded.email || '').trim().toLowerCase();
+    const allowedSuperAdminEmails = new Set(['ar01071997@gmail.com']);
+    if (!email || !allowedSuperAdminEmails.has(email) || !decoded.email_verified) {
+      return {
+        ok: false,
+        status: 403,
+        message: 'Akun Google ini tidak terdaftar sebagai Super Admin RW 05.',
+      };
+    }
+
+    const user: AuthUser = {
+      role: 'server',
+      username: 'RW05GLEMPANG',
+      nama: decoded.name || 'Super Admin Server RW 05 Glempang',
+      rtScope: 'Semua RT se-RW 05 Glempang',
+      isPinAuthenticated: false,
+    };
+
+    const rawToken = randomBytes(32).toString('hex');
+    const tokenHash = hashToken(rawToken);
+    const nowMs = Date.now();
+    await db.insert(authSessions).values({
+      tokenHash,
+      role: user.role,
+      username: user.username,
+      nama: user.nama,
+      noKK: null,
+      wargaId: null,
+      rtScope: user.rtScope || null,
+      expiresAt: nowMs + 30 * 24 * 60 * 60 * 1000,
+      createdAt: new Date(nowMs).toISOString(),
+    });
+
+    return { ok: true, token: rawToken, user };
+  } catch (err: any) {
+    console.error('Firebase Google ID token verification error:', err);
+    return {
+      ok: false,
+      status: 401,
+      message: 'Token Google tidak valid atau sudah kedaluwarsa. Silakan login ulang.',
+    };
+  }
+}
+
+async function checkAndRecordMutationTx(
+  tx: any,
+  user: AuthUser,
+  clientMutationId: string | undefined,
+  entityType: string,
+  entityId: string
+): Promise<{ alreadyProcessed: boolean; existingRevision?: number }> {
+  const mutId = String(clientMutationId || '').trim();
+  if (!mutId) return { alreadyProcessed: false };
+  const existing = await tx
+    .select()
+    .from(processedMutations)
+    .where(eq(processedMutations.mutationId, mutId))
+    .limit(1);
+  if (existing.length > 0) {
+    return {
+      alreadyProcessed: true,
+      existingRevision: Number(existing[0].revision) || 1,
+    };
+  }
+  return { alreadyProcessed: false };
+}
+
+async function persistProcessedMutationTx(
+  tx: any,
+  user: AuthUser,
+  clientMutationId: string | undefined,
+  entityType: string,
+  entityId: string,
+  revision: number
+) {
+  const mutId = String(clientMutationId || '').trim();
+  if (!mutId) return;
+  await tx
+    .insert(processedMutations)
+    .values({
+      mutationId: mutId,
+      userKey: getUserKey(user),
+      entityType,
+      entityId,
+      revision,
+      createdAt: new Date().toISOString(),
+    })
+    .onConflictDoNothing();
+}
+
+async function writeAuditLogTx(
+  tx: any,
+  user: AuthUser,
+  params: {
+    action: string;
+    entityType: string;
+    entityId: string;
+    rtScope?: string;
+    summary: string;
+  }
+) {
+  const { rt, rw } = extractUserRtRw(user);
+  await tx.insert(auditLogs).values({
+    id: `aud_${Date.now()}_${randomBytes(3).toString('hex')}`,
+    actorUsername: user.username,
+    actorRole: user.role,
+    actorRt: rt,
+    actorRw: rw,
+    action: params.action,
+    entityType: params.entityType,
+    entityId: params.entityId,
+    rtScope: params.rtScope || null,
+    summary: scrubPiiFromNotificationText(params.summary),
+    createdAt: new Date().toISOString(),
+  });
+}
+
+export async function createNotificationForEventTx(
+  tx: any,
+  params: {
+    title: string;
+    body: string;
+    category: AppNotification['category'];
+    entityType?: string;
+    entityId?: string;
+    rwId?: string;
+    targetRts: string[];
+    targetRoles?: Array<'server' | 'admin' | 'warga'>;
+    createdBy: string;
+  }
+): Promise<AppNotification> {
+  const nowIso = new Date().toISOString();
+  const notif: AppNotification = {
+    id: `notif_${Date.now()}_${randomBytes(3).toString('hex')}`,
+    title: scrubPiiFromNotificationText(params.title).slice(0, 140),
+    body: scrubPiiFromNotificationText(params.body).slice(0, 280),
+    category: params.category,
+    entityType: params.entityType,
+    entityId: params.entityId,
+    rwId: normalizeRwCode(params.rwId || '05'),
+    targetRts: normalizeTargetRts(params.targetRts),
+    targetRoles: params.targetRoles,
+    createdBy: params.createdBy,
+    createdAt: nowIso,
+  };
+  await tx.insert(notifications).values({
+    id: notif.id,
+    title: notif.title,
+    body: notif.body,
+    category: notif.category,
+    entityType: notif.entityType || null,
+    entityId: notif.entityId || null,
+    rwId: notif.rwId,
+    targetRts: notif.targetRts,
+    targetRoles: notif.targetRoles || null,
+    createdBy: notif.createdBy,
+    createdAt: notif.createdAt,
+  });
+  return notif;
+}
+
+export interface MutationOptions {
+  clientMutationId?: string;
+  expectedVersion?: number;
+}
+
 export async function searchWargaSql(user: AuthUser, searchQuery = '', rtFilter = ''): Promise<Warga[]> {
   try {
     await ensureSqlSeeded();
@@ -1595,6 +2205,11 @@ export async function searchWargaSql(user: AuthUser, searchQuery = '', rtFilter 
     if (user.role === 'warga') {
       const targetKK = String(user.noKK || '').replace(/\D/g, '');
       list = list.filter((w) => w.id === user.wargaId || (targetKK && w.noKK.replace(/\D/g, '') === targetKK));
+    } else if (user.role === 'admin') {
+      const scope = extractUserRtRw(user);
+      list = list.filter(
+        (w) => normalizeRtCode(w.rt) === scope.rt && normalizeRwCode(w.rw || '05') === scope.rw
+      );
     }
 
     const q = searchQuery.trim().toLowerCase();
@@ -1613,8 +2228,11 @@ export async function searchWargaSql(user: AuthUser, searchQuery = '', rtFilter 
     }
 
     const rt = rtFilter.trim();
-    if (rt) {
-      list = list.filter((w) => w.rt === rt);
+    if (rt && user.role === 'server') {
+      const cleanRt = normalizeRtCode(rt);
+      if (cleanRt !== 'SEMUA') {
+        list = list.filter((w) => normalizeRtCode(w.rt) === cleanRt);
+      }
     }
 
     return list;
@@ -1624,33 +2242,64 @@ export async function searchWargaSql(user: AuthUser, searchQuery = '', rtFilter 
   }
 }
 
-export async function upsertWargaSql(incoming: Warga): Promise<{ warga: Warga; revision: number }> {
+export async function upsertWargaSql(
+  user: AuthUser,
+  incoming: Warga,
+  opts?: MutationOptions
+): Promise<{ warga: Warga; revision: number; notification?: AppNotification; idempotent?: boolean }> {
   return withDbWriteLock(async () => {
-  try {
     await ensureSqlSeeded();
     const nowIso = new Date().toISOString();
     const existingRows = await db.select().from(warga);
-    const matchById = existingRows.find((r) => r.id === incoming.id);
+    const matchById = incoming.id ? existingRows.find((r) => r.id === incoming.id) : undefined;
     const matchByKK =
       !matchById && incoming.noKK
         ? existingRows.find((r) => r.noKK && r.noKK === incoming.noKK)
         : undefined;
+    const existingRecord = matchById || matchByKK;
 
-    const targetId = matchById?.id || matchByKK?.id || incoming.id || `w_${Date.now()}`;
+    if (existingRecord) {
+      assertCanMutateRtRw(user, existingRecord.rt, existingRecord.rw || '05');
+    }
+    const desiredRt = normalizeRtCode(incoming.rt || existingRecord?.rt || (user.role === 'admin' ? extractUserRtRw(user).rt : '08'));
+    const desiredRw = normalizeRwCode(incoming.rw || existingRecord?.rw || '05');
+    const authorizedScope = assertCanMutateRtRw(user, desiredRt, desiredRw);
+
+    if (existingRecord && opts?.expectedVersion !== undefined) {
+      const currentVer = Number((existingRecord as any).version) || 1;
+      if (Number(opts.expectedVersion) !== currentVer) {
+        throw new VersionConflictError(
+          `Data warga "${existingRecord.nama}" telah diperbarui oleh pengguna lain (versi server ${currentVer}). Muat ulang data terbaru sebelum menyimpan.`,
+          currentVer
+        );
+      }
+    }
+
+    const targetId = existingRecord?.id || incoming.id || `w_${Date.now()}`;
     const nextNo =
       Number(incoming.no) > 0
         ? Number(incoming.no)
-        : matchById?.no || matchByKK?.no || existingRows.length + 1;
+        : existingRecord?.no || existingRows.length + 1;
+    const nextVersion = existingRecord ? (Number((existingRecord as any).version) || 1) + 1 : 1;
 
     const stamped: Warga = {
       ...incoming,
       id: targetId,
       no: nextNo,
-      updatedAt: incoming.updatedAt || nowIso,
+      rt: authorizedScope.rt,
+      rw: authorizedScope.rw,
+      updatedAt: nowIso,
+      version: nextVersion,
     };
 
-    const row = toWargaRow(stamped, nowIso);
-    const meta = await db.transaction(async (tx) => {
+    const row = toWargaRow(stamped, nowIso, nextVersion);
+    let createdNotif: AppNotification | undefined;
+    const txRes = await db.transaction(async (tx) => {
+      const idem = await checkAndRecordMutationTx(tx, user, opts?.clientMutationId, 'warga', targetId);
+      if (idem.alreadyProcessed) {
+        return { revision: idem.existingRevision || 1, idempotent: true };
+      }
+
       await tx.delete(deletedEntities).where(eq(deletedEntities.id, `warga:${targetId}`));
       await tx
         .insert(warga)
@@ -1659,14 +2308,226 @@ export async function upsertWargaSql(incoming: Warga): Promise<{ warga: Warga; r
           target: warga.id,
           set: row,
         });
-      return bumpRevisionTx(tx);
+      const meta = await bumpRevisionTx(tx);
+      await persistProcessedMutationTx(tx, user, opts?.clientMutationId, 'warga', targetId, meta.revision);
+      await writeAuditLogTx(tx, user, {
+        action: existingRecord ? 'UPDATE_WARGA' : 'CREATE_WARGA',
+        entityType: 'warga',
+        entityId: targetId,
+        rtScope: formatRtScope(authorizedScope.rt, authorizedScope.rw),
+        summary: `${existingRecord ? 'Memperbarui' : 'Menambahkan'} data KK warga ${stamped.nama} (RT ${authorizedScope.rt})`,
+      });
+      createdNotif = await createNotificationForEventTx(tx, {
+        title: existingRecord ? `Data Warga RT ${authorizedScope.rt} Diperbarui` : `Warga Baru RT ${authorizedScope.rt} Ditambahkan`,
+        body: `Data keluarga ${stamped.nama} (No. Rumah ${stamped.noRumah || '-'}) telah disimpan oleh ${user.nama}.`,
+        category: 'warga',
+        entityType: 'warga',
+        entityId: targetId,
+        rwId: authorizedScope.rw,
+        targetRts: [authorizedScope.rt],
+        targetRoles: ['server', 'admin'],
+        createdBy: user.username,
+      });
+      return { revision: meta.revision, idempotent: false };
     });
 
-    return { warga: mapRowToWarga(row as typeof warga.$inferSelect), revision: meta.revision };
-  } catch (err) {
-    console.error('Upsert warga SQL error:', err);
-    throw new Error('Gagal menyimpan data warga ke database server.', { cause: err });
+    if (txRes.idempotent && existingRecord) {
+      return { warga: mapRowToWarga(existingRecord), revision: txRes.revision, idempotent: true };
+    }
+    return {
+      warga: mapRowToWarga(row as typeof warga.$inferSelect),
+      revision: txRes.revision,
+      notification: createdNotif,
+      idempotent: txRes.idempotent,
+    };
+  });
+}
+
+export async function upgradeWargaKKTx(
+  user: AuthUser,
+  params: {
+    wargaId: string;
+    updatedWarga: Warga;
+    historyRecord: RiwayatPerubahanKK;
+    oldNoKK?: string;
+    oldKepalaNama?: string;
+    catatSantunanKematian?: boolean;
+    nominalSantunanKematian?: number;
+    expectedVersion?: number;
+    clientMutationId?: string;
   }
+): Promise<{
+  warga: Warga;
+  updatedTransactions: Transaction[];
+  createdTransactions: Transaction[];
+  updatedBantuan: BantuanPemerintah[];
+  revision: number;
+  notification?: AppNotification;
+  idempotent?: boolean;
+}> {
+  return withDbWriteLock(async () => {
+    await ensureSqlSeeded();
+    const nowIso = new Date().toISOString();
+
+    const existingRows = await db.select().from(warga);
+    const existingRow = existingRows.find((r) => r.id === params.wargaId);
+    if (!existingRow) {
+      throw new NotFoundError('Data warga yang akan di-Upgrade KK tidak ditemukan di server.');
+    }
+
+    const authorizedScope = assertCanMutateRtRw(user, existingRow.rt, existingRow.rw || '05');
+    if (params.expectedVersion !== undefined) {
+      const currentVer = Number((existingRow as any).version) || 1;
+      if (Number(params.expectedVersion) !== currentVer) {
+        throw new VersionConflictError(
+          `Data warga "${existingRow.nama}" sudah diubah pengguna lain (versi server ${currentVer}). Muat ulang sebelum Upgrade KK.`,
+          currentVer
+        );
+      }
+    }
+
+    const existingWarga = mapRowToWarga(existingRow);
+    const oldNoKK = String(params.oldNoKK || existingWarga.noKK || '').trim();
+    const oldKepalaNama = String(params.oldKepalaNama || existingWarga.nama || '').trim();
+    const newVersion = (existingWarga.version || 1) + 1;
+
+    const mergedHistory: RiwayatPerubahanKK[] = [
+      params.historyRecord,
+      ...(Array.isArray(existingWarga.riwayatPerubahanKK) ? existingWarga.riwayatPerubahanKK : []),
+    ];
+
+    const finalWarga: Warga = {
+      ...existingWarga,
+      ...params.updatedWarga,
+      id: existingWarga.id,
+      no: existingWarga.no,
+      rt: authorizedScope.rt,
+      rw: authorizedScope.rw,
+      riwayatPerubahanKK: mergedHistory,
+      updatedAt: nowIso,
+      version: newVersion,
+    };
+
+    const allTxRows = await db.select().from(transactions);
+    const allBantuanRows = await db.select().from(bantuan);
+
+    const matchingTx = allTxRows.map(mapRowToTransaction).filter((t) => {
+      const scope = extractScopeRtRw(t.rtScope, authorizedScope.rt, authorizedScope.rw);
+      if (scope.rt !== authorizedScope.rt) return false;
+      if (t.residentId && t.residentId === existingWarga.id) return true;
+      if (oldNoKK && t.noKK && t.noKK === oldNoKK) return true;
+      if (oldKepalaNama && t.namaWarga && t.namaWarga.toLowerCase() === oldKepalaNama.toLowerCase()) return true;
+      return false;
+    });
+
+    const relinkedTx: Transaction[] = matchingTx.map((t) => ({
+      ...t,
+      residentId: finalWarga.id,
+      noKK: finalWarga.noKK,
+      namaWarga: finalWarga.nama,
+      nomorRumah: finalWarga.noRumah,
+      rtScope: formatRtScope(authorizedScope.rt, authorizedScope.rw),
+      updatedAt: nowIso,
+      version: (t.version || 1) + 1,
+    }));
+
+    const createdTx: Transaction[] = [];
+    if (params.catatSantunanKematian) {
+      const santunanNominal = Number(params.nominalSantunanKematian) > 0 ? Number(params.nominalSantunanKematian) : 200000;
+      const reasonLabel =
+        params.historyRecord.alasan === 'meninggal'
+          ? 'Santunan Kematian & Kain Mori'
+          : 'Santunan Sosial Upgrade KK';
+      createdTx.push({
+        id: `tx_santunan_${Date.now()}_${randomBytes(2).toString('hex')}`,
+        tanggal: params.historyRecord.tanggal || nowIso.slice(0, 10),
+        kategori: reasonLabel,
+        keterangan: `Santunan keluarga ${finalWarga.nama} (Upgrade KK dari ${oldKepalaNama})`,
+        nominal: santunanNominal,
+        tipe: 'kematian',
+        residentId: finalWarga.id,
+        namaWarga: finalWarga.nama,
+        nomorRumah: finalWarga.noRumah,
+        noKK: finalWarga.noKK,
+        tahun: Number((params.historyRecord.tanggal || nowIso).slice(0, 4)) || 2026,
+        rtScope: formatRtScope(authorizedScope.rt, authorizedScope.rw),
+        updatedAt: nowIso,
+        version: 1,
+      });
+    }
+
+    const matchingBantuan = allBantuanRows.map(mapRowToBantuan).filter((b) => {
+      const scope = extractScopeRtRw(b.rtScope, authorizedScope.rt, authorizedScope.rw);
+      if (scope.rt !== authorizedScope.rt) return false;
+      if (oldNoKK && b.noKK === oldNoKK) return true;
+      if (oldKepalaNama && b.namaPenerima.toLowerCase() === oldKepalaNama.toLowerCase()) return true;
+      return false;
+    });
+
+    const relinkedBantuan: BantuanPemerintah[] = matchingBantuan.map((b) => ({
+      ...b,
+      noKK: finalWarga.noKK,
+      namaPenerima: finalWarga.nama,
+      rtScope: formatRtScope(authorizedScope.rt, authorizedScope.rw),
+      updatedAt: nowIso,
+      version: (b.version || 1) + 1,
+    }));
+
+    let createdNotif: AppNotification | undefined;
+    const txRes = await db.transaction(async (tx) => {
+      const idem = await checkAndRecordMutationTx(tx, user, params.clientMutationId, 'warga', finalWarga.id);
+      if (idem.alreadyProcessed) {
+        return { revision: idem.existingRevision || 1, idempotent: true };
+      }
+
+      const wRow = toWargaRow(finalWarga, nowIso, newVersion);
+      await tx.insert(warga).values(wRow).onConflictDoUpdate({ target: warga.id, set: wRow });
+
+      for (const item of relinkedTx) {
+        const row = toTransactionRow(item, nowIso, item.version);
+        await tx.insert(transactions).values(row).onConflictDoUpdate({ target: transactions.id, set: row });
+      }
+      for (const item of createdTx) {
+        const row = toTransactionRow(item, nowIso, item.version);
+        await tx.insert(transactions).values(row).onConflictDoUpdate({ target: transactions.id, set: row });
+      }
+      for (const item of relinkedBantuan) {
+        const row = toBantuanRow(item, nowIso, item.version);
+        await tx.insert(bantuan).values(row).onConflictDoUpdate({ target: bantuan.id, set: row });
+      }
+
+      const meta = await bumpRevisionTx(tx);
+      await persistProcessedMutationTx(tx, user, params.clientMutationId, 'warga', finalWarga.id, meta.revision);
+      await writeAuditLogTx(tx, user, {
+        action: 'UPGRADE_KK',
+        entityType: 'warga',
+        entityId: finalWarga.id,
+        rtScope: formatRtScope(authorizedScope.rt, authorizedScope.rw),
+        summary: `Upgrade KK ${oldKepalaNama} -> ${finalWarga.nama} (RT ${authorizedScope.rt}, alasan: ${params.historyRecord.alasan}, relink ${relinkedTx.length} transaksi)`,
+      });
+      createdNotif = await createNotificationForEventTx(tx, {
+        title: `Upgrade KK Warga RT ${authorizedScope.rt}`,
+        body: `Pembaruan Kepala Keluarga dari ${oldKepalaNama} menjadi ${finalWarga.nama} berhasil disimpan beserta riwayat kas.`,
+        category: 'warga',
+        entityType: 'warga',
+        entityId: finalWarga.id,
+        rwId: authorizedScope.rw,
+        targetRts: [authorizedScope.rt],
+        targetRoles: ['server', 'admin'],
+        createdBy: user.username,
+      });
+      return { revision: meta.revision, idempotent: false };
+    });
+
+    return {
+      warga: finalWarga,
+      updatedTransactions: relinkedTx,
+      createdTransactions: createdTx,
+      updatedBantuan: relinkedBantuan,
+      revision: txRes.revision,
+      notification: createdNotif,
+      idempotent: txRes.idempotent,
+    };
   });
 }
 
@@ -1676,6 +2537,7 @@ export async function updateWargaSelfSql(
   patch: { pin?: string; telepon?: string }
 ): Promise<{ warga: Warga; revision: number } | null> {
   try {
+    await ensureSqlSeeded();
     const rows = await db.select().from(warga);
     const target = rows.find(
       (r) => (wargaId && r.id === wargaId) || (noKK && r.noKK === noKK)
@@ -1687,6 +2549,7 @@ export async function updateWargaSelfSql(
       patch.pin && /^\d{6}$/.test(patch.pin) ? patch.pin : target.pin;
     const nextTelp =
       typeof patch.telepon === 'string' ? patch.telepon.slice(0, 32) : target.telepon;
+    const nextVersion = (Number((target as any).version) || 1) + 1;
 
     const meta = await db.transaction(async (tx) => {
       await tx
@@ -1695,13 +2558,14 @@ export async function updateWargaSelfSql(
           pin: nextPin,
           telepon: nextTelp,
           updatedAt: nowIso,
+          version: nextVersion,
         })
         .where(eq(warga.id, target.id));
       return bumpRevisionTx(tx);
     });
 
     return {
-      warga: mapRowToWarga({ ...target, pin: nextPin, telepon: nextTelp, updatedAt: nowIso }),
+      warga: mapRowToWarga({ ...target, pin: nextPin, telepon: nextTelp, updatedAt: nowIso, version: nextVersion } as any),
       revision: meta.revision,
     };
   } catch (err) {
@@ -1710,405 +2574,1201 @@ export async function updateWargaSelfSql(
   }
 }
 
-export async function bulkImportWargaBantuanSql(params: {
-  wargaList: Array<Omit<Warga, 'id' | 'no'> & { id?: string }>;
-  bantuanList: Array<Omit<BantuanPemerintah, 'id'> & { id?: string }>;
-  mergeExisting: boolean;
-  tahunAktif: number;
-}): Promise<{ addedKK: number; updatedKK: number; addedBantuan: number; revision: number }> {
+export async function bulkImportWargaBantuanSql(
+  user: AuthUser,
+  params: {
+    wargaList: Array<Omit<Warga, 'id' | 'no'> & { id?: string }>;
+    bantuanList: Array<Omit<BantuanPemerintah, 'id'> & { id?: string }>;
+    mergeExisting: boolean;
+    tahunAktif: number;
+    clientMutationId?: string;
+  }
+): Promise<{ addedKK: number; updatedKK: number; addedBantuan: number; revision: number; notification?: AppNotification }> {
   return withDbWriteLock(async () => {
-    try {
-      await ensureSqlSeeded();
-      const nowIso = new Date().toISOString();
-      const baseTime = Date.now();
-      const existingWargaRows = await db.select().from(warga);
-      const existingWarga = existingWargaRows.map(mapRowToWarga);
-      const existingBantuanRows = await db.select().from(bantuan);
-      const existingBantuan = existingBantuanRows.map(mapRowToBantuan);
+    await ensureSqlSeeded();
+    const nowIso = new Date().toISOString();
+    const baseTime = Date.now();
+    const userScope = extractUserRtRw(user);
 
-      let addedKK = 0;
-      let updatedKK = 0;
-      let addedBantuan = 0;
-
-      const wargaToUpsert: Warga[] = [];
-      const bantuanToInsert: BantuanPemerintah[] = [];
-      const usedIds = new Set(existingWarga.map((w) => w.id));
-
-      params.wargaList.forEach((incoming, idx) => {
-        const findInPool = (pool: Warga[]) =>
-          incoming.noKK
-            ? pool.find((w) => w.noKK === incoming.noKK)
-            : pool.find((w) => w.nama.toLowerCase() === incoming.nama.toLowerCase());
-
-        const existing = findInPool(wargaToUpsert) || findInPool(existingWarga);
-
-        if (existing) {
-          if (params.mergeExisting) {
-            const nextStatus = incoming.statusIuran || existing.statusIuran || 'Belum';
-            const merged: Warga = {
-              ...existing,
-              nama: incoming.nama || existing.nama,
-              noKK: incoming.noKK || existing.noKK,
-              nik: incoming.nik || existing.nik,
-              noRumah: incoming.noRumah || existing.noRumah,
-              rt: incoming.rt || existing.rt,
-              rw: incoming.rw || existing.rw,
-              alamat: incoming.alamat || existing.alamat,
-              kodePos: incoming.kodePos || existing.kodePos,
-              jenisKelamin: incoming.jenisKelamin || existing.jenisKelamin,
-              anggotaKeluarga:
-                incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
-                  ? incoming.anggotaKeluarga
-                  : existing.anggotaKeluarga,
-              jumlahJiwa:
-                incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
-                  ? incoming.anggotaKeluarga.length
-                  : existing.jumlahJiwa,
-              telepon: incoming.telepon || existing.telepon,
-              statusIuran: nextStatus,
-              statusIuranPerTahun: {
-                ...(existing.statusIuranPerTahun || {}),
-                [params.tahunAktif]: nextStatus,
-              },
-              updatedAt: nowIso,
-            };
-            const queuedIdx = wargaToUpsert.findIndex((w) => w.id === merged.id);
-            if (queuedIdx >= 0) {
-              wargaToUpsert[queuedIdx] = merged;
-            } else {
-              wargaToUpsert.push(merged);
-              updatedKK++;
-            }
-          }
-        } else {
-          let candidateId =
-            incoming.id && !usedIds.has(incoming.id)
-              ? incoming.id
-              : `w_${baseTime}_${idx}_${randomBytes(3).toString('hex')}`;
-          while (usedIds.has(candidateId)) {
-            candidateId = `w_${baseTime}_${idx}_${randomBytes(4).toString('hex')}`;
-          }
-          usedIds.add(candidateId);
-
-          const newWarga: Warga = {
-            ...incoming,
-            id: candidateId,
-            no: existingWarga.length + addedKK + 1,
-            statusIuran: incoming.statusIuran || 'Belum',
-            statusIuranPerTahun: { [params.tahunAktif]: incoming.statusIuran || 'Belum' },
-            pin: incoming.pin || '123456',
-            updatedAt: nowIso,
-          };
-          wargaToUpsert.push(newWarga);
-          addedKK++;
-        }
-      });
-
-      params.bantuanList.forEach((b, idx) => {
-        const matchesBantuan = (ex: BantuanPemerintah) =>
-          ex.noKK === b.noKK &&
-          ex.namaPenerima.toLowerCase() === b.namaPenerima.toLowerCase() &&
-          ex.jenisBantuan.toLowerCase() === b.jenisBantuan.toLowerCase() &&
-          ex.tanggal === b.tanggal;
-        const dup = existingBantuan.some(matchesBantuan) || bantuanToInsert.some(matchesBantuan);
-        if (!dup) {
-          bantuanToInsert.push({
-            ...b,
-            id: b.id || `b_${baseTime}_${idx}_${randomBytes(3).toString('hex')}`,
-            updatedAt: nowIso,
-          });
-          addedBantuan++;
-        }
-      });
-
-      const meta = await db.transaction(async (tx) => {
-        for (const item of wargaToUpsert) {
-          const row = toWargaRow(item, nowIso);
-          await tx.delete(deletedEntities).where(eq(deletedEntities.id, `warga:${row.id}`));
-          await tx
-            .insert(warga)
-            .values(row)
-            .onConflictDoUpdate({ target: warga.id, set: row });
-        }
-        for (const bItem of bantuanToInsert) {
-          const row = toBantuanRow(bItem, nowIso);
-          await tx
-            .insert(bantuan)
-            .values(row)
-            .onConflictDoUpdate({ target: bantuan.id, set: row });
-        }
-        return bumpRevisionTx(tx);
-      });
-
-      return { addedKK, updatedKK, addedBantuan, revision: meta.revision };
-    } catch (err) {
-      console.error('Bulk import SQL error:', err);
-      throw new Error('Gagal mengimpor data Excel ke database server.', { cause: err });
+    for (const incoming of params.wargaList) {
+      const targetRt = normalizeRtCode(incoming.rt || (user.role === 'admin' ? userScope.rt : '08'));
+      const targetRw = normalizeRwCode(incoming.rw || '05');
+      assertCanMutateRtRw(user, targetRt, targetRw);
     }
-  });
-}
+    for (const b of params.bantuanList) {
+      const bScope = extractScopeRtRw(b.rtScope, user.role === 'admin' ? userScope.rt : '08', '05');
+      assertCanMutateRtRw(user, bScope.rt, bScope.rw);
+    }
 
-export async function deleteWargaSql(idOrKK: string): Promise<{ revision: number; totalWarga: number }> {
-  return withDbWriteLock(async () => {
-    try {
-      await ensureSqlSeeded();
-      const nowIso = new Date().toISOString();
-      const rows = await db.select().from(warga);
-      const matchingIds = rows
-        .filter((r) => r.id === idOrKK || (r.noKK && r.noKK === idOrKK))
-        .map((r) => r.id);
-      if (matchingIds.length === 0) {
-        matchingIds.push(idOrKK);
+    const existingWargaRows = await db.select().from(warga);
+    const existingWarga = existingWargaRows.map(mapRowToWarga);
+    const existingBantuanRows = await db.select().from(bantuan);
+    const existingBantuan = existingBantuanRows.map(mapRowToBantuan);
+
+    let addedKK = 0;
+    let updatedKK = 0;
+    let addedBantuan = 0;
+
+    const wargaToUpsert: Warga[] = [];
+    const bantuanToInsert: BantuanPemerintah[] = [];
+    const usedIds = new Set(existingWarga.map((w) => w.id));
+
+    params.wargaList.forEach((incoming, idx) => {
+      const findInPool = (pool: Warga[]) =>
+        incoming.noKK
+          ? pool.find((w) => w.noKK === incoming.noKK)
+          : pool.find((w) => w.nama.toLowerCase() === incoming.nama.toLowerCase());
+
+      const existing = findInPool(wargaToUpsert) || findInPool(existingWarga);
+      if (existing) {
+        assertCanMutateRtRw(user, existing.rt, existing.rw || '05');
       }
 
-      const meta = await db.transaction(async (tx) => {
-        await tx.delete(warga).where(inArray(warga.id, matchingIds));
-        for (const id of matchingIds) {
-          await tx
-            .insert(deletedEntities)
-            .values({
-              id: `warga:${id}`,
-              entityType: 'warga',
-              entityId: id,
-              deletedAt: nowIso,
-            })
-            .onConflictDoNothing();
+      if (existing) {
+        if (params.mergeExisting) {
+          const nextStatus = incoming.statusIuran || existing.statusIuran || 'Belum';
+          const merged: Warga = {
+            ...existing,
+            nama: incoming.nama || existing.nama,
+            noKK: incoming.noKK || existing.noKK,
+            nik: incoming.nik || existing.nik,
+            noRumah: incoming.noRumah || existing.noRumah,
+            rt: normalizeRtCode(incoming.rt || existing.rt),
+            rw: normalizeRwCode(incoming.rw || existing.rw || '05'),
+            alamat: incoming.alamat || existing.alamat,
+            kodePos: incoming.kodePos || existing.kodePos,
+            jenisKelamin: incoming.jenisKelamin || existing.jenisKelamin,
+            anggotaKeluarga:
+              incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
+                ? incoming.anggotaKeluarga
+                : existing.anggotaKeluarga,
+            jumlahJiwa:
+              incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
+                ? incoming.anggotaKeluarga.length
+                : existing.jumlahJiwa,
+            telepon: incoming.telepon || existing.telepon,
+            statusIuran: nextStatus,
+            statusIuranPerTahun: {
+              ...(existing.statusIuranPerTahun || {}),
+              [params.tahunAktif]: nextStatus,
+            },
+            updatedAt: nowIso,
+            version: (existing.version || 1) + 1,
+          };
+          const queuedIdx = wargaToUpsert.findIndex((w) => w.id === merged.id);
+          if (queuedIdx >= 0) {
+            wargaToUpsert[queuedIdx] = merged;
+          } else {
+            wargaToUpsert.push(merged);
+            updatedKK++;
+          }
         }
-        return bumpRevisionTx(tx);
-      });
+      } else {
+        let candidateId =
+          incoming.id && !usedIds.has(incoming.id)
+            ? incoming.id
+            : `w_${baseTime}_${idx}_${randomBytes(3).toString('hex')}`;
+        while (usedIds.has(candidateId)) {
+          candidateId = `w_${baseTime}_${idx}_${randomBytes(4).toString('hex')}`;
+        }
+        usedIds.add(candidateId);
 
-      const remaining = await db.select({ id: warga.id }).from(warga);
-      return { revision: meta.revision, totalWarga: remaining.length };
-    } catch (err) {
-      console.error('Delete warga SQL error:', err);
-      throw new Error('Gagal menghapus data warga dari database server.', { cause: err });
-    }
+        const newWarga: Warga = {
+          ...incoming,
+          id: candidateId,
+          rt: normalizeRtCode(incoming.rt || (user.role === 'admin' ? userScope.rt : '08')),
+          rw: normalizeRwCode(incoming.rw || '05'),
+          no: existingWarga.length + addedKK + 1,
+          statusIuran: incoming.statusIuran || 'Belum',
+          statusIuranPerTahun: { [params.tahunAktif]: incoming.statusIuran || 'Belum' },
+          pin: incoming.pin || '123456',
+          updatedAt: nowIso,
+          version: 1,
+        };
+        wargaToUpsert.push(newWarga);
+        addedKK++;
+      }
+    });
+
+    params.bantuanList.forEach((b, idx) => {
+      const matchesBantuan = (ex: BantuanPemerintah) =>
+        ex.noKK === b.noKK &&
+        ex.namaPenerima.toLowerCase() === b.namaPenerima.toLowerCase() &&
+        ex.jenisBantuan.toLowerCase() === b.jenisBantuan.toLowerCase() &&
+        ex.tanggal === b.tanggal;
+      const dup = existingBantuan.some(matchesBantuan) || bantuanToInsert.some(matchesBantuan);
+      if (!dup) {
+        bantuanToInsert.push({
+          ...b,
+          id: b.id || `b_${baseTime}_${idx}_${randomBytes(3).toString('hex')}`,
+          rtScope: b.rtScope || (user.role === 'admin' ? formatRtScope(userScope.rt, userScope.rw) : 'RT 08 RW 05'),
+          updatedAt: nowIso,
+          version: 1,
+        });
+        addedBantuan++;
+      }
+    });
+
+    let createdNotif: AppNotification | undefined;
+    const meta = await db.transaction(async (tx) => {
+      for (const item of wargaToUpsert) {
+        const row = toWargaRow(item, nowIso, item.version);
+        await tx.delete(deletedEntities).where(eq(deletedEntities.id, `warga:${row.id}`));
+        await tx
+          .insert(warga)
+          .values(row)
+          .onConflictDoUpdate({ target: warga.id, set: row });
+      }
+      for (const bItem of bantuanToInsert) {
+        const row = toBantuanRow(bItem, nowIso, bItem.version);
+        await tx
+          .insert(bantuan)
+          .values(row)
+          .onConflictDoUpdate({ target: bantuan.id, set: row });
+      }
+      const m = await bumpRevisionTx(tx);
+      await writeAuditLogTx(tx, user, {
+        action: 'BULK_IMPORT_EXCEL',
+        entityType: 'warga',
+        entityId: `bulk_${baseTime}`,
+        rtScope: user.role === 'admin' ? formatRtScope(userScope.rt, userScope.rw) : 'RW 05',
+        summary: `Impor Excel massal: ${addedKK} KK baru, ${updatedKK} KK diperbarui, ${addedBantuan} bansos`,
+      });
+      if (addedKK + updatedKK + addedBantuan > 0) {
+        createdNotif = await createNotificationForEventTx(tx, {
+          title: 'Impor Data Warga Selesai',
+          body: `${user.nama} mengimpor ${addedKK} KK baru, ${updatedKK} pembaruan KK, dan ${addedBantuan} data bansos.`,
+          category: 'warga',
+          entityType: 'warga',
+          rwId: '05',
+          targetRts: user.role === 'admin' ? [userScope.rt] : ['SEMUA'],
+          targetRoles: ['server', 'admin'],
+          createdBy: user.username,
+        });
+      }
+      return m;
+    });
+
+    return { addedKK, updatedKK, addedBantuan, revision: meta.revision, notification: createdNotif };
   });
 }
 
-export async function upsertTransactionSql(txItem: Transaction): Promise<number> {
-  try {
+export async function deleteWargaSql(
+  user: AuthUser,
+  idOrKK: string,
+  opts?: MutationOptions
+): Promise<{ revision: number; totalWarga: number; deletedRt?: string; notification?: AppNotification }> {
+  return withDbWriteLock(async () => {
     await ensureSqlSeeded();
     const nowIso = new Date().toISOString();
-    const row = toTransactionRow({ ...txItem, updatedAt: txItem.updatedAt || nowIso }, nowIso);
+    const rows = await db.select().from(warga);
+    const matchingRows = rows.filter((r) => r.id === idOrKK || (r.noKK && r.noKK === idOrKK));
+    if (matchingRows.length === 0) {
+      throw new NotFoundError('Data warga tidak ditemukan atau sudah dihapus sebelumnya.');
+    }
+
+    for (const r of matchingRows) {
+      assertCanMutateRtRw(user, r.rt, r.rw || '05');
+    }
+    const targetRow = matchingRows[0];
+    if (opts?.expectedVersion !== undefined) {
+      const currentVer = Number((targetRow as any).version) || 1;
+      if (Number(opts.expectedVersion) !== currentVer) {
+        throw new VersionConflictError(
+          `Data warga "${targetRow.nama}" telah berubah (versi server ${currentVer}). Muat ulang sebelum menghapus.`,
+          currentVer
+        );
+      }
+    }
+
+    const matchingIds = matchingRows.map((r) => r.id);
+    const deletedRt = normalizeRtCode(targetRow.rt);
+    const deletedRw = normalizeRwCode(targetRow.rw || '05');
+
+    let createdNotif: AppNotification | undefined;
     const meta = await db.transaction(async (tx) => {
-      await tx.delete(deletedEntities).where(eq(deletedEntities.id, `transactions:${row.id}`));
-      await tx.insert(transactions).values(row).onConflictDoUpdate({ target: transactions.id, set: row });
-      return bumpRevisionTx(tx);
+      const idem = await checkAndRecordMutationTx(tx, user, opts?.clientMutationId, 'warga', targetRow.id);
+      if (idem.alreadyProcessed) {
+        return { revision: idem.existingRevision || 1 };
+      }
+
+      await tx.delete(warga).where(inArray(warga.id, matchingIds));
+      for (const id of matchingIds) {
+        await tx
+          .insert(deletedEntities)
+          .values({
+            id: `warga:${id}`,
+            entityType: 'warga',
+            entityId: id,
+            deletedAt: nowIso,
+          })
+          .onConflictDoNothing();
+      }
+      const m = await bumpRevisionTx(tx);
+      await persistProcessedMutationTx(tx, user, opts?.clientMutationId, 'warga', targetRow.id, m.revision);
+      await writeAuditLogTx(tx, user, {
+        action: 'DELETE_WARGA',
+        entityType: 'warga',
+        entityId: targetRow.id,
+        rtScope: formatRtScope(deletedRt, deletedRw),
+        summary: `Menghapus data warga ${targetRow.nama} dari RT ${deletedRt}`,
+      });
+      createdNotif = await createNotificationForEventTx(tx, {
+        title: `Data Warga RT ${deletedRt} Dihapus`,
+        body: `Data keluarga ${targetRow.nama} telah dihapus oleh ${user.nama}.`,
+        category: 'warga',
+        entityType: 'warga',
+        entityId: targetRow.id,
+        rwId: deletedRw,
+        targetRts: [deletedRt],
+        targetRoles: ['server', 'admin'],
+        createdBy: user.username,
+      });
+      return m;
     });
-    return meta.revision;
-  } catch (err) {
-    console.error('Upsert transaction SQL error:', err);
-    throw new Error('Gagal menyimpan transaksi kas ke server.', { cause: err });
-  }
+
+    const remaining = await db.select({ id: warga.id }).from(warga);
+    return { revision: meta.revision, totalWarga: remaining.length, deletedRt, notification: createdNotif };
+  });
 }
 
-export async function deleteTransactionSql(id: string): Promise<number> {
-  try {
-    await ensureSqlSeeded();
-    const nowIso = new Date().toISOString();
-    const meta = await db.transaction(async (tx) => {
-      await tx.delete(transactions).where(eq(transactions.id, id));
-      await tx
-        .insert(deletedEntities)
-        .values({ id: `transactions:${id}`, entityType: 'transactions', entityId: id, deletedAt: nowIso })
-        .onConflictDoNothing();
-      return bumpRevisionTx(tx);
-    });
-    return meta.revision;
-  } catch (err) {
-    console.error('Delete transaction SQL error:', err);
-    throw new Error('Gagal menghapus transaksi dari server.', { cause: err });
+export async function upsertTransactionSql(
+  user: AuthUser,
+  txItem: Transaction,
+  opts?: MutationOptions
+): Promise<{ transaction: Transaction; revision: number; notification?: AppNotification }> {
+  await ensureSqlSeeded();
+  const nowIso = new Date().toISOString();
+  const existingRows = await db.select().from(transactions).where(eq(transactions.id, txItem.id)).limit(1);
+  const existing = existingRows[0];
+
+  const userScope = extractUserRtRw(user);
+  const existingScope = existing ? extractScopeRtRw(existing.rtScope, '08', '05') : null;
+  if (existingScope) {
+    assertCanMutateRtRw(user, existingScope.rt, existingScope.rw);
   }
+
+  const desiredScope = extractScopeRtRw(
+    txItem.rtScope || existing?.rtScope || (user.role === 'admin' ? formatRtScope(userScope.rt, userScope.rw) : 'RT 08 RW 05'),
+    user.role === 'admin' ? userScope.rt : '08',
+    '05'
+  );
+  const authorized = assertCanMutateRtRw(user, desiredScope.rt, desiredScope.rw);
+
+  if (existing && opts?.expectedVersion !== undefined) {
+    const currentVer = Number((existing as any).version) || 1;
+    if (Number(opts.expectedVersion) !== currentVer) {
+      throw new VersionConflictError(
+        `Transaksi kas "${existing.kategori}" telah diubah pengguna lain (versi server ${currentVer}).`,
+        currentVer
+      );
+    }
+  }
+
+  const nextVersion = existing ? (Number((existing as any).version) || 1) + 1 : 1;
+  const scopedTx: Transaction = {
+    ...txItem,
+    rtScope: formatRtScope(authorized.rt, authorized.rw),
+    updatedAt: nowIso,
+    version: nextVersion,
+  };
+  const row = toTransactionRow(scopedTx, nowIso, nextVersion);
+
+  let createdNotif: AppNotification | undefined;
+  const meta = await db.transaction(async (tx) => {
+    const idem = await checkAndRecordMutationTx(tx, user, opts?.clientMutationId, 'transaction', row.id);
+    if (idem.alreadyProcessed) {
+      return { revision: idem.existingRevision || 1 };
+    }
+    await tx.delete(deletedEntities).where(eq(deletedEntities.id, `transactions:${row.id}`));
+    await tx.insert(transactions).values(row).onConflictDoUpdate({ target: transactions.id, set: row });
+    const m = await bumpRevisionTx(tx);
+    await persistProcessedMutationTx(tx, user, opts?.clientMutationId, 'transaction', row.id, m.revision);
+    await writeAuditLogTx(tx, user, {
+      action: existing ? 'UPDATE_TRANSACTION' : 'CREATE_TRANSACTION',
+      entityType: 'transaction',
+      entityId: row.id,
+      rtScope: scopedTx.rtScope,
+      summary: `${existing ? 'Mengubah' : 'Mencatat'} ${scopedTx.tipe} ${scopedTx.kategori} Rp ${scopedTx.nominal.toLocaleString('id-ID')}`,
+    });
+    const cat: AppNotification['category'] =
+      scopedTx.tipe === 'kematian'
+        ? 'kematian'
+        : /iuran|jimpitan/i.test(scopedTx.kategori)
+        ? 'iuran'
+        : 'kas';
+    createdNotif = await createNotificationForEventTx(tx, {
+      title: `Pembaruan ${cat === 'kematian' ? 'Kas Kematian' : cat === 'iuran' ? 'Iuran Warga' : 'Kas RT'} RT ${authorized.rt}`,
+      body: `${scopedTx.kategori} sebesar Rp ${scopedTx.nominal.toLocaleString('id-ID')} ${scopedTx.namaWarga ? `(${scopedTx.namaWarga})` : ''} telah disimpan.`,
+      category: cat,
+      entityType: 'transaction',
+      entityId: row.id,
+      rwId: authorized.rw,
+      targetRts: [authorized.rt],
+      targetRoles: ['server', 'admin', 'warga'],
+      createdBy: user.username,
+    });
+    return m;
+  });
+
+  return {
+    transaction: mapRowToTransaction(row as typeof transactions.$inferSelect),
+    revision: meta.revision,
+    notification: createdNotif,
+  };
 }
 
-export async function upsertPengumumanSql(p: PengumumanRT): Promise<number> {
-  try {
-    await ensureSqlSeeded();
-    const nowIso = new Date().toISOString();
-    const row = toPengumumanRow({ ...p, updatedAt: p.updatedAt || nowIso }, nowIso);
-    const meta = await db.transaction(async (tx) => {
-      await tx.delete(deletedEntities).where(eq(deletedEntities.id, `pengumuman:${row.id}`));
-      await tx.insert(pengumuman).values(row).onConflictDoUpdate({ target: pengumuman.id, set: row });
-      return bumpRevisionTx(tx);
-    });
-    return meta.revision;
-  } catch (err) {
-    console.error('Upsert pengumuman SQL error:', err);
-    throw new Error('Gagal menyimpan pengumuman ke server.', { cause: err });
+export async function deleteTransactionSql(
+  user: AuthUser,
+  id: string,
+  opts?: MutationOptions
+): Promise<{ revision: number; rtScope?: string }> {
+  await ensureSqlSeeded();
+  const existingRows = await db.select().from(transactions).where(eq(transactions.id, id)).limit(1);
+  const existing = existingRows[0];
+  if (!existing) {
+    throw new NotFoundError('Transaksi kas tidak ditemukan atau sudah dihapus.');
   }
+  const scope = extractScopeRtRw(existing.rtScope, '08', '05');
+  assertCanMutateRtRw(user, scope.rt, scope.rw);
+
+  if (opts?.expectedVersion !== undefined) {
+    const currentVer = Number((existing as any).version) || 1;
+    if (Number(opts.expectedVersion) !== currentVer) {
+      throw new VersionConflictError(
+        `Transaksi telah diubah pengguna lain (versi server ${currentVer}). Muat ulang sebelum menghapus.`,
+        currentVer
+      );
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const meta = await db.transaction(async (tx) => {
+    await tx.delete(transactions).where(eq(transactions.id, id));
+    await tx
+      .insert(deletedEntities)
+      .values({ id: `transactions:${id}`, entityType: 'transactions', entityId: id, deletedAt: nowIso })
+      .onConflictDoNothing();
+    const m = await bumpRevisionTx(tx);
+    await writeAuditLogTx(tx, user, {
+      action: 'DELETE_TRANSACTION',
+      entityType: 'transaction',
+      entityId: id,
+      rtScope: existing.rtScope || formatRtScope(scope.rt, scope.rw),
+      summary: `Menghapus transaksi ${existing.kategori} (${existing.keterangan})`,
+    });
+    return m;
+  });
+  return { revision: meta.revision, rtScope: existing.rtScope || formatRtScope(scope.rt, scope.rw) };
 }
 
-export async function deletePengumumanSql(id: string): Promise<number> {
-  try {
-    await ensureSqlSeeded();
-    const nowIso = new Date().toISOString();
-    const meta = await db.transaction(async (tx) => {
-      await tx.delete(pengumuman).where(eq(pengumuman.id, id));
-      await tx
-        .insert(deletedEntities)
-        .values({ id: `pengumuman:${id}`, entityType: 'pengumuman', entityId: id, deletedAt: nowIso })
-        .onConflictDoNothing();
-      return bumpRevisionTx(tx);
-    });
-    return meta.revision;
-  } catch (err) {
-    console.error('Delete pengumuman SQL error:', err);
-    throw new Error('Gagal menghapus pengumuman dari server.', { cause: err });
+export async function upsertPengumumanSql(
+  user: AuthUser,
+  p: PengumumanRT,
+  opts?: MutationOptions
+): Promise<{ pengumuman: PengumumanRT; revision: number; notification?: AppNotification }> {
+  await ensureSqlSeeded();
+  const nowIso = new Date().toISOString();
+  const existingRows = await db.select().from(pengumuman).where(eq(pengumuman.id, p.id)).limit(1);
+  const existing = existingRows[0];
+  const userScope = extractUserRtRw(user);
+
+  if (existing) {
+    const existingMapped = mapRowToPengumuman(existing);
+    if (user.role === 'admin') {
+      const existingTargets = normalizeTargetRts(existingMapped.targetRts, existingMapped.rtScope);
+      if (
+        existingMapped.senderRole === 'server' ||
+        existingTargets.includes('SEMUA') ||
+        !existingTargets.every((t) => t === userScope.rt)
+      ) {
+        throw new ForbiddenError('Admin RT hanya boleh mengubah atau menghapus pengumuman milik RT-nya sendiri.');
+      }
+    }
+    if (opts?.expectedVersion !== undefined) {
+      const currentVer = Number((existing as any).version) || 1;
+      if (Number(opts.expectedVersion) !== currentVer) {
+        throw new VersionConflictError(
+          `Pengumuman "${existing.judul}" telah diubah pengguna lain (versi server ${currentVer}).`,
+          currentVer
+        );
+      }
+    }
   }
+
+  let finalTargets: string[];
+  let finalScopeLabel: string;
+  if (user.role === 'admin') {
+    const requestedTargets =
+      Array.isArray(p.targetRts) && p.targetRts.length > 0
+        ? normalizeTargetRts(p.targetRts)
+        : p.rtScope
+        ? normalizeTargetRts(undefined, p.rtScope)
+        : [userScope.rt];
+    if (
+      requestedTargets.includes('SEMUA') ||
+      requestedTargets.some((t) => t !== userScope.rt)
+    ) {
+      throw new ForbiddenError(
+        `Akses ditolak: Admin ${formatRtScope(userScope.rt, userScope.rw)} hanya berwenang menerbitkan pengumuman untuk RT-nya sendiri.`
+      );
+    }
+    finalTargets = [userScope.rt];
+    finalScopeLabel = formatRtScope(userScope.rt, userScope.rw);
+  } else {
+    finalTargets = normalizeTargetRts(p.targetRts, p.rtScope);
+    finalScopeLabel = finalTargets.includes('SEMUA')
+      ? 'Semua RT RW 05'
+      : finalTargets.map((r) => `RT ${r}`).join(', ');
+  }
+
+  const nextVersion = existing ? (Number((existing as any).version) || 1) + 1 : 1;
+  const normalizedAnnouncement: PengumumanRT = {
+    ...p,
+    targetRts: finalTargets,
+    rtScope: finalScopeLabel,
+    senderRt: existing ? (existing as any).senderRt || userScope.rt : userScope.rt,
+    senderRw: existing ? (existing as any).senderRw || userScope.rw : userScope.rw,
+    senderRole: existing
+      ? ((existing as any).senderRole as 'server' | 'admin' | undefined) || (user.role === 'server' ? 'server' : 'admin')
+      : user.role === 'server'
+      ? 'server'
+      : 'admin',
+    updatedAt: nowIso,
+    version: nextVersion,
+  };
+
+  const row = toPengumumanRow(normalizedAnnouncement, nowIso, nextVersion);
+  let createdNotif: AppNotification | undefined;
+  const meta = await db.transaction(async (tx) => {
+    const idem = await checkAndRecordMutationTx(tx, user, opts?.clientMutationId, 'pengumuman', row.id);
+    if (idem.alreadyProcessed) {
+      return { revision: idem.existingRevision || 1 };
+    }
+    await tx.delete(deletedEntities).where(eq(deletedEntities.id, `pengumuman:${row.id}`));
+    await tx.insert(pengumuman).values(row).onConflictDoUpdate({ target: pengumuman.id, set: row });
+    const m = await bumpRevisionTx(tx);
+    await persistProcessedMutationTx(tx, user, opts?.clientMutationId, 'pengumuman', row.id, m.revision);
+    await writeAuditLogTx(tx, user, {
+      action: existing ? 'UPDATE_PENGUMUMAN' : 'CREATE_PENGUMUMAN',
+      entityType: 'pengumuman',
+      entityId: row.id,
+      rtScope: finalScopeLabel,
+      summary: `${existing ? 'Memperbarui' : 'Menerbitkan'} pengumuman "${normalizedAnnouncement.judul}" untuk ${finalScopeLabel}`,
+    });
+    createdNotif = await createNotificationForEventTx(tx, {
+      title: normalizedAnnouncement.penting
+        ? `Pengumuman Penting: ${normalizedAnnouncement.judul}`
+        : `Pengumuman Baru: ${normalizedAnnouncement.judul}`,
+      body: `${normalizedAnnouncement.isi.slice(0, 140)} (${finalScopeLabel})`,
+      category: 'pengumuman',
+      entityType: 'pengumuman',
+      entityId: row.id,
+      rwId: userScope.rw,
+      targetRts: finalTargets,
+      targetRoles: ['server', 'admin', 'warga'],
+      createdBy: user.username,
+    });
+    return m;
+  });
+
+  return {
+    pengumuman: mapRowToPengumuman(row as any),
+    revision: meta.revision,
+    notification: createdNotif,
+  };
 }
 
-export async function upsertBantuanSql(b: BantuanPemerintah): Promise<number> {
-  try {
-    await ensureSqlSeeded();
-    const nowIso = new Date().toISOString();
-    const row = toBantuanRow({ ...b, updatedAt: b.updatedAt || nowIso }, nowIso);
-    const meta = await db.transaction(async (tx) => {
-      await tx.delete(deletedEntities).where(eq(deletedEntities.id, `bantuan:${row.id}`));
-      await tx.insert(bantuan).values(row).onConflictDoUpdate({ target: bantuan.id, set: row });
-      return bumpRevisionTx(tx);
-    });
-    return meta.revision;
-  } catch (err) {
-    console.error('Upsert bantuan SQL error:', err);
-    throw new Error('Gagal menyimpan data bantuan ke server.', { cause: err });
+export async function deletePengumumanSql(
+  user: AuthUser,
+  id: string
+): Promise<{ revision: number; targetRts: string[] }> {
+  await ensureSqlSeeded();
+  const existingRows = await db.select().from(pengumuman).where(eq(pengumuman.id, id)).limit(1);
+  const existing = existingRows[0];
+  if (!existing) {
+    throw new NotFoundError('Pengumuman tidak ditemukan atau sudah dihapus.');
   }
+  const mapped = mapRowToPengumuman(existing);
+  const targets = normalizeTargetRts(mapped.targetRts, mapped.rtScope);
+  if (user.role === 'admin') {
+    const userScope = extractUserRtRw(user);
+    if (mapped.senderRole === 'server' || targets.includes('SEMUA') || !targets.every((t) => t === userScope.rt)) {
+      throw new ForbiddenError('Admin RT hanya boleh menghapus pengumuman milik RT-nya sendiri.');
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const meta = await db.transaction(async (tx) => {
+    await tx.delete(pengumuman).where(eq(pengumuman.id, id));
+    await tx
+      .insert(deletedEntities)
+      .values({ id: `pengumuman:${id}`, entityType: 'pengumuman', entityId: id, deletedAt: nowIso })
+      .onConflictDoNothing();
+    const m = await bumpRevisionTx(tx);
+    await writeAuditLogTx(tx, user, {
+      action: 'DELETE_PENGUMUMAN',
+      entityType: 'pengumuman',
+      entityId: id,
+      rtScope: mapped.rtScope || 'RW 05',
+      summary: `Menghapus pengumuman "${mapped.judul}"`,
+    });
+    return m;
+  });
+  return { revision: meta.revision, targetRts: targets };
 }
 
-export async function deleteBantuanSql(id: string): Promise<number> {
-  try {
-    await ensureSqlSeeded();
-    const nowIso = new Date().toISOString();
-    const meta = await db.transaction(async (tx) => {
-      await tx.delete(bantuan).where(eq(bantuan.id, id));
-      await tx
-        .insert(deletedEntities)
-        .values({ id: `bantuan:${id}`, entityType: 'bantuan', entityId: id, deletedAt: nowIso })
-        .onConflictDoNothing();
-      return bumpRevisionTx(tx);
-    });
-    return meta.revision;
-  } catch (err) {
-    console.error('Delete bantuan SQL error:', err);
-    throw new Error('Gagal menghapus data bantuan dari server.', { cause: err });
+export async function upsertBantuanSql(
+  user: AuthUser,
+  b: BantuanPemerintah,
+  opts?: MutationOptions
+): Promise<{ bantuan: BantuanPemerintah; revision: number }> {
+  await ensureSqlSeeded();
+  const existingRows = await db.select().from(bantuan).where(eq(bantuan.id, b.id)).limit(1);
+  const existing = existingRows[0];
+  const userScope = extractUserRtRw(user);
+
+  if (existing) {
+    const existingScope = extractScopeRtRw(existing.rtScope, '08', '05');
+    assertCanMutateRtRw(user, existingScope.rt, existingScope.rw);
+    if (opts?.expectedVersion !== undefined) {
+      const currentVer = Number((existing as any).version) || 1;
+      if (Number(opts.expectedVersion) !== currentVer) {
+        throw new VersionConflictError(
+          `Data bansos "${existing.namaPenerima}" telah diubah pengguna lain (versi server ${currentVer}).`,
+          currentVer
+        );
+      }
+    }
   }
+
+  const desiredScope = extractScopeRtRw(
+    b.rtScope || existing?.rtScope || (user.role === 'admin' ? formatRtScope(userScope.rt, userScope.rw) : 'RT 08 RW 05'),
+    user.role === 'admin' ? userScope.rt : '08',
+    '05'
+  );
+  const authorized = assertCanMutateRtRw(user, desiredScope.rt, desiredScope.rw);
+
+  const nowIso = new Date().toISOString();
+  const nextVersion = existing ? (Number((existing as any).version) || 1) + 1 : 1;
+  const scoped: BantuanPemerintah = {
+    ...b,
+    rtScope: formatRtScope(authorized.rt, authorized.rw),
+    updatedAt: nowIso,
+    version: nextVersion,
+  };
+  const row = toBantuanRow(scoped, nowIso, nextVersion);
+  const meta = await db.transaction(async (tx) => {
+    await tx.delete(deletedEntities).where(eq(deletedEntities.id, `bantuan:${row.id}`));
+    await tx.insert(bantuan).values(row).onConflictDoUpdate({ target: bantuan.id, set: row });
+    const m = await bumpRevisionTx(tx);
+    await writeAuditLogTx(tx, user, {
+      action: existing ? 'UPDATE_BANTUAN' : 'CREATE_BANTUAN',
+      entityType: 'bantuan',
+      entityId: row.id,
+      rtScope: scoped.rtScope,
+      summary: `${existing ? 'Mengubah' : 'Menambah'} penerima bansos ${scoped.jenisBantuan}: ${scoped.namaPenerima}`,
+    });
+    return m;
+  });
+  return { bantuan: mapRowToBantuan(row as any), revision: meta.revision };
 }
 
-export async function upsertDokumenSql(d: DokumenPdfWarga): Promise<number> {
-  try {
-    await ensureSqlSeeded();
-    const nowIso = new Date().toISOString();
-    const row = toDokumenRow({ ...d, updatedAt: d.updatedAt || nowIso }, nowIso);
-    const meta = await db.transaction(async (tx) => {
-      await tx.delete(deletedEntities).where(eq(deletedEntities.id, `dokumen:${row.id}`));
-      await tx.insert(dokumen).values(row).onConflictDoUpdate({ target: dokumen.id, set: row });
-      return bumpRevisionTx(tx);
-    });
-    return meta.revision;
-  } catch (err) {
-    console.error('Upsert dokumen SQL error:', err);
-    throw new Error('Gagal menyimpan dokumen ke server.', { cause: err });
+export async function deleteBantuanSql(
+  user: AuthUser,
+  id: string
+): Promise<{ revision: number; rtScope?: string }> {
+  await ensureSqlSeeded();
+  const existingRows = await db.select().from(bantuan).where(eq(bantuan.id, id)).limit(1);
+  const existing = existingRows[0];
+  if (!existing) {
+    throw new NotFoundError('Data bansos tidak ditemukan atau sudah dihapus.');
   }
+  const scope = extractScopeRtRw(existing.rtScope, '08', '05');
+  assertCanMutateRtRw(user, scope.rt, scope.rw);
+
+  const nowIso = new Date().toISOString();
+  const meta = await db.transaction(async (tx) => {
+    await tx.delete(bantuan).where(eq(bantuan.id, id));
+    await tx
+      .insert(deletedEntities)
+      .values({ id: `bantuan:${id}`, entityType: 'bantuan', entityId: id, deletedAt: nowIso })
+      .onConflictDoNothing();
+    const m = await bumpRevisionTx(tx);
+    await writeAuditLogTx(tx, user, {
+      action: 'DELETE_BANTUAN',
+      entityType: 'bantuan',
+      entityId: id,
+      rtScope: existing.rtScope || formatRtScope(scope.rt, scope.rw),
+      summary: `Menghapus data bansos ${existing.jenisBantuan} (${existing.namaPenerima})`,
+    });
+    return m;
+  });
+  return { revision: meta.revision, rtScope: existing.rtScope || formatRtScope(scope.rt, scope.rw) };
 }
 
-export async function deleteDokumenSql(id: string): Promise<number> {
-  try {
-    await ensureSqlSeeded();
-    const nowIso = new Date().toISOString();
-    const meta = await db.transaction(async (tx) => {
-      await tx.delete(dokumen).where(eq(dokumen.id, id));
-      await tx
-        .insert(deletedEntities)
-        .values({ id: `dokumen:${id}`, entityType: 'dokumen', entityId: id, deletedAt: nowIso })
-        .onConflictDoNothing();
-      return bumpRevisionTx(tx);
-    });
-    return meta.revision;
-  } catch (err) {
-    console.error('Delete dokumen SQL error:', err);
-    throw new Error('Gagal menghapus dokumen dari server.', { cause: err });
+export async function upsertDokumenSql(
+  user: AuthUser,
+  d: DokumenPdfWarga
+): Promise<{ dokumen: DokumenPdfWarga; revision: number }> {
+  await ensureSqlSeeded();
+  const existingRows = await db.select().from(dokumen).where(eq(dokumen.id, d.id)).limit(1);
+  const existing = existingRows[0];
+  const userScope = extractUserRtRw(user);
+
+  if (existing) {
+    const existingScope = extractScopeRtRw(existing.rtScope, '08', '05');
+    assertCanMutateRtRw(user, existingScope.rt, existingScope.rw);
   }
+  const desiredScope = extractScopeRtRw(
+    d.rtScope || existing?.rtScope || (user.role === 'admin' ? formatRtScope(userScope.rt, userScope.rw) : 'RT 08 RW 05'),
+    user.role === 'admin' ? userScope.rt : '08',
+    '05'
+  );
+  const authorized = assertCanMutateRtRw(user, desiredScope.rt, desiredScope.rw);
+
+  const nowIso = new Date().toISOString();
+  const nextVersion = existing ? (Number((existing as any).version) || 1) + 1 : 1;
+  const scoped: DokumenPdfWarga = {
+    ...d,
+    rtScope: formatRtScope(authorized.rt, authorized.rw),
+    updatedAt: nowIso,
+    version: nextVersion,
+  };
+  const row = toDokumenRow(scoped, nowIso, nextVersion);
+  const meta = await db.transaction(async (tx) => {
+    await tx.delete(deletedEntities).where(eq(deletedEntities.id, `dokumen:${row.id}`));
+    await tx.insert(dokumen).values(row).onConflictDoUpdate({ target: dokumen.id, set: row });
+    return bumpRevisionTx(tx);
+  });
+  return { dokumen: mapRowToDokumen(row as any), revision: meta.revision };
 }
 
-export async function upsertLaporanSql(l: PembaruanBulananRT): Promise<number> {
-  try {
-    await ensureSqlSeeded();
-    const nowIso = new Date().toISOString();
-    const row = toLaporanRow({ ...l, updatedAt: l.updatedAt || nowIso }, nowIso);
-    const meta = await db.transaction(async (tx) => {
-      await tx.delete(deletedEntities).where(eq(deletedEntities.id, `laporanBulananRT:${row.id}`));
-      await tx.insert(laporanBulanan).values(row).onConflictDoUpdate({ target: laporanBulanan.id, set: row });
-      return bumpRevisionTx(tx);
-    });
-    return meta.revision;
-  } catch (err) {
-    console.error('Upsert laporan SQL error:', err);
-    throw new Error('Gagal menyimpan laporan bulanan ke server.', { cause: err });
+export async function deleteDokumenSql(
+  user: AuthUser,
+  id: string
+): Promise<{ revision: number; rtScope?: string }> {
+  await ensureSqlSeeded();
+  const existingRows = await db.select().from(dokumen).where(eq(dokumen.id, id)).limit(1);
+  const existing = existingRows[0];
+  if (!existing) {
+    throw new NotFoundError('Dokumen tidak ditemukan atau sudah dihapus.');
   }
+  const scope = extractScopeRtRw(existing.rtScope, '08', '05');
+  assertCanMutateRtRw(user, scope.rt, scope.rw);
+
+  const nowIso = new Date().toISOString();
+  const meta = await db.transaction(async (tx) => {
+    await tx.delete(dokumen).where(eq(dokumen.id, id));
+    await tx
+      .insert(deletedEntities)
+      .values({ id: `dokumen:${id}`, entityType: 'dokumen', entityId: id, deletedAt: nowIso })
+      .onConflictDoNothing();
+    return bumpRevisionTx(tx);
+  });
+  return { revision: meta.revision, rtScope: existing.rtScope || formatRtScope(scope.rt, scope.rw) };
 }
 
-export async function updateSettingsSql(s: PengaturanKas, tahunAktif?: number): Promise<number> {
-  try {
-    await ensureSqlSeeded();
-    const nowIso = s.updatedAt || new Date().toISOString();
-    const nextTahun = Number(tahunAktif || s.tahunAktif) || 2026;
-    const meta = await db.transaction(async (tx) => {
+export async function upsertLaporanSql(
+  user: AuthUser,
+  l: PembaruanBulananRT
+): Promise<{ laporan: PembaruanBulananRT; revision: number; notification?: AppNotification }> {
+  await ensureSqlSeeded();
+  const existingRows = await db.select().from(laporanBulanan).where(eq(laporanBulanan.id, l.id)).limit(1);
+  const existing = existingRows[0];
+
+  const authorized = assertCanMutateRtRw(user, l.rt || existing?.rt || '08', l.rw || existing?.rw || '05');
+  if (user.role === 'admin' && existing && l.statusVerifikasi !== existing.statusVerifikasi) {
+    throw new ForbiddenError('Status verifikasi laporan bulanan hanya dapat diubah oleh Super Admin Server RW 05.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const nextVersion = existing ? (Number((existing as any).version) || 1) + 1 : 1;
+  const scoped: PembaruanBulananRT = {
+    ...l,
+    rt: authorized.rt,
+    rw: authorized.rw,
+    statusVerifikasi:
+      user.role === 'admin'
+        ? (existing?.statusVerifikasi as PembaruanBulananRT['statusVerifikasi']) || 'Menunggu Verifikasi'
+        : l.statusVerifikasi || 'Menunggu Verifikasi',
+    updatedAt: nowIso,
+    version: nextVersion,
+  };
+  const row = toLaporanRow(scoped, nowIso, nextVersion);
+  let createdNotif: AppNotification | undefined;
+  const meta = await db.transaction(async (tx) => {
+    await tx.delete(deletedEntities).where(eq(deletedEntities.id, `laporanBulananRT:${row.id}`));
+    await tx.insert(laporanBulanan).values(row).onConflictDoUpdate({ target: laporanBulanan.id, set: row });
+    const m = await bumpRevisionTx(tx);
+    await writeAuditLogTx(tx, user, {
+      action: existing ? 'UPDATE_LAPORAN_RT' : 'SUBMIT_LAPORAN_RT',
+      entityType: 'laporan',
+      entityId: row.id,
+      rtScope: formatRtScope(authorized.rt, authorized.rw),
+      summary: `Laporan bulanan ${scoped.bulanTahun} RT ${authorized.rt} (${scoped.statusVerifikasi})`,
+    });
+    createdNotif = await createNotificationForEventTx(tx, {
+      title: `Laporan Bulanan RT ${authorized.rt} (${scoped.bulanTahun})`,
+      body: `Status laporan: ${scoped.statusVerifikasi}. Saldo Kas Umum Rp ${scoped.saldoKasUmumBerjalan.toLocaleString('id-ID')}.`,
+      category: 'laporan',
+      entityType: 'laporan',
+      entityId: row.id,
+      rwId: authorized.rw,
+      targetRts: [authorized.rt],
+      targetRoles: ['server', 'admin'],
+      createdBy: user.username,
+    });
+    return m;
+  });
+  return { laporan: mapRowToLaporan(row as any), revision: meta.revision, notification: createdNotif };
+}
+
+export async function updateSettingsSql(
+  user: AuthUser,
+  s: PengaturanKas,
+  tahunAktif?: number,
+  opts?: MutationOptions
+): Promise<{ settings: PengaturanKas; revision: number; targetRt: string; notification?: AppNotification }> {
+  await ensureSqlSeeded();
+  const nowIso = new Date().toISOString();
+  const nextTahun = Number(tahunAktif || s.tahunAktif) || 2026;
+
+  const userScope = extractUserRtRw(user);
+  const desiredRt = normalizeRtCode(
+    user.role === 'admin' ? userScope.rt : s.profilRT?.namaRT || '08'
+  );
+  const desiredRw = normalizeRwCode(
+    user.role === 'admin' ? userScope.rw : s.profilRT?.namaRW || '05'
+  );
+  if (user.role === 'admin') {
+    assertCanMutateRtRw(user, desiredRt, desiredRw);
+  }
+
+  const settingsId =
+    user.role === 'server' && (!s.profilRT?.namaRT || s.profilRT.namaRT === '08')
+      ? 'kas'
+      : getRtSettingsId(desiredRw, desiredRt);
+
+  const existingRows = await db.select().from(appSettings).where(eq(appSettings.id, settingsId)).limit(1);
+  const existing = existingRows[0];
+  if (existing && opts?.expectedVersion !== undefined) {
+    const currentVer = Number((existing as any).version) || 1;
+    if (Number(opts.expectedVersion) !== currentVer) {
+      throw new VersionConflictError(
+        `Pengaturan kas RT ${desiredRt} telah diperbarui oleh pengguna lain (versi server ${currentVer}).`,
+        currentVer
+      );
+    }
+  }
+  const nextVersion = existing ? (Number((existing as any).version) || 1) + 1 : 1;
+
+  const valuesPayload = {
+    id: settingsId,
+    tahunAktif: nextTahun,
+    nominalJimpitanTahunan: Number(s.nominalJimpitanTahunan) || 0,
+    nominalJimpitanBulanan: Number(s.nominalJimpitanBulanan) || 0,
+    nominalKematianTahunan: Number(s.nominalKematianTahunan) || 0,
+    nominalKematianBulanan: Number(s.nominalKematianBulanan) || 0,
+    saldoAwalKasUmum: Number(s.saldoAwalKasUmum) || 0,
+    saldoAwalKasKematian: Number(s.saldoAwalKasKematian) || 0,
+    keteranganSaldoAwal: String(s.keteranganSaldoAwal || ''),
+    tanggalSaldoAwal: String(s.tanggalSaldoAwal || ''),
+    kontakKetuaRT: s.kontakKetuaRT || DEFAULT_PENGATURAN_KAS.kontakKetuaRT,
+    kontakBendahara: s.kontakBendahara || DEFAULT_PENGATURAN_KAS.kontakBendahara,
+    saldoBerlanjutPerTahun: s.saldoBerlanjutPerTahun || null,
+    profilRT: {
+      ...(s.profilRT || DEFAULT_PENGATURAN_KAS.profilRT!),
+      namaRT: desiredRt,
+      namaRW: desiredRw,
+    },
+    updatedAt: nowIso,
+    version: nextVersion,
+  };
+
+  let createdNotif: AppNotification | undefined;
+  const meta = await db.transaction(async (tx) => {
+    await tx
+      .insert(appSettings)
+      .values(valuesPayload)
+      .onConflictDoUpdate({
+        target: appSettings.id,
+        set: valuesPayload,
+      });
+
+    // Keep global 'kas' synced when RT 08 or server updates default settings
+    if (settingsId !== 'kas' && desiredRt === '08' && user.role === 'admin') {
       await tx
         .insert(appSettings)
-        .values({
-          id: 'kas',
-          tahunAktif: nextTahun,
-          nominalJimpitanTahunan: Number(s.nominalJimpitanTahunan) || 0,
-          nominalJimpitanBulanan: Number(s.nominalJimpitanBulanan) || 0,
-          nominalKematianTahunan: Number(s.nominalKematianTahunan) || 0,
-          nominalKematianBulanan: Number(s.nominalKematianBulanan) || 0,
-          saldoAwalKasUmum: Number(s.saldoAwalKasUmum) || 0,
-          saldoAwalKasKematian: Number(s.saldoAwalKasKematian) || 0,
-          keteranganSaldoAwal: String(s.keteranganSaldoAwal || ''),
-          tanggalSaldoAwal: String(s.tanggalSaldoAwal || ''),
-          kontakKetuaRT: s.kontakKetuaRT || DEFAULT_PENGATURAN_KAS.kontakKetuaRT,
-          kontakBendahara: s.kontakBendahara || DEFAULT_PENGATURAN_KAS.kontakBendahara,
-          saldoBerlanjutPerTahun: s.saldoBerlanjutPerTahun || null,
-          profilRT: s.profilRT || DEFAULT_PENGATURAN_KAS.profilRT,
-          updatedAt: nowIso,
-        })
+        .values({ ...valuesPayload, id: 'kas' })
         .onConflictDoUpdate({
           target: appSettings.id,
-          set: {
-            tahunAktif: nextTahun,
-            nominalJimpitanTahunan: Number(s.nominalJimpitanTahunan) || 0,
-            nominalJimpitanBulanan: Number(s.nominalJimpitanBulanan) || 0,
-            nominalKematianTahunan: Number(s.nominalKematianTahunan) || 0,
-            nominalKematianBulanan: Number(s.nominalKematianBulanan) || 0,
-            saldoAwalKasUmum: Number(s.saldoAwalKasUmum) || 0,
-            saldoAwalKasKematian: Number(s.saldoAwalKasKematian) || 0,
-            keteranganSaldoAwal: String(s.keteranganSaldoAwal || ''),
-            tanggalSaldoAwal: String(s.tanggalSaldoAwal || ''),
-            kontakKetuaRT: s.kontakKetuaRT || DEFAULT_PENGATURAN_KAS.kontakKetuaRT,
-            kontakBendahara: s.kontakBendahara || DEFAULT_PENGATURAN_KAS.kontakBendahara,
-            saldoBerlanjutPerTahun: s.saldoBerlanjutPerTahun || null,
-            profilRT: s.profilRT || DEFAULT_PENGATURAN_KAS.profilRT,
-            updatedAt: nowIso,
-          },
+          set: { ...valuesPayload, id: 'kas' },
         });
-      return bumpRevisionTx(tx);
+    }
+
+    const m = await bumpRevisionTx(tx);
+    await writeAuditLogTx(tx, user, {
+      action: 'UPDATE_SETTINGS',
+      entityType: 'settings',
+      entityId: settingsId,
+      rtScope: formatRtScope(desiredRt, desiredRw),
+      summary: `Memperbarui pengaturan kas & tahun aktif (${nextTahun}) untuk ${formatRtScope(desiredRt, desiredRw)}`,
     });
-    return meta.revision;
-  } catch (err) {
-    console.error('Update settings SQL error:', err);
-    throw new Error('Gagal menyimpan pengaturan ke server.', { cause: err });
+    createdNotif = await createNotificationForEventTx(tx, {
+      title: `Pengaturan Kas RT ${desiredRt} Diperbarui`,
+      body: `Tarif iuran & saldo awal periode ${nextTahun} telah diperbarui oleh ${user.nama}.`,
+      category: 'pengaturan',
+      entityType: 'settings',
+      entityId: settingsId,
+      rwId: desiredRw,
+      targetRts: [desiredRt],
+      targetRoles: ['server', 'admin', 'warga'],
+      createdBy: user.username,
+    });
+    return m;
+  });
+
+  return {
+    settings: mapRowToSettings(valuesPayload as any),
+    revision: meta.revision,
+    targetRt: desiredRt,
+    notification: createdNotif,
+  };
+}
+
+export async function upsertAdminAccountByServerSql(
+  user: AuthUser,
+  account: AdminRTAccount,
+  opts?: MutationOptions
+): Promise<{ account: AdminRTAccount; revision: number }> {
+  if (user.role !== 'server') {
+    throw new ForbiddenError('Hanya Super Admin Server RW 05 yang berwenang mengelola akun Admin RT.');
   }
+  await ensureSqlSeeded();
+  const nowIso = new Date().toISOString();
+  const rows = await db.select().from(adminAccounts);
+  const existing = rows.find(
+    (a) =>
+      a.id === account.id ||
+      a.username.trim().toLowerCase() === String(account.username || '').trim().toLowerCase()
+  );
+
+  if (existing && opts?.expectedVersion !== undefined) {
+    const currentVer = Number((existing as any).version) || 1;
+    if (Number(opts.expectedVersion) !== currentVer) {
+      throw new VersionConflictError(
+        `Akun admin "${existing.username}" telah diperbarui di sesi lain.`,
+        currentVer
+      );
+    }
+  }
+
+  const targetId = existing?.id || account.id || `adm_${Date.now()}`;
+  const nextVersion = existing ? (Number((existing as any).version) || 1) + 1 : 1;
+  const stamped: AdminRTAccount = {
+    ...(existing ? mapRowToAdmin(existing) : ({} as AdminRTAccount)),
+    ...account,
+    id: targetId,
+    rt: normalizeRtCode(account.rt || existing?.rt || '08'),
+    rw: normalizeRwCode(account.rw || existing?.rw || '05'),
+    passwordHash: account.passwordHash || existing?.passwordHash || 'rt08rw05',
+    updatedAt: nowIso,
+    version: nextVersion,
+  };
+
+  const row = toAdminRow(stamped, nowIso, nextVersion);
+  const meta = await db.transaction(async (tx) => {
+    await tx.delete(deletedEntities).where(eq(deletedEntities.id, `adminAccounts:${targetId}`));
+    await tx.insert(adminAccounts).values(row).onConflictDoUpdate({ target: adminAccounts.id, set: row });
+    const m = await bumpRevisionTx(tx);
+    await writeAuditLogTx(tx, user, {
+      action: existing ? 'UPDATE_ADMIN_ACCOUNT' : 'CREATE_ADMIN_ACCOUNT',
+      entityType: 'admin_account',
+      entityId: targetId,
+      rtScope: formatRtScope(stamped.rt, stamped.rw),
+      summary: `${existing ? 'Memperbarui' : 'Menambah'} akun pengurus ${stamped.username} (RT ${stamped.rt})`,
+    });
+    return m;
+  });
+
+  return { account: mapRowToAdmin(row as any), revision: meta.revision };
+}
+
+export async function deleteAdminAccountByServerSql(
+  user: AuthUser,
+  id: string
+): Promise<{ revision: number }> {
+  if (user.role !== 'server') {
+    throw new ForbiddenError('Hanya Super Admin Server RW 05 yang berwenang menghapus akun Admin RT.');
+  }
+  await ensureSqlSeeded();
+  const existingRows = await db.select().from(adminAccounts).where(eq(adminAccounts.id, id)).limit(1);
+  if (existingRows.length === 0) {
+    throw new NotFoundError('Akun Admin RT tidak ditemukan.');
+  }
+  const existing = existingRows[0];
+  const nowIso = new Date().toISOString();
+  const meta = await db.transaction(async (tx) => {
+    await tx.delete(adminAccounts).where(eq(adminAccounts.id, id));
+    await tx
+      .insert(deletedEntities)
+      .values({ id: `adminAccounts:${id}`, entityType: 'adminAccounts', entityId: id, deletedAt: nowIso })
+      .onConflictDoNothing();
+    const m = await bumpRevisionTx(tx);
+    await writeAuditLogTx(tx, user, {
+      action: 'DELETE_ADMIN_ACCOUNT',
+      entityType: 'admin_account',
+      entityId: id,
+      rtScope: formatRtScope(existing.rt, existing.rw),
+      summary: `Menghapus akun pengurus ${existing.username} (RT ${existing.rt})`,
+    });
+    return m;
+  });
+  return { revision: meta.revision };
+}
+
+export async function getNotificationsForUserSql(
+  user: AuthUser,
+  limit = 60
+): Promise<{ notifications: AppNotification[]; unreadCount: number }> {
+  await ensureSqlSeeded();
+  const allRows = await db
+    .select()
+    .from(notifications)
+    .orderBy(desc(notifications.createdAt))
+    .limit(250);
+  const userKey = getUserKey(user);
+  const readsRows = await db
+    .select()
+    .from(notificationReads)
+    .where(eq(notificationReads.userKey, userKey));
+  const readSet = new Set(readsRows.map((r) => r.notificationId));
+  const userScope = extractUserRtRw(user);
+
+  const visible: AppNotification[] = [];
+  for (const r of allRows) {
+    const targets = normalizeTargetRts(r.targetRts);
+    const targetRoles = Array.isArray(r.targetRoles) ? r.targetRoles : null;
+    if (targetRoles && targetRoles.length > 0 && !targetRoles.includes(user.role)) {
+      continue;
+    }
+    if (user.role !== 'server') {
+      if (!targets.includes('SEMUA') && !targets.includes(userScope.rt)) {
+        continue;
+      }
+    }
+    visible.push({
+      id: r.id,
+      title: r.title,
+      body: r.body,
+      category: r.category as AppNotification['category'],
+      entityType: r.entityType || undefined,
+      entityId: r.entityId || undefined,
+      rwId: r.rwId,
+      targetRts: targets,
+      targetRoles: (targetRoles as AppNotification['targetRoles']) || undefined,
+      createdBy: r.createdBy,
+      createdAt: r.createdAt,
+      isRead: readSet.has(r.id),
+    });
+    if (visible.length >= limit) break;
+  }
+
+  const unreadCount = visible.filter((n) => !n.isRead).length;
+  return { notifications: visible, unreadCount };
+}
+
+export async function markNotificationReadSql(user: AuthUser, notificationId: string): Promise<void> {
+  await ensureSqlSeeded();
+  const userKey = getUserKey(user);
+  await db
+    .insert(notificationReads)
+    .values({
+      id: `${notificationId}:${userKey}`,
+      notificationId,
+      userKey,
+      readAt: new Date().toISOString(),
+    })
+    .onConflictDoNothing();
+}
+
+export async function markAllNotificationsReadSql(user: AuthUser): Promise<number> {
+  const { notifications: visible } = await getNotificationsForUserSql(user, 200);
+  const unread = visible.filter((n) => !n.isRead);
+  if (unread.length === 0) return 0;
+  const userKey = getUserKey(user);
+  const nowIso = new Date().toISOString();
+  await db
+    .insert(notificationReads)
+    .values(
+      unread.map((n) => ({
+        id: `${n.id}:${userKey}`,
+        notificationId: n.id,
+        userKey,
+        readAt: nowIso,
+      }))
+    )
+    .onConflictDoNothing();
+  return unread.length;
+}
+
+export async function savePushSubscriptionSql(
+  user: AuthUser,
+  sub: { endpoint: string; keys: { p256dh: string; auth: string } },
+  userAgent?: string
+): Promise<void> {
+  await ensureSqlSeeded();
+  const endpoint = String(sub?.endpoint || '').trim();
+  const p256dh = String(sub?.keys?.p256dh || '').trim();
+  const auth = String(sub?.keys?.auth || '').trim();
+  if (!endpoint || !p256dh || !auth) {
+    throw new BadRequestError('Data langganan push notification tidak lengkap.');
+  }
+  const { rt, rw } = extractUserRtRw(user);
+  const nowIso = new Date().toISOString();
+  const id = createHash('sha256').update(endpoint).digest('hex');
+  await db
+    .insert(pushSubscriptions)
+    .values({
+      id,
+      userKey: getUserKey(user),
+      role: user.role,
+      rtId: user.role === 'server' ? 'SEMUA' : rt,
+      rwId: rw,
+      endpoint,
+      p256dh,
+      auth,
+      userAgent: userAgent ? userAgent.slice(0, 240) : null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    })
+    .onConflictDoUpdate({
+      target: pushSubscriptions.id,
+      set: {
+        userKey: getUserKey(user),
+        role: user.role,
+        rtId: user.role === 'server' ? 'SEMUA' : rt,
+        rwId: rw,
+        p256dh,
+        auth,
+        userAgent: userAgent ? userAgent.slice(0, 240) : null,
+        updatedAt: nowIso,
+      },
+    });
+}
+
+export async function removePushSubscriptionSql(user: AuthUser, endpoint?: string): Promise<void> {
+  await ensureSqlSeeded();
+  if (endpoint) {
+    await db
+      .delete(pushSubscriptions)
+      .where(
+        and(
+          eq(pushSubscriptions.endpoint, endpoint),
+          eq(pushSubscriptions.userKey, getUserKey(user))
+        )
+      );
+    return;
+  }
+  await db.delete(pushSubscriptions).where(eq(pushSubscriptions.userKey, getUserKey(user)));
+}
+
+export async function removePushSubscriptionByEndpointSql(endpoint: string): Promise<void> {
+  await db.delete(pushSubscriptions).where(eq(pushSubscriptions.endpoint, endpoint));
+}
+
+export async function getPushSubscriptionsForTargetSql(
+  rwId: string,
+  targetRts: string[],
+  targetRoles?: Array<'server' | 'admin' | 'warga'>
+) {
+  await ensureSqlSeeded();
+  const rows = await db.select().from(pushSubscriptions);
+  const normalizedTargets = normalizeTargetRts(targetRts);
+  const cleanRw = normalizeRwCode(rwId || '05');
+
+  return rows
+    .filter((r) => {
+      if (normalizeRwCode(r.rwId) !== cleanRw) return false;
+      if (targetRoles && targetRoles.length > 0 && !targetRoles.includes(r.role as any)) {
+        return false;
+      }
+      if (r.role === 'server') return true;
+      if (normalizedTargets.includes('SEMUA')) return true;
+      return normalizedTargets.includes(normalizeRtCode(r.rtId));
+    })
+    .map((r) => ({
+      id: r.id,
+      endpoint: r.endpoint,
+      p256dh: r.p256dh,
+      auth: r.auth,
+    }));
+}
+
+export async function getDeltaSinceRevisionSql(user: AuthUser, sinceRevision: number) {
+  const snapshot = await getDatabaseSnapshotForUser(user);
+  return {
+    changed: sinceRevision !== snapshot.revision,
+    revision: snapshot.revision,
+    lastUpdated: snapshot.lastUpdated,
+    data: snapshot,
+  };
+}
+
+export async function getAuditLogsSql(user: AuthUser, limit = 100): Promise<AuditLogEntry[]> {
+  await ensureSqlSeeded();
+  if (user.role === 'warga') {
+    throw new ForbiddenError('Akun Warga tidak memiliki akses log audit.');
+  }
+  const rows = await db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(300);
+  const scope = extractUserRtRw(user);
+  const filtered = rows.filter((r) => {
+    if (user.role === 'server') return true;
+    return normalizeRtCode(r.actorRt) === scope.rt || (r.rtScope && extractScopeRtRw(r.rtScope).rt === scope.rt);
+  });
+  return filtered.slice(0, limit).map((r) => ({
+    id: r.id,
+    actorUsername: r.actorUsername,
+    actorRole: r.actorRole,
+    actorRt: r.actorRt,
+    actorRw: r.actorRw,
+    action: r.action,
+    entityType: r.entityType,
+    entityId: r.entityId,
+    rtScope: r.rtScope || undefined,
+    summary: r.summary,
+    createdAt: r.createdAt,
+  }));
+}
+
+export async function getBackupExportSql(user: AuthUser) {
+  if (user.role === 'warga') {
+    throw new ForbiddenError('Hanya Admin RT atau Super Admin Server yang dapat mengekspor backup database.');
+  }
+  const data = await getDatabaseSnapshotForUser(user);
+  return {
+    exportedAt: new Date().toISOString(),
+    exportedBy: user.username,
+    role: user.role,
+    rtScope: user.rtScope || 'RW 05',
+    data,
+  };
 }
 
 export async function mergeAndSaveFullStateSql(
   payload: any,
-  options?: { reviveAdminIds?: string[] }
+  options?: { reviveAdminIds?: string[]; callerUser?: AuthUser }
 ): Promise<FullAppDatabaseState> {
   return withDbWriteLock(async () => {
   try {
     await ensureSqlSeeded();
+    const caller = options?.callerUser;
 
     if (payload?.isHardReset === true) {
+      if (caller && caller.role !== 'server') {
+        throw new ForbiddenError('Reset total database server hanya diperbolehkan untuk Super Admin Server RW 05.');
+      }
       const nowIso = new Date().toISOString();
       return writeFullStateRaw({
         version: 2,

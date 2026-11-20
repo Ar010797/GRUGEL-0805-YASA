@@ -17,7 +17,7 @@ import {
 import { Warga, AnggotaKeluarga, Transaction } from '../types';
 import { cleanIndonesianName, cleanNIK } from '../utils/wargaHelpers';
 import { parseExcelWargaAndBantuan } from '../utils/excelWargaImport';
-import type { FirestoreWriteResult } from '../utils/firebaseSync';
+import type { ServerWriteResult } from '../utils/cloudSync';
 
 interface UpgradeKKModalProps {
   isOpen: boolean;
@@ -44,7 +44,7 @@ interface UpgradeKKModalProps {
     keterangan: string;
     catatSantunanKematian: boolean;
     namaMeninggal?: string;
-  }) => Promise<FirestoreWriteResult | void> | void;
+  }) => Promise<ServerWriteResult | void> | void;
 }
 
 export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
@@ -304,7 +304,7 @@ export const UpgradeKKModal: React.FC<UpgradeKKModalProps> = ({
       });
 
       if (res && res.ok === false) {
-        setFormError(res.message || 'Gagal memperbarui data KK di server Cloud Firestore.');
+        setFormError(res.message || 'Gagal memperbarui data KK di Database Server Pusat.');
         return;
       }
 

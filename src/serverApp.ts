@@ -3,26 +3,46 @@ import * as XLSX from 'xlsx';
 import { buildTemplateExcelWorkbook, getTemplateExcelFilename } from './utils/excelTemplateBuilder.ts';
 import {
   authenticateAndCreateSessionSql,
+  authenticateFirebaseGoogleSql,
+  BadRequestError,
   bulkImportWargaBantuanSql,
   checkDatabaseHealthSql,
   createSessionForAdminUserSql,
+  deleteAdminAccountByServerSql,
   deleteBantuanSql,
   deleteDokumenSql,
   deletePengumumanSql,
   deleteTransactionSql,
   deleteWargaSql,
+  extractUserRtRw,
+  filterStateForUser,
+  ForbiddenError,
   getAdminAccountsSql,
+  getAuditLogsSql,
+  getBackupExportSql,
   getDatabaseSnapshotForUser,
+  getDeltaSinceRevisionSql,
+  getNotificationsForUserSql,
   getPublicBootstrapInfoSql,
+  getPushSubscriptionsForTargetSql,
   isSqlUnavailable,
+  markAllNotificationsReadSql,
+  markNotificationReadSql,
   mergeAndSaveFullStateSql,
+  normalizeTargetRts,
+  NotFoundError,
   readCloudSqlMigrationSnapshot,
   readFullStateSql,
+  removePushSubscriptionByEndpointSql,
+  removePushSubscriptionSql,
   revokeSessionTokenSql,
+  savePushSubscriptionSql,
   searchWargaSql,
   syncAdminAccountSql,
   updateSettingsSql,
   updateWargaSelfSql,
+  upgradeWargaKKTx,
+  upsertAdminAccountByServerSql,
   upsertBantuanSql,
   upsertDokumenSql,
   upsertLaporanSql,
@@ -30,56 +50,67 @@ import {
   upsertTransactionSql,
   upsertWargaSql,
   verifySessionTokenSql,
+  VersionConflictError,
 } from './db/repository.ts';
 import {
   extractTokenFromRequest,
   requireAdminOrServer,
   requireAuth,
+  requireServerOnly,
   requireStreamAuth,
   type AuthRequest,
 } from './middleware/auth.ts';
-import type { AuthUser } from './types.ts';
+import type { RealtimeEmitter } from './realtime/socketServer.ts';
+import { getVapidPublicKey, sendPushToSubscriptions } from './utils/pushService.ts';
+import type { AppNotification, AuthUser } from './types.ts';
 
 interface SseClient {
   res: express.Response;
   authUser: AuthUser;
 }
 
-function filterStateForUser(full: Awaited<ReturnType<typeof readFullStateSql>>, user: AuthUser) {
-  if (user.role === 'server' || user.role === 'admin') {
-    return full;
+function getHttpStatusFromError(err: any): { status: number; code?: string; extra?: Record<string, any> } {
+  if (err instanceof ForbiddenError || err?.status === 403) {
+    return { status: 403, code: 'FORBIDDEN' };
   }
-  const targetKKDigits = String(user.noKK || '').replace(/\D/g, '');
-  const ownWarga = full.wargaList.filter((w) => {
-    if (user.wargaId && w.id === user.wargaId) return true;
-    if (targetKKDigits && w.noKK.replace(/\D/g, '') === targetKKDigits) return true;
-    return false;
-  });
-  return {
-    ...full,
-    wargaList: ownWarga,
-    bantuanList: [],
-    dokumenList: [],
-    adminAccounts: [],
-    laporanBulananRT: [],
-  };
-}
-
-function getSqlErrorHttpStatus(err: any): number {
-  if (isSqlUnavailable(err)) return 503;
+  if (err instanceof VersionConflictError || err?.status === 409) {
+    return {
+      status: 409,
+      code: 'VERSION_CONFLICT',
+      extra: { currentVersion: err?.currentVersion },
+    };
+  }
+  if (err instanceof BadRequestError || err?.status === 400) {
+    return { status: 400, code: 'BAD_REQUEST' };
+  }
+  if (err instanceof NotFoundError || err?.status === 404) {
+    return { status: 404, code: 'NOT_FOUND' };
+  }
+  if (isSqlUnavailable(err)) return { status: 503, code: 'DB_UNAVAILABLE' };
   const msg = String(err?.message || '');
   if (
     msg.includes('belum dikonfigurasi') ||
     msg.includes('Koneksi database server bermasalah') ||
     msg.includes('menginisialisasi database')
   ) {
-    return 503;
+    return { status: 503, code: 'DB_UNAVAILABLE' };
   }
-  return 500;
+  return { status: 500 };
 }
 
-export function createApiApp() {
+function sendErrorResponse(res: express.Response, err: any, fallbackMessage: string) {
+  const { status, code, extra } = getHttpStatusFromError(err);
+  return res.status(status).json({
+    success: false,
+    ...(code ? { code } : {}),
+    ...(extra || {}),
+    message: err?.message || fallbackMessage,
+  });
+}
+
+export function createApiApp(options?: { realtime?: RealtimeEmitter }) {
   const app = express();
+  const realtime = options?.realtime;
 
   // Body parser & CORS
   app.use(express.json({ limit: '25mb' }));
@@ -103,7 +134,7 @@ export function createApiApp() {
     next();
   });
 
-  // Role-filtered Server-Sent Events (SSE) clients
+  // Role-filtered Server-Sent Events (SSE) fallback clients
   const sseClients = new Set<SseClient>();
 
   async function broadcastSyncEvent(type: 'sync' | 'reset' = 'sync') {
@@ -125,39 +156,67 @@ export function createApiApp() {
     }
   }
 
-  // Health Check (Firebase primary backend + optional Cloud SQL migration status)
+  async function dispatchRealtimeAndPush(notification?: AppNotification) {
+    if (!notification) return;
+    realtime?.emitNotification(notification);
+    try {
+      const subs = await getPushSubscriptionsForTargetSql(
+        notification.rwId,
+        notification.targetRts,
+        notification.targetRoles
+      );
+      if (subs.length > 0) {
+        await sendPushToSubscriptions(
+          subs,
+          {
+            title: notification.title,
+            body: notification.body,
+            category: notification.category,
+            url: '/',
+            tag: `rw05-${notification.category}-${notification.id}`,
+          },
+          removePushSubscriptionByEndpointSql
+        );
+      }
+    } catch (err) {
+      console.warn('Web Push dispatch notice (non-fatal):', err);
+    }
+  }
+
+  // Health Check
   app.get('/api/health', async (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
       const health = await checkDatabaseHealthSql();
       return res.json({
         status: 'ok',
-        backend: 'firebase',
-        database: 'firebase-primary',
+        backend: 'postgresql',
+        database: 'postgresql',
         cloudSqlConnected: true,
-        engine: 'Firebase Auth & Cloud Firestore (+ Cloud SQL Legacy)',
-        app: 'Sistem Informasi Kas Warga & Server Desa Kotayasa',
+        engine: health.engine || 'PostgreSQL (Cloud SQL)',
+        app: 'Sistem Informasi Kas Warga & Administrasi RW 05 Kotayasa',
         revision: health.revision,
         lastUpdated: health.lastUpdated,
         totalWarga: health.totalWarga,
         totalAdminAccounts: health.totalAdminAccounts,
+        socketConnectedCount: realtime ? realtime.getConnectedCount() : 0,
         time: new Date().toISOString(),
       });
-    } catch {
-      return res.status(200).json({
-        status: 'ok',
-        backend: 'firebase',
-        database: 'firebase-primary',
+    } catch (err: any) {
+      return res.status(503).json({
+        status: 'error',
+        backend: 'postgresql',
+        database: 'postgresql',
         cloudSqlConnected: false,
-        engine: 'Firebase Auth & Cloud Firestore',
-        app: 'Sistem Informasi Kas Warga & Server Desa Kotayasa',
+        engine: 'PostgreSQL',
+        message: err?.message || 'Koneksi database PostgreSQL terputus.',
         time: new Date().toISOString(),
       });
     }
   });
 
-  // One-time read-only export of legacy Cloud SQL data (e.g. 50 KK) for migration into Cloud Firestore
-  app.get('/api/migration/cloudsql-snapshot', async (_req, res) => {
+  // Read-only Cloud SQL migration snapshot
+  app.get('/api/migration/cloudsql-snapshot', requireAuth, requireServerOnly, async (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
       const snap = await readCloudSqlMigrationSnapshot();
@@ -180,10 +239,7 @@ export function createApiApp() {
         ...info,
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal memuat info awal server.',
-      });
+      return sendErrorResponse(res, err, 'Gagal memuat info awal server.');
     }
   });
 
@@ -217,10 +273,30 @@ export function createApiApp() {
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Terjadi kesalahan saat autentikasi ke server.',
+      return sendErrorResponse(res, err, 'Terjadi kesalahan saat autentikasi ke server.');
+    }
+  });
+
+  // Google Sign-In ID Token exchange for Super Admin Server (RW 05)
+  app.post('/api/auth/firebase-google', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const idToken = String(req.body?.idToken || '').trim();
+      const result = await authenticateFirebaseGoogleSql(idToken);
+      if (!result.ok) {
+        return res.status(result.status).json({
+          success: false,
+          message: result.message,
+        });
+      }
+      return res.json({
+        success: true,
+        token: result.token,
+        user: result.user,
+        timestamp: new Date().toISOString(),
       });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal memverifikasi login Google Super Admin.');
     }
   });
 
@@ -245,7 +321,7 @@ export function createApiApp() {
     });
   });
 
-  // Lightweight revision check for mobile WebViews / browsers
+  // Lightweight revision check
   app.get('/api/sync-check', requireAuth, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
@@ -259,10 +335,23 @@ export function createApiApp() {
         changed: since !== info.revision,
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal memeriksa pembaruan server.',
+      return sendErrorResponse(res, err, 'Gagal memeriksa pembaruan server.');
+    }
+  });
+
+  // Delta sync endpoint on Socket.IO reconnect
+  app.get('/api/sync/delta', requireAuth, async (req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const sinceRevision = Number(req.query.sinceRevision || req.query.since || 0);
+      const delta = await getDeltaSinceRevisionSql(req.authUser!, sinceRevision);
+      return res.json({
+        success: true,
+        ...delta,
+        timestamp: new Date().toISOString(),
       });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal menyinkronkan pembaruan terbaru.');
     }
   });
 
@@ -305,7 +394,7 @@ export function createApiApp() {
     });
   });
 
-  // GET Full Database Snapshot (UU PDP role-filtered)
+  // GET Full Database Snapshot (role & RT isolated)
   app.get('/api/data', requireAuth, async (req: AuthRequest, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
@@ -317,31 +406,115 @@ export function createApiApp() {
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal mengambil data dari database server.',
-      });
+      return sendErrorResponse(res, err, 'Gagal mengambil data dari database server.');
     }
   });
 
-  // GET Admin accounts registry (Admin/Server only)
-  app.get('/api/admin-accounts', requireAuth, requireAdminOrServer, async (_req, res) => {
+  // GET Admin accounts registry (Admin gets own record; Server gets all)
+  app.get('/api/admin-accounts', requireAuth, requireAdminOrServer, async (req: AuthRequest, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
       const info = await getAdminAccountsSql();
+      const filteredAccounts =
+        req.authUser!.role === 'server'
+          ? info.adminAccounts
+          : info.adminAccounts.filter(
+              (a) => a.username.trim().toLowerCase() === req.authUser!.username.trim().toLowerCase()
+            );
       return res.json({
         success: true,
-        adminAccounts: info.adminAccounts,
+        adminAccounts: filteredAccounts,
         deletedAdminIds: info.deletedAdminIds,
         serverHasData: true,
         revision: info.revision,
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal mengambil akun admin.',
+      return sendErrorResponse(res, err, 'Gagal mengambil akun admin.');
+    }
+  });
+
+  // Server-only Admin Account Management (Create, Edit, Toggle Active, Delete)
+  app.post('/api/admin-accounts', requireAuth, requireServerOnly, async (req: AuthRequest, res) => {
+    try {
+      const account = req.body?.account || req.body;
+      if (!account || !account.username) {
+        return res.status(400).json({ success: false, message: 'Username akun Admin RT wajib diisi.' });
+      }
+      const saved = await upsertAdminAccountByServerSql(req.authUser!, account, {
+        expectedVersion: req.body?.expectedVersion,
       });
+      realtime?.emitAdminRegistryUpdate(saved.account.rw || '05', saved.revision);
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'admin_account',
+        action: 'upsert',
+        entityId: saved.account.id,
+        rtScope: `RT ${saved.account.rt} RW ${saved.account.rw}`,
+        payload: saved.account,
+        updatedAt: saved.account.updatedAt || new Date().toISOString(),
+      });
+      await broadcastSyncEvent('sync');
+      return res.json({
+        success: true,
+        account: saved.account,
+        revision: saved.revision,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal menyimpan akun Admin RT.');
+    }
+  });
+
+  app.put('/api/admin-accounts/:id', requireAuth, requireServerOnly, async (req: AuthRequest, res) => {
+    try {
+      const account = req.body?.account || req.body;
+      const saved = await upsertAdminAccountByServerSql(
+        req.authUser!,
+        { ...account, id: req.params.id },
+        { expectedVersion: req.body?.expectedVersion }
+      );
+      realtime?.emitAdminRegistryUpdate(saved.account.rw || '05', saved.revision);
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'admin_account',
+        action: 'upsert',
+        entityId: saved.account.id,
+        rtScope: `RT ${saved.account.rt} RW ${saved.account.rw}`,
+        payload: saved.account,
+        updatedAt: saved.account.updatedAt || new Date().toISOString(),
+      });
+      await broadcastSyncEvent('sync');
+      return res.json({
+        success: true,
+        account: saved.account,
+        revision: saved.revision,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal memperbarui akun Admin RT.');
+    }
+  });
+
+  app.delete('/api/admin-accounts/:id', requireAuth, requireServerOnly, async (req: AuthRequest, res) => {
+    try {
+      const result = await deleteAdminAccountByServerSql(req.authUser!, req.params.id);
+      realtime?.emitAdminRegistryUpdate('05', result.revision);
+      realtime?.emitDelta({
+        revision: result.revision,
+        entityType: 'admin_account',
+        action: 'delete',
+        entityId: req.params.id,
+        updatedAt: new Date().toISOString(),
+      });
+      await broadcastSyncEvent('sync');
+      return res.json({
+        success: true,
+        revision: result.revision,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal menghapus akun Admin RT.');
     }
   });
 
@@ -410,6 +583,8 @@ export function createApiApp() {
       };
 
       const token = await createSessionForAdminUserSql(adminAuthUser);
+      const scopedMerged = filterStateForUser(resSync.mergedData, adminAuthUser);
+      realtime?.emitAdminRegistryUpdate(resSync.account.rw || '05', resSync.mergedData.revision);
       await broadcastSyncEvent('sync');
 
       return res.json({
@@ -418,27 +593,38 @@ export function createApiApp() {
         account: resSync.account,
         token,
         user: adminAuthUser,
-        data: resSync.mergedData,
+        data: scopedMerged,
         revision: resSync.mergedData.revision,
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal menyinkronkan akun admin ke server.',
-      });
+      return sendErrorResponse(res, err, 'Gagal menyinkronkan akun admin ke server.');
     }
   });
 
-  // POST /api/data
+  // POST /api/data (Server only for hard reset / full restore; Admins cannot wipe other RTs)
   app.post('/api/data', requireAuth, requireAdminOrServer, async (req: AuthRequest, res) => {
     try {
       const payload = req.body;
       if (!payload) {
         return res.status(400).json({ success: false, message: 'Data kosong' });
       }
+      if (payload.isHardReset === true && req.authUser!.role !== 'server') {
+        return res.status(403).json({
+          success: false,
+          code: 'FORBIDDEN',
+          message: 'Reset total database hanya diperbolehkan untuk Super Admin Server RW 05.',
+        });
+      }
 
-      const mergedData = await mergeAndSaveFullStateSql(payload);
+      const mergedData = await mergeAndSaveFullStateSql(payload, { callerUser: req.authUser! });
+      const scoped = filterStateForUser(mergedData, req.authUser!);
+      realtime?.emitDelta({
+        revision: mergedData.revision,
+        entityType: 'snapshot',
+        action: 'sync',
+        updatedAt: mergedData.lastUpdated,
+      });
       await broadcastSyncEvent(payload.isHardReset === true ? 'reset' : 'sync');
 
       return res.json({
@@ -447,15 +633,12 @@ export function createApiApp() {
           payload.isHardReset === true
             ? 'Database server berhasil direset secara bersih'
             : 'Data berhasil disinkronisasi ke database server pusat',
-        data: mergedData,
+        data: scoped,
         revision: mergedData.revision,
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal menyimpan data ke database server.',
-      });
+      return sendErrorResponse(res, err, 'Gagal menyimpan data ke database server.');
     }
   });
 
@@ -471,25 +654,29 @@ export function createApiApp() {
           return res.status(400).json({ success: false, message: 'Payload migrasi tidak valid.' });
         }
         const safePayload = { ...payload, isHardReset: false };
-        const mergedData = await mergeAndSaveFullStateSql(safePayload);
+        const mergedData = await mergeAndSaveFullStateSql(safePayload, { callerUser: req.authUser! });
+        const scoped = filterStateForUser(mergedData, req.authUser!);
+        realtime?.emitDelta({
+          revision: mergedData.revision,
+          entityType: 'snapshot',
+          action: 'sync',
+          updatedAt: mergedData.lastUpdated,
+        });
         await broadcastSyncEvent('sync');
         return res.json({
           success: true,
           message: 'Data lokal perangkat berhasil dimigrasikan ke Database Server Pusat.',
-          data: mergedData,
+          data: scoped,
           revision: mergedData.revision,
           timestamp: new Date().toISOString(),
         });
       } catch (err: any) {
-        return res.status(getSqlErrorHttpStatus(err)).json({
-          success: false,
-          message: err?.message || 'Gagal memigrasikan data lokal ke server.',
-        });
+        return sendErrorResponse(res, err, 'Gagal memigrasikan data lokal ke server.');
       }
     }
   );
 
-  // GET /api/warga
+  // GET /api/warga (strictly RT/RW/Warga isolated)
   app.get('/api/warga', requireAuth, async (req: AuthRequest, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
@@ -503,10 +690,7 @@ export function createApiApp() {
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal mengambil data warga dari server.',
-      });
+      return sendErrorResponse(res, err, 'Gagal mengambil data warga dari server.');
     }
   });
 
@@ -525,6 +709,16 @@ export function createApiApp() {
           .status(404)
           .json({ success: false, message: 'Data warga tidak ditemukan di server.' });
       }
+      realtime?.emitDelta({
+        revision: updated.revision,
+        entityType: 'warga',
+        action: 'upsert',
+        entityId: updated.warga.id,
+        wargaId: updated.warga.id,
+        rtScope: `RT ${updated.warga.rt} RW ${updated.warga.rw || '05'}`,
+        payload: updated.warga,
+        updatedAt: updated.warga.updatedAt || new Date().toISOString(),
+      });
       await broadcastSyncEvent('sync');
       return res.json({
         success: true,
@@ -532,10 +726,7 @@ export function createApiApp() {
         revision: updated.revision,
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal memperbarui profil warga.',
-      });
+      return sendErrorResponse(res, err, 'Gagal memperbarui profil warga.');
     }
   });
 
@@ -549,7 +740,21 @@ export function createApiApp() {
           message: 'Nama kepala keluarga dan Nomor KK wajib diisi.',
         });
       }
-      const saved = await upsertWargaSql(incoming);
+      const saved = await upsertWargaSql(req.authUser!, incoming, {
+        clientMutationId: req.body?.clientMutationId,
+        expectedVersion: req.body?.expectedVersion,
+      });
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'warga',
+        action: 'upsert',
+        entityId: saved.warga.id,
+        wargaId: saved.warga.id,
+        rtScope: `RT ${saved.warga.rt} RW ${saved.warga.rw || '05'}`,
+        payload: saved.warga,
+        updatedAt: saved.warga.updatedAt || new Date().toISOString(),
+      });
+      await dispatchRealtimeAndPush(saved.notification);
       await broadcastSyncEvent('sync');
       return res.json({
         success: true,
@@ -559,10 +764,7 @@ export function createApiApp() {
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal menyimpan data warga ke database server.',
-      });
+      return sendErrorResponse(res, err, 'Gagal menyimpan data warga ke database server.');
     }
   });
 
@@ -573,7 +775,25 @@ export function createApiApp() {
       if (!incoming || !incoming.nama) {
         return res.status(400).json({ success: false, message: 'Data warga tidak lengkap.' });
       }
-      const saved = await upsertWargaSql({ ...incoming, id: req.params.id });
+      const saved = await upsertWargaSql(
+        req.authUser!,
+        { ...incoming, id: req.params.id },
+        {
+          clientMutationId: req.body?.clientMutationId,
+          expectedVersion: req.body?.expectedVersion ?? incoming.version,
+        }
+      );
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'warga',
+        action: 'upsert',
+        entityId: saved.warga.id,
+        wargaId: saved.warga.id,
+        rtScope: `RT ${saved.warga.rt} RW ${saved.warga.rw || '05'}`,
+        payload: saved.warga,
+        updatedAt: saved.warga.updatedAt || new Date().toISOString(),
+      });
+      await dispatchRealtimeAndPush(saved.notification);
       await broadcastSyncEvent('sync');
       return res.json({
         success: true,
@@ -583,12 +803,66 @@ export function createApiApp() {
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal memperbarui data warga di server.',
-      });
+      return sendErrorResponse(res, err, 'Gagal memperbarui data warga di server.');
     }
   });
+
+  // Atomic Upgrade KK endpoint
+  app.post(
+    '/api/warga/:id/upgrade-kk',
+    requireAuth,
+    requireAdminOrServer,
+    async (req: AuthRequest, res) => {
+      try {
+        const updatedWarga = req.body?.updatedWarga;
+        const historyRecord = req.body?.historyRecord;
+        if (!updatedWarga || !historyRecord || !updatedWarga.nama || !updatedWarga.noKK) {
+          return res.status(400).json({
+            success: false,
+            message: 'Data Upgrade KK (Kepala Keluarga, Nomor KK baru, dan riwayat) wajib lengkap.',
+          });
+        }
+        const result = await upgradeWargaKKTx(req.authUser!, {
+          wargaId: req.params.id,
+          updatedWarga,
+          historyRecord,
+          oldNoKK: req.body?.oldNoKK,
+          oldKepalaNama: req.body?.oldKepalaNama,
+          catatSantunanKematian: Boolean(req.body?.catatSantunanKematian),
+          nominalSantunanKematian: req.body?.nominalSantunanKematian,
+          expectedVersion: req.body?.expectedVersion ?? updatedWarga.version,
+          clientMutationId: req.body?.clientMutationId,
+        });
+
+        realtime?.emitDelta({
+          revision: result.revision,
+          entityType: 'warga',
+          action: 'upgrade_kk',
+          entityId: result.warga.id,
+          wargaId: result.warga.id,
+          rtScope: `RT ${result.warga.rt} RW ${result.warga.rw || '05'}`,
+          payload: {
+            warga: result.warga,
+            updatedTransactions: result.updatedTransactions,
+            createdTransactions: result.createdTransactions,
+            updatedBantuan: result.updatedBantuan,
+          },
+          updatedAt: result.warga.updatedAt || new Date().toISOString(),
+        });
+        await dispatchRealtimeAndPush(result.notification);
+        await broadcastSyncEvent('sync');
+
+        return res.json({
+          success: true,
+          message: `Upgrade KK ${result.warga.nama} berhasil disimpan secara atomik ke server.`,
+          ...result,
+          timestamp: new Date().toISOString(),
+        });
+      } catch (err: any) {
+        return sendErrorResponse(res, err, 'Gagal memproses Upgrade KK di server.');
+      }
+    }
+  );
 
   // POST /api/warga/bulk
   app.post('/api/warga/bulk', requireAuth, requireAdminOrServer, async (req: AuthRequest, res) => {
@@ -598,12 +872,24 @@ export function createApiApp() {
       const mergeExisting = Boolean(req.body?.mergeExisting ?? true);
       const tahunAktif = Number(req.body?.tahunAktif) || 2026;
 
-      const result = await bulkImportWargaBantuanSql({
+      const result = await bulkImportWargaBantuanSql(req.authUser!, {
         wargaList,
         bantuanList,
         mergeExisting,
         tahunAktif,
+        clientMutationId: req.body?.clientMutationId,
       });
+
+      const userScope = extractUserRtRw(req.authUser!);
+      realtime?.emitDelta({
+        revision: result.revision,
+        entityType: 'snapshot',
+        action: 'bulk_import',
+        rtScope: req.authUser!.role === 'admin' ? `RT ${userScope.rt} RW ${userScope.rw}` : undefined,
+        targetRts: req.authUser!.role === 'admin' ? [userScope.rt] : ['SEMUA'],
+        updatedAt: new Date().toISOString(),
+      });
+      await dispatchRealtimeAndPush(result.notification);
       await broadcastSyncEvent('sync');
       return res.json({
         success: true,
@@ -611,17 +897,33 @@ export function createApiApp() {
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal mengimpor data Excel ke database server.',
-      });
+      return sendErrorResponse(res, err, 'Gagal mengimpor data Excel ke database server.');
     }
   });
 
   // DELETE /api/warga/:id
   app.delete('/api/warga/:id', requireAuth, requireAdminOrServer, async (req: AuthRequest, res) => {
     try {
-      const result = await deleteWargaSql(req.params.id);
+      const expectedVersion =
+        req.body?.expectedVersion !== undefined
+          ? Number(req.body.expectedVersion)
+          : req.query.expectedVersion !== undefined
+          ? Number(req.query.expectedVersion)
+          : undefined;
+      const result = await deleteWargaSql(req.authUser!, req.params.id, {
+        expectedVersion: Number.isFinite(expectedVersion) ? expectedVersion : undefined,
+        clientMutationId: req.body?.clientMutationId,
+      });
+      realtime?.emitDelta({
+        revision: result.revision,
+        entityType: 'warga',
+        action: 'delete',
+        entityId: req.params.id,
+        wargaId: req.params.id,
+        rtScope: result.deletedRt ? `RT ${result.deletedRt} RW 05` : undefined,
+        updatedAt: new Date().toISOString(),
+      });
+      await dispatchRealtimeAndPush(result.notification);
       await broadcastSyncEvent('sync');
       return res.json({
         success: true,
@@ -631,10 +933,7 @@ export function createApiApp() {
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
-      return res.status(getSqlErrorHttpStatus(err)).json({
-        success: false,
-        message: err?.message || 'Gagal menghapus data warga dari database server.',
-      });
+      return sendErrorResponse(res, err, 'Gagal menghapus data warga dari database server.');
     }
   });
 
@@ -645,13 +944,65 @@ export function createApiApp() {
       if (!txItem || !txItem.id) {
         return res.status(400).json({ success: false, message: 'Data transaksi tidak valid.' });
       }
-      const revision = await upsertTransactionSql(txItem);
+      const saved = await upsertTransactionSql(req.authUser!, txItem, {
+        clientMutationId: req.body?.clientMutationId,
+        expectedVersion: req.body?.expectedVersion,
+      });
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'transaction',
+        action: 'upsert',
+        entityId: saved.transaction.id,
+        rtScope: saved.transaction.rtScope,
+        payload: saved.transaction,
+        updatedAt: saved.transaction.updatedAt || new Date().toISOString(),
+      });
+      await dispatchRealtimeAndPush(saved.notification);
       await broadcastSyncEvent('sync');
-      return res.json({ success: true, revision, timestamp: new Date().toISOString() });
+      return res.json({
+        success: true,
+        transaction: saved.transaction,
+        revision: saved.revision,
+        timestamp: new Date().toISOString(),
+      });
     } catch (err: any) {
-      return res
-        .status(getSqlErrorHttpStatus(err))
-        .json({ success: false, message: err?.message || 'Gagal menyimpan transaksi kas.' });
+      return sendErrorResponse(res, err, 'Gagal menyimpan transaksi kas.');
+    }
+  });
+
+  app.put('/api/transactions/:id', requireAuth, requireAdminOrServer, async (req: AuthRequest, res) => {
+    try {
+      const txItem = req.body?.transaction || req.body;
+      if (!txItem) {
+        return res.status(400).json({ success: false, message: 'Data transaksi tidak valid.' });
+      }
+      const saved = await upsertTransactionSql(
+        req.authUser!,
+        { ...txItem, id: req.params.id },
+        {
+          clientMutationId: req.body?.clientMutationId,
+          expectedVersion: req.body?.expectedVersion ?? txItem.version,
+        }
+      );
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'transaction',
+        action: 'upsert',
+        entityId: saved.transaction.id,
+        rtScope: saved.transaction.rtScope,
+        payload: saved.transaction,
+        updatedAt: saved.transaction.updatedAt || new Date().toISOString(),
+      });
+      await dispatchRealtimeAndPush(saved.notification);
+      await broadcastSyncEvent('sync');
+      return res.json({
+        success: true,
+        transaction: saved.transaction,
+        revision: saved.revision,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal memperbarui transaksi kas.');
     }
   });
 
@@ -661,31 +1012,99 @@ export function createApiApp() {
     requireAdminOrServer,
     async (req: AuthRequest, res) => {
       try {
-        const revision = await deleteTransactionSql(req.params.id);
+        const result = await deleteTransactionSql(req.authUser!, req.params.id, {
+          expectedVersion: req.body?.expectedVersion,
+        });
+        realtime?.emitDelta({
+          revision: result.revision,
+          entityType: 'transaction',
+          action: 'delete',
+          entityId: req.params.id,
+          rtScope: result.rtScope,
+          updatedAt: new Date().toISOString(),
+        });
         await broadcastSyncEvent('sync');
-        return res.json({ success: true, revision });
+        return res.json({ success: true, revision: result.revision });
       } catch (err: any) {
-        return res
-          .status(getSqlErrorHttpStatus(err))
-          .json({ success: false, message: err?.message || 'Gagal menghapus transaksi.' });
+        return sendErrorResponse(res, err, 'Gagal menghapus transaksi.');
       }
     }
   );
 
-  // Pengumuman CRUD
+  // Pengumuman CRUD (strictly RT-targeted)
   app.post('/api/pengumuman', requireAuth, requireAdminOrServer, async (req: AuthRequest, res) => {
     try {
       const item = req.body?.pengumuman || req.body;
       if (!item || !item.id || !item.judul) {
         return res.status(400).json({ success: false, message: 'Data pengumuman tidak lengkap.' });
       }
-      const revision = await upsertPengumumanSql(item);
+      const saved = await upsertPengumumanSql(req.authUser!, item, {
+        clientMutationId: req.body?.clientMutationId,
+        expectedVersion: req.body?.expectedVersion,
+      });
+      const targetRts = normalizeTargetRts(saved.pengumuman.targetRts, saved.pengumuman.rtScope);
+      realtime?.emitAnnouncement({
+        rwId: saved.pengumuman.senderRw || '05',
+        targetRts,
+        action: 'upsert',
+        announcementId: saved.pengumuman.id,
+        revision: saved.revision,
+        announcement: saved.pengumuman,
+      });
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'pengumuman',
+        action: 'upsert',
+        entityId: saved.pengumuman.id,
+        targetRts,
+        payload: saved.pengumuman,
+        updatedAt: saved.pengumuman.updatedAt || new Date().toISOString(),
+      });
+      await dispatchRealtimeAndPush(saved.notification);
       await broadcastSyncEvent('sync');
-      return res.json({ success: true, revision });
+      return res.json({ success: true, pengumuman: saved.pengumuman, revision: saved.revision });
     } catch (err: any) {
-      return res
-        .status(getSqlErrorHttpStatus(err))
-        .json({ success: false, message: err?.message || 'Gagal menyimpan pengumuman.' });
+      return sendErrorResponse(res, err, 'Gagal menyimpan pengumuman.');
+    }
+  });
+
+  app.put('/api/pengumuman/:id', requireAuth, requireAdminOrServer, async (req: AuthRequest, res) => {
+    try {
+      const item = req.body?.pengumuman || req.body;
+      if (!item || !item.judul) {
+        return res.status(400).json({ success: false, message: 'Data pengumuman tidak lengkap.' });
+      }
+      const saved = await upsertPengumumanSql(
+        req.authUser!,
+        { ...item, id: req.params.id },
+        {
+          clientMutationId: req.body?.clientMutationId,
+          expectedVersion: req.body?.expectedVersion ?? item.version,
+        }
+      );
+      const targetRts = normalizeTargetRts(saved.pengumuman.targetRts, saved.pengumuman.rtScope);
+      realtime?.emitAnnouncement({
+        rwId: saved.pengumuman.senderRw || '05',
+        targetRts,
+        action: 'upsert',
+        announcementId: saved.pengumuman.id,
+        revision: saved.revision,
+        announcement: saved.pengumuman,
+      });
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'pengumuman',
+        action: 'upsert',
+        entityId: saved.pengumuman.id,
+        targetRts,
+        payload: saved.pengumuman,
+        updatedAt: saved.pengumuman.updatedAt || new Date().toISOString(),
+      });
+      await dispatchRealtimeAndPush(saved.notification);
+      await broadcastSyncEvent('sync');
+      return res.json({ success: true, pengumuman: saved.pengumuman, revision: saved.revision });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal memperbarui pengumuman.');
     }
   });
 
@@ -695,13 +1114,26 @@ export function createApiApp() {
     requireAdminOrServer,
     async (req: AuthRequest, res) => {
       try {
-        const revision = await deletePengumumanSql(req.params.id);
+        const result = await deletePengumumanSql(req.authUser!, req.params.id);
+        realtime?.emitAnnouncement({
+          rwId: '05',
+          targetRts: result.targetRts,
+          action: 'delete',
+          announcementId: req.params.id,
+          revision: result.revision,
+        });
+        realtime?.emitDelta({
+          revision: result.revision,
+          entityType: 'pengumuman',
+          action: 'delete',
+          entityId: req.params.id,
+          targetRts: result.targetRts,
+          updatedAt: new Date().toISOString(),
+        });
         await broadcastSyncEvent('sync');
-        return res.json({ success: true, revision });
+        return res.json({ success: true, revision: result.revision });
       } catch (err: any) {
-        return res
-          .status(getSqlErrorHttpStatus(err))
-          .json({ success: false, message: err?.message || 'Gagal menghapus pengumuman.' });
+        return sendErrorResponse(res, err, 'Gagal menghapus pengumuman.');
       }
     }
   );
@@ -713,13 +1145,46 @@ export function createApiApp() {
       if (!item || !item.id) {
         return res.status(400).json({ success: false, message: 'Data bantuan tidak valid.' });
       }
-      const revision = await upsertBantuanSql(item);
+      const saved = await upsertBantuanSql(req.authUser!, item, {
+        expectedVersion: req.body?.expectedVersion,
+      });
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'bantuan',
+        action: 'upsert',
+        entityId: saved.bantuan.id,
+        rtScope: saved.bantuan.rtScope,
+        payload: saved.bantuan,
+        updatedAt: saved.bantuan.updatedAt || new Date().toISOString(),
+      });
       await broadcastSyncEvent('sync');
-      return res.json({ success: true, revision });
+      return res.json({ success: true, bantuan: saved.bantuan, revision: saved.revision });
     } catch (err: any) {
-      return res
-        .status(getSqlErrorHttpStatus(err))
-        .json({ success: false, message: err?.message || 'Gagal menyimpan data bantuan.' });
+      return sendErrorResponse(res, err, 'Gagal menyimpan data bantuan.');
+    }
+  });
+
+  app.put('/api/bantuan/:id', requireAuth, requireAdminOrServer, async (req: AuthRequest, res) => {
+    try {
+      const item = req.body?.bantuan || req.body;
+      const saved = await upsertBantuanSql(
+        req.authUser!,
+        { ...item, id: req.params.id },
+        { expectedVersion: req.body?.expectedVersion ?? item?.version }
+      );
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'bantuan',
+        action: 'upsert',
+        entityId: saved.bantuan.id,
+        rtScope: saved.bantuan.rtScope,
+        payload: saved.bantuan,
+        updatedAt: saved.bantuan.updatedAt || new Date().toISOString(),
+      });
+      await broadcastSyncEvent('sync');
+      return res.json({ success: true, bantuan: saved.bantuan, revision: saved.revision });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal memperbarui data bantuan.');
     }
   });
 
@@ -729,13 +1194,19 @@ export function createApiApp() {
     requireAdminOrServer,
     async (req: AuthRequest, res) => {
       try {
-        const revision = await deleteBantuanSql(req.params.id);
+        const result = await deleteBantuanSql(req.authUser!, req.params.id);
+        realtime?.emitDelta({
+          revision: result.revision,
+          entityType: 'bantuan',
+          action: 'delete',
+          entityId: req.params.id,
+          rtScope: result.rtScope,
+          updatedAt: new Date().toISOString(),
+        });
         await broadcastSyncEvent('sync');
-        return res.json({ success: true, revision });
+        return res.json({ success: true, revision: result.revision });
       } catch (err: any) {
-        return res
-          .status(getSqlErrorHttpStatus(err))
-          .json({ success: false, message: err?.message || 'Gagal menghapus data bantuan.' });
+        return sendErrorResponse(res, err, 'Gagal menghapus data bantuan.');
       }
     }
   );
@@ -747,13 +1218,20 @@ export function createApiApp() {
       if (!item || !item.id || !item.judul) {
         return res.status(400).json({ success: false, message: 'Data dokumen tidak lengkap.' });
       }
-      const revision = await upsertDokumenSql(item);
+      const saved = await upsertDokumenSql(req.authUser!, item);
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'dokumen',
+        action: 'upsert',
+        entityId: saved.dokumen.id,
+        rtScope: saved.dokumen.rtScope,
+        payload: saved.dokumen,
+        updatedAt: saved.dokumen.updatedAt || new Date().toISOString(),
+      });
       await broadcastSyncEvent('sync');
-      return res.json({ success: true, revision });
+      return res.json({ success: true, dokumen: saved.dokumen, revision: saved.revision });
     } catch (err: any) {
-      return res
-        .status(getSqlErrorHttpStatus(err))
-        .json({ success: false, message: err?.message || 'Gagal menyimpan dokumen.' });
+      return sendErrorResponse(res, err, 'Gagal menyimpan dokumen.');
     }
   });
 
@@ -763,13 +1241,19 @@ export function createApiApp() {
     requireAdminOrServer,
     async (req: AuthRequest, res) => {
       try {
-        const revision = await deleteDokumenSql(req.params.id);
+        const result = await deleteDokumenSql(req.authUser!, req.params.id);
+        realtime?.emitDelta({
+          revision: result.revision,
+          entityType: 'dokumen',
+          action: 'delete',
+          entityId: req.params.id,
+          rtScope: result.rtScope,
+          updatedAt: new Date().toISOString(),
+        });
         await broadcastSyncEvent('sync');
-        return res.json({ success: true, revision });
+        return res.json({ success: true, revision: result.revision });
       } catch (err: any) {
-        return res
-          .status(getSqlErrorHttpStatus(err))
-          .json({ success: false, message: err?.message || 'Gagal menghapus dokumen.' });
+        return sendErrorResponse(res, err, 'Gagal menghapus dokumen.');
       }
     }
   );
@@ -787,23 +1271,32 @@ export function createApiApp() {
             .status(400)
             .json({ success: false, message: 'Data laporan bulanan tidak valid.' });
         }
-        const revision = await upsertLaporanSql(report);
+        const saved = await upsertLaporanSql(req.authUser!, report);
+        realtime?.emitDelta({
+          revision: saved.revision,
+          entityType: 'laporan',
+          action: 'upsert',
+          entityId: saved.laporan.id,
+          rtScope: `RT ${saved.laporan.rt} RW ${saved.laporan.rw}`,
+          payload: saved.laporan,
+          updatedAt: saved.laporan.updatedAt || new Date().toISOString(),
+        });
+        await dispatchRealtimeAndPush(saved.notification);
         await broadcastSyncEvent('sync');
         return res.json({
           success: true,
-          message: `Laporan bulanan ${report.rt || 'RT'} berhasil diterima server desa.`,
-          revision,
+          message: `Laporan bulanan RT ${saved.laporan.rt} berhasil diterima server desa.`,
+          laporan: saved.laporan,
+          revision: saved.revision,
           timestamp: new Date().toISOString(),
         });
       } catch (err: any) {
-        return res
-          .status(getSqlErrorHttpStatus(err))
-          .json({ success: false, message: err?.message || 'Gagal menyimpan laporan bulanan.' });
+        return sendErrorResponse(res, err, 'Gagal menyimpan laporan bulanan.');
       }
     }
   );
 
-  // Settings Update
+  // Settings Update (Per-RT isolated)
   app.post('/api/settings', requireAuth, requireAdminOrServer, async (req: AuthRequest, res) => {
     try {
       const settings = req.body?.pengaturanKas || req.body;
@@ -811,13 +1304,112 @@ export function createApiApp() {
       if (!settings) {
         return res.status(400).json({ success: false, message: 'Pengaturan tidak boleh kosong.' });
       }
-      const revision = await updateSettingsSql(settings, tahunAktif);
+      const saved = await updateSettingsSql(req.authUser!, settings, tahunAktif, {
+        expectedVersion: req.body?.expectedVersion ?? settings.version,
+      });
+      realtime?.emitDelta({
+        revision: saved.revision,
+        entityType: 'settings',
+        action: 'upsert',
+        targetRts: [saved.targetRt],
+        rtScope: `RT ${saved.targetRt} RW 05`,
+        payload: saved.settings,
+        updatedAt: saved.settings.updatedAt || new Date().toISOString(),
+      });
+      await dispatchRealtimeAndPush(saved.notification);
       await broadcastSyncEvent('sync');
-      return res.json({ success: true, revision });
+      return res.json({
+        success: true,
+        pengaturanKas: saved.settings,
+        revision: saved.revision,
+      });
     } catch (err: any) {
-      return res
-        .status(getSqlErrorHttpStatus(err))
-        .json({ success: false, message: err?.message || 'Gagal menyimpan pengaturan.' });
+      return sendErrorResponse(res, err, 'Gagal menyimpan pengaturan.');
+    }
+  });
+
+  // Notification Center Endpoints
+  app.get('/api/notifications', requireAuth, async (req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const limit = Number(req.query.limit) || 60;
+      const result = await getNotificationsForUserSql(req.authUser!, limit);
+      return res.json({ success: true, ...result });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal memuat notifikasi.');
+    }
+  });
+
+  app.post('/api/notifications/:id/read', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      await markNotificationReadSql(req.authUser!, req.params.id);
+      return res.json({ success: true });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal menandai notifikasi dibaca.');
+    }
+  });
+
+  app.post('/api/notifications/read-all', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const count = await markAllNotificationsReadSql(req.authUser!);
+      return res.json({ success: true, markedCount: count });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal menandai semua notifikasi dibaca.');
+    }
+  });
+
+  // Web Push Endpoints
+  app.get('/api/push/vapid-public-key', async (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const publicKey = await getVapidPublicKey();
+      return res.json({ success: true, publicKey });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal memuat VAPID public key.');
+    }
+  });
+
+  app.post('/api/push/subscribe', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const sub = req.body?.subscription || req.body;
+      await savePushSubscriptionSql(req.authUser!, sub, req.headers['user-agent']);
+      return res.json({ success: true, message: 'Notifikasi perangkat berhasil diaktifkan.' });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal mendaftarkan notifikasi perangkat.');
+    }
+  });
+
+  app.post('/api/push/unsubscribe', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint : undefined;
+      await removePushSubscriptionSql(req.authUser!, endpoint);
+      return res.json({ success: true, message: 'Notifikasi perangkat dinonaktifkan.' });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal menonaktifkan notifikasi perangkat.');
+    }
+  });
+
+  // Audit Logs & Backup Export
+  app.get('/api/audit-logs', requireAuth, requireAdminOrServer, async (req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const limit = Number(req.query.limit) || 100;
+      const logs = await getAuditLogsSql(req.authUser!, limit);
+      return res.json({ success: true, logs });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal mengambil riwayat audit.');
+    }
+  });
+
+  app.get('/api/backup/export', requireAuth, requireAdminOrServer, async (req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const backup = await getBackupExportSql(req.authUser!);
+      const filename = `backup-kaswarga-${req.authUser!.role}-${new Date().toISOString().slice(0, 10)}.json`;
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.json({ success: true, ...backup });
+    } catch (err: any) {
+      return sendErrorResponse(res, err, 'Gagal mengekspor cadangan database.');
     }
   });
 
