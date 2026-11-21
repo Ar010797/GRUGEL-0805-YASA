@@ -159,6 +159,8 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
       nama: formNama,
       username: formUsername,
       passwordHash: formPassword,
+      role: 'admin_rt',
+      rtId: `RT${formRT.padStart(2, '0')}`,
       rt: formRT,
       rw: formRW,
       kontak: formKontak || '0812-0000-0000',
@@ -732,30 +734,30 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-slate-900">
-                    Database Server Pusat (PostgreSQL) &amp; Socket.IO Real-Time
+                    Sinkronisasi Cloud Otomatis (MQTT WSS) &amp; Real-Time Multi-HP
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Seluruh perangkat (PC/Laptop, Android, iPhone/iOS, Web) terhubung ke satu database PostgreSQL pusat yang sama secara real-time
+                    Seluruh perangkat (Android, iPhone/iOS, PC/Laptop) otomatis terhubung ke topik cloud terenkripsi WSS secara real-time tanpa setup server
                   </p>
                 </div>
               </div>
 
               <span
                 className={`inline-flex items-center gap-1.5 self-start sm:self-center rounded-full px-3 py-1 text-[11px] font-bold border ${
-                  sseConnected || serverConnected
-                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                    : 'bg-rose-50 text-rose-800 border-rose-200'
+                  !serverConnected
+                    ? 'bg-rose-50 text-rose-700 border-rose-200'
+                    : sseConnected && !cloudSyncBusy
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                    : 'bg-amber-50 text-amber-700 border-amber-200'
                 }`}
               >
                 <Wifi size={12} />
                 <span>
-                  {cloudSyncBusy
-                    ? 'Menunggu Sinkronisasi...'
-                    : !serverConnected
-                    ? 'Gagal Sinkronisasi'
-                    : sseConnected
-                    ? 'Terhubung'
-                    : 'Menunggu Sinkronisasi...'}
+                  {!serverConnected
+                    ? 'Mode Offline'
+                    : sseConnected && !cloudSyncBusy
+                    ? 'Terhubung & Tersinkron'
+                    : 'Menyinkronkan...'}
                 </span>
               </span>
             </div>
@@ -764,7 +766,7 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                   <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-                    Status Koneksi &amp; Sinkronisasi Server Pusat
+                    Status Koneksi &amp; Sinkronisasi Cloud RW 05
                   </span>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
                     <span
@@ -773,23 +775,23 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
                       }`}
                     >
                       {serverConnected
-                        ? 'Terhubung ke Database Server Pusat RW 05'
-                        : 'Gagal Terhubung ke Server Pusat'}
+                        ? 'Terhubung ke Cloud Broker RW 05 (EMQX / HiveMQ)'
+                        : 'Mode Offline — Cache & Antrean Lokal Aktif'}
                     </span>
                     <span
                       className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
                         !serverConnected
-                          ? 'bg-rose-100 text-rose-800'
+                          ? 'bg-rose-100 text-rose-700'
                           : sseConnected && !cloudSyncBusy
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : 'bg-amber-100 text-amber-800'
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-amber-100 text-amber-700'
                       }`}
                     >
                       {!serverConnected
-                        ? 'Gagal'
+                        ? 'Mode Offline'
                         : sseConnected && !cloudSyncBusy
-                        ? 'Terhubung Real-Time'
-                        : 'Menunggu Sinkronisasi'}
+                        ? 'Terhubung & Tersinkron'
+                        : 'Menyinkronkan...'}
                     </span>
                   </div>
                 </div>
@@ -826,13 +828,13 @@ export const ServerKontrolView: React.FC<ServerKontrolViewProps> = ({
               <div>
                 <h3 className="text-sm font-bold text-slate-900">Penyimpanan Terpusat &amp; Cadangan JSON</h3>
                 <p className="text-xs text-slate-500">
-                  Data kas, iuran, pengumuman, bansos, dan warga tersimpan permanen di Server Pusat (PostgreSQL)
+                  Data kas, iuran, pengumuman, bansos, akun pengurus, dan warga tersinkronisasi otomatis lintas perangkat
                 </p>
               </div>
             </div>
 
             <p className="text-xs text-slate-600 leading-relaxed">
-              Setiap perubahan dari HP Admin, akun Warga, maupun Super Admin RW diproses atomik di <strong>Server Pusat</strong> dan disinkronkan real-time (Socket.IO) ke semua perangkat yang berhak. Data tetap utuh saat logout, ganti perangkat, atau buka ulang aplikasi.
+              Setiap perubahan dari HP Admin, akun Warga, maupun Super Admin RW langsung diterbitkan ke cloud broker (<strong>MQTT WSS</strong>) dengan pesan tertahan (<em>retained</em>) sehingga perangkat aktif maupun perangkat yang baru dibuka otomatis menerima data terbaru.
             </p>
 
             <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">

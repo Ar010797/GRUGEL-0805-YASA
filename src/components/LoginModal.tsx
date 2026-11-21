@@ -23,14 +23,11 @@ import { AuthUser, AdminRTAccount, PengaturanKas } from '../types';
 import { HouseLogo } from './HouseLogo';
 import {
   checkServerHealth,
-  clearLegacyLocalCache,
-  loginWithGoogleTokenOnServer,
   loginWithServer,
-  migrateLegacyLocalDataToServer,
-  readLegacyLocalCacheForMigration,
-  syncAdminAccountToServer,
   type ServerHealthDiagnostic,
 } from '../utils/cloudSync';
+import { mqttSync } from '../utils/mqttSync';
+import { normalizeRTCode, normalizeRWCode } from '../utils/rtFilter';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -83,14 +80,12 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [serverPassword, setServerPassword] = useState('');
   const [serverError, setServerError] = useState('');
   const [serverChecking, setServerChecking] = useState(false);
-  const [googleChecking, setGoogleChecking] = useState(false);
 
   // Admin form
   const [adminUsername, setAdminUsername] = useState('');
   const [adminPassword, setAdminPassword] = useState('');
   const [adminError, setAdminError] = useState('');
   const [adminChecking, setAdminChecking] = useState(false);
-  const [pendingSyncAdmin, setPendingSyncAdmin] = useState<AdminRTAccount | null>(null);
   const [showRegisterAdminBox, setShowRegisterAdminBox] = useState(false);
   const [regNama, setRegNama] = useState('');
   const [regRT, setRegRT] = useState(rtStr);
@@ -98,7 +93,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [regJabatan, setRegJabatan] = useState(`Ketua RT ${rtStr}`);
   const [regKontak, setRegKontak] = useState(pengaturanKas?.kontakKetuaRT?.telp || '');
   const [regPin, setRegPin] = useState('');
-  const [pendingSyncPin, setPendingSyncPin] = useState('');
   const [syncAccountBusy, setSyncAccountBusy] = useState(false);
   const [diagnosticResult, setDiagnosticResult] = useState<ServerHealthDiagnostic | null>(null);
 
@@ -115,7 +109,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Handle Server Submit via PostgreSQL Central Server
+  // Handle Server (Super Admin RW 05) Submit via MQTT Sync
   const handleServerSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setServerError('');
@@ -123,7 +117,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     const u = serverUsername.trim();
     const p = serverPassword.trim();
     if (!u || !p) {
-      setServerError('Username dan password Server harus diisi.');
+      setServerError('Username dan PIN / password Super Admin harus diisi.');
       return;
     }
 
@@ -135,7 +129,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         onClose();
       } else {
         setServerError(
-          res.message || 'Username atau password Server salah. Akses ini khusus Pengelola Server.'
+          res.message || 'Username atau PIN Super Admin salah. Gunakan akun adminrw05 (PIN: 123456).'
         );
       }
     } finally {
@@ -143,62 +137,55 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     }
   };
 
-  const handleGoogleServerSignIn = async () => {
-    setServerError('');
-    setGoogleChecking(true);
-    try {
-      const res = await loginWithGoogleTokenOnServer();
-      if (res.ok && res.user) {
-        onLoginSuccess(res.user);
-        onClose();
-      } else {
-        setServerError(res.message || 'Gagal masuk dengan Google.');
-      }
-    } finally {
-      setGoogleChecking(false);
-    }
-  };
-
   const handleSyncAndLoginAdmin = async (accountToSync: AdminRTAccount, pinCode?: string) => {
     setAdminError('');
     const cleanPin = (pinCode || '').trim();
-    if (!/^\d{6}$/.test(cleanPin)) {
-      setAdminError('PIN Keamanan Pengurus 6 digit wajib diisi (contoh awal: 123456).');
+    if (cleanPin !== '123456') {
+      setAdminError('PIN Keamanan Pengurus 6 digit wajib valid (kode keamanan awal: 123456).');
       return;
     }
 
     setSyncAccountBusy(true);
     try {
-      const legacyCache = readLegacyLocalCacheForMigration();
-      const res = await syncAdminAccountToServer({
-        account: accountToSync,
-        securityPin: cleanPin,
-        syncData: legacyCache || undefined,
+      const rtNorm = normalizeRTCode(accountToSync.rt) || rtStr;
+      const rwNorm = normalizeRWCode(accountToSync.rw, rwStr);
+      const newAcc: AdminRTAccount = {
+        ...accountToSync,
+        role: 'admin_rt',
+        rt: rtNorm,
+        rtId: `RT${rtNorm}`,
+        rw: rwNorm,
+        updatedAt: new Date().toISOString(),
+        updatedBy: accountToSync.username,
+        version: 1,
+      };
+      await mqttSync.mutate((draft, nowIso) => {
+        draft.accounts = [
+          ...draft.accounts.filter(
+            (a) => a.username.toLowerCase() !== newAcc.username.toLowerCase()
+          ),
+          { ...newAcc, updatedAt: nowIso },
+        ];
+        return ['accounts'];
       });
 
-      if (!res.ok || !res.user) {
-        setAdminError(res.message || 'Gagal mendaftarkan & menyinkronkan akun admin ke Server Pusat.');
+      const loginRes = await loginWithServer('admin', newAcc.username, newAcc.passwordHash);
+      if (!loginRes.ok || !loginRes.user) {
+        setAdminError(loginRes.message || 'Gagal masuk setelah mendaftarkan akun.');
         return;
       }
-
-      if (legacyCache) {
-        await migrateLegacyLocalDataToServer(legacyCache).catch(() => {});
-        clearLegacyLocalCache();
-      }
-      setPendingSyncAdmin(null);
       setShowRegisterAdminBox(false);
-      onLoginSuccess(res.user);
+      onLoginSuccess(loginRes.user);
       onClose();
     } finally {
       setSyncAccountBusy(false);
     }
   };
 
-  // Handle Admin RT Submit via Central Server
+  // Handle Admin RT Submit via MQTT Sync (supports adminrt01..08 & adminrw05)
   const handleAdminSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAdminError('');
-    setPendingSyncAdmin(null);
 
     const u = adminUsername.trim();
     const p = adminPassword.trim();
@@ -208,7 +195,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       return;
     }
     if (!p) {
-      setAdminError('Silakan masukkan Password Admin RT Anda.');
+      setAdminError('Silakan masukkan PIN / Password Admin RT Anda.');
       return;
     }
 
@@ -221,24 +208,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         return;
       }
 
-      const legacyCache = readLegacyLocalCacheForMigration();
-      const legacyAdmins = Array.isArray(legacyCache?.adminAccounts) ? legacyCache.adminAccounts : [];
-      const matchedLegacy = legacyAdmins.find(
-        (acc) => acc.username?.trim().toLowerCase() === u.toLowerCase() && acc.passwordHash === p
-      );
-
-      if (matchedLegacy) {
-        setPendingSyncAdmin(matchedLegacy);
-        setShowRegisterAdminBox(false);
-        setAdminError(
-          `Akun Admin "${matchedLegacy.username}" ditemukan pada data lama perangkat ini. Masukkan PIN Pengurus dan klik "Daftarkan ke Server & Masuk" untuk memigrasikan akun & data ke Server Pusat.`
-        );
-        return;
-      }
-
       setAdminError(
         res.message ||
-          `Akun Admin "${u}" tidak ditemukan di Server Pusat. Periksa password atau daftarkan akun baru di bawah jika memiliki PIN Keamanan Pengurus.`
+          `Akun Admin "${u}" tidak ditemukan atau PIN salah. Akun awal: adminrt01–adminrt08 / adminrw05.`
       );
       setShowRegisterAdminBox(false);
     } finally {
@@ -246,7 +218,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     }
   };
 
-  // Handle Warga Submit via Central Server
+  // Handle Warga Submit via MQTT Sync
   const handleWargaSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setWargaError('');
@@ -333,10 +305,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   <Wifi size={9} />
                   <span>
                     {sseConnected
-                      ? 'Tersinkronisasi'
+                      ? 'Terhubung & Tersinkron'
                       : effectiveServerConnected
-                      ? 'Menghubungkan...'
-                      : 'Gagal Sinkronisasi'}
+                      ? 'Menyinkronkan...'
+                      : 'Mode Offline'}
                   </span>
                 </span>
               </span>
@@ -470,14 +442,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         value={serverUsername}
                         onChange={(e) => setServerUsername(e.target.value)}
                         className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 outline-hidden font-medium"
-                        placeholder="RW05GLEMPANG"
+                      placeholder="adminrw05"
                       />
                     </div>
                   </div>
 
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                      Password Server
+                      PIN / Password Super Admin
                     </label>
                     <div className="relative">
                       <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
@@ -489,7 +461,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         value={serverPassword}
                         onChange={(e) => setServerPassword(e.target.value)}
                         className="w-full rounded-xl border border-slate-200 pl-10 pr-10 py-2.5 text-sm text-slate-800 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 outline-hidden font-mono"
-                        placeholder="Password Server"
+                        placeholder="PIN Super Admin (awal: 123456)"
                       />
                       <button
                         type="button"
@@ -505,23 +477,12 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
                   <button
                     type="submit"
-                    disabled={serverChecking || googleChecking}
+                    disabled={serverChecking}
                     className="w-full rounded-xl bg-indigo-600 py-3 text-sm font-bold text-white shadow-md hover:bg-indigo-700 active:scale-95 transition-all cursor-pointer disabled:opacity-60"
                   >
                     {serverChecking
-                      ? 'Memverifikasi ke Server Pusat...'
-                      : 'Masuk Sebagai Server RW 05'}
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={serverChecking || googleChecking}
-                    onClick={handleGoogleServerSignIn}
-                    className="w-full rounded-xl border border-indigo-200 bg-indigo-50/70 py-2.5 text-xs font-bold text-indigo-800 hover:bg-indigo-100 active:scale-95 transition-all cursor-pointer disabled:opacity-60"
-                  >
-                    {googleChecking
-                      ? 'Menghubungkan Akun Google...'
-                      : 'Masuk dengan Akun Google Pemilik'}
+                      ? 'Memverifikasi Kredensial...'
+                      : 'Masuk Sebagai Super Admin RW 05'}
                   </button>
                 </form>
               ) : activeTab === 'admin' ? (
@@ -538,58 +499,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   </div>
 
                   {adminError && (
-                    <div
-                      className={`rounded-xl p-3 text-xs font-semibold border space-y-2.5 ${
-                        pendingSyncAdmin
-                          ? 'bg-amber-50 text-amber-900 border-amber-300'
-                          : 'bg-rose-50 text-rose-700 border-rose-200'
-                      }`}
-                    >
+                    <div className="rounded-xl p-3 text-xs font-semibold border space-y-2.5 bg-rose-50 text-rose-700 border-rose-200">
                       <div className="flex items-start gap-2">
                         <AlertCircle size={16} className="shrink-0 mt-0.5" />
                         <span className="min-w-0 break-words">{adminError}</span>
                       </div>
 
-                      {pendingSyncAdmin && (
-                        <div className="space-y-2 pt-1">
-                          <div>
-                            <label className="block text-[10px] font-bold text-amber-900 mb-1">
-                              PIN Keamanan Pengurus (6 Digit, Awal: 123456)
-                            </label>
-                            <input
-                              type="password"
-                              inputMode="numeric"
-                              maxLength={6}
-                              value={pendingSyncPin}
-                              onChange={(e) =>
-                                setPendingSyncPin(e.target.value.replace(/\D/g, ''))
-                              }
-                              placeholder="Masukkan 6 digit PIN (contoh: 123456)"
-                              className="w-full rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-xs font-mono text-slate-800"
-                            />
-                          </div>
-                          <button
-                            type="button"
-                            disabled={syncAccountBusy}
-                            onClick={() =>
-                              handleSyncAndLoginAdmin(
-                                pendingSyncAdmin,
-                                pendingSyncPin.trim() || undefined
-                              )
-                            }
-                            className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-[#0B5D3F] hover:bg-[#084831] py-2.5 px-3 text-xs font-bold text-white shadow-xs transition-all cursor-pointer disabled:opacity-60"
-                          >
-                            <CloudUpload size={14} />
-                              <span>
-                                {syncAccountBusy
-                                  ? 'Mendaftarkan Akun & Data ke Server...'
-                                  : 'Daftarkan ke Server & Masuk'}
-                              </span>
-                            </button>
-                          </div>
-                        )}
-
-                      {!pendingSyncAdmin && adminUsername.trim() && adminPassword.trim() && (
+                      {adminUsername.trim() && adminPassword.trim() && (
                         <div className="pt-1 border-t border-rose-200/70 flex flex-wrap items-center justify-between gap-2">
                           <button
                             type="button"
@@ -760,17 +676,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         value={adminUsername}
                         onChange={(e) => {
                           setAdminUsername(e.target.value);
-                          setPendingSyncAdmin(null);
                         }}
                         className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-medium"
-                        placeholder="Admin"
+                        placeholder="adminrt01 / adminrw05"
                       />
                     </div>
                   </div>
 
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                      Password Admin RT
+                      PIN / Password Admin RT
                     </label>
                     <div className="relative">
                       <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
@@ -782,10 +697,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         value={adminPassword}
                         onChange={(e) => {
                           setAdminPassword(e.target.value);
-                          setPendingSyncAdmin(null);
                         }}
                         className="w-full rounded-xl border border-slate-200 pl-10 pr-10 py-2.5 text-sm text-slate-800 focus:border-[#0B5D3F] focus:ring-1 focus:ring-[#0B5D3F] outline-hidden font-mono"
-                        placeholder={`rt${rtStr}rw${rwStr}`}
+                        placeholder="PIN 6 digit (contoh: 111111)"
                       />
                       <button
                         type="button"
@@ -798,7 +712,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       </button>
                     </div>
                     <p className="mt-1 text-[11px] text-slate-400">
-                      Akun diverifikasi langsung ke Database Server Pusat RW 05.
+                      Tersinkronisasi otomatis antarperangkat RW 05 secara real-time.
                     </p>
                   </div>
 
@@ -807,7 +721,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     disabled={adminChecking || syncAccountBusy}
                     className="w-full rounded-xl bg-[#0B5D3F] py-3 text-sm font-bold text-white shadow-md hover:bg-[#084831] active:scale-95 transition-all cursor-pointer disabled:opacity-60"
                   >
-                    {adminChecking ? 'Memeriksa Akun di Server...' : 'Masuk Sebagai Admin RT'}
+                    {adminChecking ? 'Memeriksa Akun...' : 'Masuk Sebagai Admin'}
                   </button>
                 </form>
               ) : (
@@ -936,10 +850,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 </p>
                 {diagnosticResult && (
                   <p className="text-[10px] text-emerald-700 break-all">
-                    Mesin Database: {diagnosticResult.engine || 'PostgreSQL (Cloud SQL)'}
-                    {typeof diagnosticResult.totalWarga === 'number'
-                      ? ` • ${diagnosticResult.totalWarga} KK terdaftar`
-                      : ''}
+                    Sinkronisasi Cloud: {diagnosticResult.databaseEngine || 'MQTT WSS Cloud Broker'}
                   </p>
                 )}
               </div>

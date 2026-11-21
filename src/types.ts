@@ -15,6 +15,7 @@ export interface Transaction {
   tahun?: number; // Tahun pembukuan (default: 2026)
   rtScope?: string; // Scope RT (misal 'RT 08')
   updatedAt?: string;
+  updatedBy?: string;
   version?: number;
 }
 
@@ -70,6 +71,7 @@ export interface Warga {
   pinLockedUntil?: number; // timestamp jika salah 3x
   riwayatPerubahanKK?: RiwayatPerubahanKK[];
   updatedAt?: string;
+  updatedBy?: string;
   version?: number;
 }
 
@@ -95,15 +97,18 @@ export interface AuthUser {
   wargaId?: string;
   isPinAuthenticated?: boolean;
   rtScope?: string; // 'Semua RT' untuk server, 'RT 08 RW 05' untuk admin RT
+  rtId?: string; // 'ALL' | 'RT01'..'RT08'
 }
 
 // Akun Admin RT yang dikelola oleh Server (Super Admin Desa)
 export interface AdminRTAccount {
   id: string;
   username: string;
-  passwordHash: string; // kata sandi login admin RT
+  passwordHash: string; // PIN / kata sandi login admin
   nama: string;
-  rt: string; // misal '08'
+  role?: 'super_admin' | 'admin_rt';
+  rtId?: string; // 'ALL' | 'RT01'..'RT08'
+  rt: string; // misal '08' atau 'ALL'
   rw: string; // misal '05'
   kontak: string;
   jabatan: string; // misal 'Ketua RT 08'
@@ -111,6 +116,7 @@ export interface AdminRTAccount {
   terakhirLogin?: string;
   terakhirSinkronisasi?: string;
   updatedAt?: string;
+  updatedBy?: string;
   version?: number;
 }
 
@@ -135,6 +141,7 @@ export interface PembaruanBulananRT {
   catatanKhusus?: string;
   statusVerifikasi: 'Diterima' | 'Menunggu Verifikasi' | 'Perlu Klarifikasi';
   updatedAt?: string;
+  updatedBy?: string;
   version?: number;
 }
 
@@ -160,6 +167,7 @@ export interface PengumumanRT {
   senderRw?: string;
   senderRole?: 'server' | 'admin';
   updatedAt?: string;
+  updatedBy?: string;
   version?: number;
 }
 
@@ -200,6 +208,7 @@ export interface PengaturanKas {
   // Profil RT & Pengaturan Kop Surat Resmi
   profilRT?: ProfilRT;
   updatedAt?: string;
+  updatedBy?: string;
   version?: number;
 }
 
@@ -217,6 +226,7 @@ export interface BantuanPemerintah {
   keterangan?: string;
   rtScope?: string;
   updatedAt?: string;
+  updatedBy?: string;
   version?: number;
 }
 
@@ -244,6 +254,7 @@ export interface DokumenPdfWarga {
   dataBase64?: string;
   rtScope?: string;
   updatedAt?: string;
+  updatedBy?: string;
   version?: number;
 }
 
@@ -254,6 +265,7 @@ export interface AppNotification {
   category:
     | 'pengumuman'
     | 'warga'
+    | 'bantuan'
     | 'kas'
     | 'iuran'
     | 'kematian'

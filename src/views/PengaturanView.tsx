@@ -22,9 +22,12 @@ import {
   Server,
   CloudUpload,
   RefreshCw,
+  Download,
+  Upload,
 } from 'lucide-react';
 import { PengaturanKas, AuthUser } from '../types';
 import { ConfirmationModal } from '../components/ConfirmationModal';
+import { parseBackupFile, type AppDatabaseSchema } from '../utils/cloudSync';
 
 interface PengaturanViewProps {
   pengaturanKas: PengaturanKas;
@@ -40,6 +43,8 @@ interface PengaturanViewProps {
   onOpenPrivacyPolicy: () => void;
   onResetEmpty: () => void;
   onLoadSample: () => void;
+  onDownloadBackup?: () => void;
+  onRestoreDatabase?: (db: AppDatabaseSchema) => Promise<void> | void;
   onBack: () => void;
 }
 
@@ -57,6 +62,8 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
   onOpenPrivacyPolicy,
   onResetEmpty,
   onLoadSample,
+  onDownloadBackup,
+  onRestoreDatabase,
   onBack,
 }) => {
   // Confirmation Modal State
@@ -1033,6 +1040,68 @@ export const PengaturanView: React.FC<PengaturanViewProps> = ({
               >
                 Baca Kebijakan Privasi Lengkap
               </button>
+
+              {(onDownloadBackup || onRestoreDatabase) && (
+                <div className="pt-3 border-t border-slate-100 space-y-2.5">
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-800">Cadangan &amp; Pemulihan Data (JSON)</h4>
+                    <p className="text-[11px] text-slate-400">
+                      Unduh salinan seluruh data atau pulihkan kembali dari file cadangan JSON.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {onDownloadBackup && (
+                      <button
+                        type="button"
+                        onClick={onDownloadBackup}
+                        className="flex items-center justify-center gap-2 rounded-xl bg-[#0B5D3F] px-4 py-2.5 text-xs font-bold text-white hover:bg-[#084831] shadow-xs transition-colors cursor-pointer"
+                      >
+                        <Download size={14} />
+                        <span>Unduh Cadangan Data (Backup JSON)</span>
+                      </button>
+                    )}
+                    {onRestoreDatabase && (
+                      <label className="flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 px-4 py-2.5 text-xs font-bold text-slate-700 transition-colors cursor-pointer">
+                        <Upload size={14} className="text-[#0B5D3F]" />
+                        <span>Pulihkan Data (Restore JSON)</span>
+                        <input
+                          type="file"
+                          accept=".json,application/json"
+                          className="hidden"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = '';
+                            if (!file) return;
+                            try {
+                              const parsed = await parseBackupFile(file);
+                              setConfirmDialog({
+                                isOpen: true,
+                                title: 'Pulihkan Data dari Cadangan JSON',
+                                message: `File berisi ${parsed.wargaList.length} data warga dan ${parsed.transactions.length} transaksi kas. Data akan digabungkan dan disinkronkan ke seluruh perangkat. Lanjutkan?`,
+                                targetName: file.name,
+                                variant: 'info',
+                                confirmText: 'Ya, Pulihkan Data',
+                                onConfirm: () => {
+                                  void onRestoreDatabase(parsed);
+                                },
+                              });
+                            } catch (err: any) {
+                              setConfirmDialog({
+                                isOpen: true,
+                                title: 'File Cadangan Tidak Valid',
+                                message: err?.message || 'Format file cadangan JSON tidak valid.',
+                                variant: 'danger',
+                                confirmText: 'Tutup',
+                                onConfirm: () => {},
+                              });
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {currentUser?.role === 'server' && (
                 <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">

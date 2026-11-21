@@ -1,14 +1,6 @@
-import {
-  fetchVapidPublicKeyFromServer,
-  subscribePushOnServer,
-  unsubscribePushOnServer,
-} from './cloudSync';
-
 export function isWebPushSupported(): boolean {
   if (typeof window === 'undefined') return false;
   return (
-    'serviceWorker' in navigator &&
-    'PushManager' in window &&
     'Notification' in window &&
     (window.isSecureContext ||
       window.location.hostname === 'localhost' ||
@@ -30,30 +22,14 @@ export function getNotificationPermissionState(): NotificationPermission | 'unsu
   return Notification.permission;
 }
 
-function urlBase64ToUint8Array(base64String: string): Uint8Array {
-  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
-  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const rawData = window.atob(base64);
-  const outputArray = new Uint8Array(rawData.length);
-  for (let i = 0; i < rawData.length; ++i) {
-    outputArray[i] = rawData.charCodeAt(i);
-  }
-  return outputArray;
-}
+const PUSH_LOCAL_PREF_KEY = 'kaswarga_browser_notif_enabled_v1';
 
-async function getSwRegistration(): Promise<ServiceWorkerRegistration | null> {
-  if (!('serviceWorker' in navigator)) return null;
-  const existing = await navigator.serviceWorker.getRegistration('/sw.js');
-  if (existing) return existing;
-  return await navigator.serviceWorker.register('/sw.js', { scope: '/' });
-}
-
-export async function getCurrentPushSubscription(): Promise<PushSubscription | null> {
+export async function getCurrentPushSubscription(): Promise<{ endpoint: string } | null> {
   if (!isWebPushSupported()) return null;
   try {
-    const reg = await navigator.serviceWorker.getRegistration('/sw.js');
-    if (!reg) return null;
-    return await reg.pushManager.getSubscription();
+    if (Notification.permission !== 'granted') return null;
+    const enabled = localStorage.getItem(PUSH_LOCAL_PREF_KEY) !== 'false';
+    return enabled ? { endpoint: 'mqtt-browser-notification' } : null;
   } catch {
     return null;
   }
@@ -67,7 +43,7 @@ export async function enableWebPushNotifications(): Promise<{
     return {
       ok: false,
       message:
-        'Browser ini belum mendukung Web Push. Di iPhone/iOS, buka lewat Safari lalu pilih "Tambah ke Layar Utama (Add to Home Screen)".',
+        'Browser ini belum mendukung notifikasi perangkat. Di iPhone/iOS, buka lewat Safari lalu pilih "Tambah ke Layar Utama (Add to Home Screen)".',
     };
   }
 
@@ -82,36 +58,10 @@ export async function enableWebPushNotifications(): Promise<{
     };
   }
 
-  const publicKey = await fetchVapidPublicKeyFromServer();
-  if (!publicKey) {
-    return {
-      ok: false,
-      message: 'Kunci Web Push server belum tersedia. Coba beberapa saat lagi.',
-    };
-  }
-
-  const reg = await getSwRegistration();
-  if (!reg) {
-    return { ok: false, message: 'Gagal mendaftarkan Service Worker notifikasi.' };
-  }
-
-  await navigator.serviceWorker.ready;
-  let subscription = await reg.pushManager.getSubscription();
-  if (!subscription) {
-    const appServerKey = urlBase64ToUint8Array(publicKey);
-    subscription = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: appServerKey.buffer as ArrayBuffer,
-    });
-  }
-
-  const jsonSub = subscription.toJSON();
-  const saved = await subscribePushOnServer(jsonSub);
-  if (!saved.ok) {
-    return {
-      ok: false,
-      message: saved.message || 'Gagal menyimpan langganan notifikasi perangkat di server.',
-    };
+  try {
+    localStorage.setItem(PUSH_LOCAL_PREF_KEY, 'true');
+  } catch {
+    // ignore storage errors
   }
 
   return {
@@ -125,26 +75,26 @@ export async function disableWebPushNotifications(): Promise<{
   message: string;
 }> {
   try {
-    const sub = await getCurrentPushSubscription();
-    const endpoint = sub?.endpoint;
-    if (sub) {
-      await sub.unsubscribe().catch(() => {});
-    }
-    const res = await unsubscribePushOnServer(endpoint);
-    if (!res.ok) {
-      return {
-        ok: false,
-        message: res.message || 'Gagal menonaktifkan notifikasi di server.',
-      };
-    }
+    localStorage.setItem(PUSH_LOCAL_PREF_KEY, 'false');
     return {
       ok: true,
-      message: 'Notifikasi push perangkat telah dinonaktifkan.',
+      message: 'Notifikasi perangkat telah dinonaktifkan.',
     };
   } catch (err: any) {
     return {
       ok: false,
       message: err?.message || 'Gagal menonaktifkan notifikasi perangkat.',
     };
+  }
+}
+
+export function showBrowserLocalNotification(title: string, body: string) {
+  if (!isWebPushSupported()) return;
+  if (Notification.permission !== 'granted') return;
+  try {
+    if (localStorage.getItem(PUSH_LOCAL_PREF_KEY) === 'false') return;
+    new Notification(title, { body });
+  } catch {
+    // ignore notification API errors in restricted contexts
   }
 }

@@ -66,67 +66,33 @@ import {
   AdminRTAccount,
   PembaruanBulananRT,
   AppNotification,
-  RealtimeDeltaEvent,
 } from './types';
 import { isPengumumanExpired } from './utils/security';
 import {
-  verifySavedSession,
   logoutFromServer,
-  checkServerHealth,
-  fetchPublicBootstrapInfo,
-  fetchServerSnapshotWithStatus,
-  fetchDeltaSinceRevision,
-  saveAppData,
-  migrateLegacyLocalDataToServer,
-  fetchServerAdminAccounts,
-  createAdminAccountOnServer,
-  updateAdminAccountOnServer,
-  deleteAdminAccountOnServer,
-  syncAdminAccountToServer,
-  saveSingleWargaToServer,
-  putWargaToServer,
-  upgradeWargaKKOnServer,
-  deleteWargaFromServer,
-  bulkImportWargaOnServer,
-  updateWargaSelfOnServer,
-  saveTransactionOnServer,
-  deleteTransactionOnServer,
-  saveBantuanOnServer,
-  deleteBantuanOnServer,
-  savePengumumanOnServer,
-  deletePengumumanOnServer,
-  saveDokumenOnServer,
-  deleteDokumenOnServer,
-  saveLaporanOnServer,
-  saveSettingsOnServer,
-  fetchNotificationsFromServer,
-  markNotificationReadOnServer,
-  markAllNotificationsReadOnServer,
-  clearAppData,
-  getAuthToken,
-  readLegacyLocalCacheForMigration,
-  clearLegacyLocalCache,
   formatWaktuSyncID,
-  mergeDatabaseStates,
-  dedupeEntityList,
+  downloadBackupJSON,
+  fetchServerSnapshot,
   type AppDatabaseSchema,
   type ServerWriteResult,
 } from './utils/cloudSync';
 import {
-  connectSocket,
-  disconnectSocket,
-  getSocketConnected,
-  type SocketAnnouncementPayload,
-} from './utils/socketClient';
-import {
-  computeBackoffDelayMs,
-  formatFriendlyFirestoreError,
-  generateClientMutationId,
-  getCanonicalEntityKey,
-  removePendingSyncOpsByKey,
-  upsertPendingSyncOp,
-  type PendingSyncOp,
-} from './utils/syncQueue';
+  assertRtWriteAllowed,
+  DEFAULT_PENGATURAN_KAS,
+  filterStoreForUser,
+  formatRtId,
+  getSavedAuthSession,
+  isSuperAdminUser,
+  mergeAccountsWithSeeds,
+  mergeModuleLists,
+  mqttSync,
+  readUserReadNotifIds,
+  saveAuthSession,
+  writeUserReadNotifIds,
+  type MqttDatabaseStore,
+  type MqttModuleTopic,
+} from './utils/mqttSync';
+import { showBrowserLocalNotification } from './utils/pushClient';
 
 const toValidDocId = (raw: string, prefix = 'doc'): string => {
   const clean = String(raw || '')
@@ -138,7 +104,6 @@ import {
   EXCEL_DOWNLOAD_EVENT,
   ExcelDownloadNotificationDetail,
   shareOrSaveExcelFile,
-  triggerServerExcelDownload,
 } from './utils/excelWargaImport';
 import {
   collectRegisteredRTs,
@@ -148,6 +113,7 @@ import {
   normalizeRWCode,
   getWargaRTCode,
   doesTransactionBelongToWarga,
+  getBantuanRTCode,
   getTransactionRTCode,
   hasWargaCashDiff,
   reconcileWargaCashFromTransactions,
@@ -185,7 +151,7 @@ const ViewSkeleton: React.FC = () => (
 );
 
 export default function App() {
-  // Authentication State (Role: 'server' | 'admin' | 'warga') managed authoritatively by PostgreSQL Server
+  // Authentication State (Role: 'server' | 'admin' | 'warga')
   const [authReady, setAuthReady] = useState<boolean>(false);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const currentUserRef = useRef<AuthUser | null>(null);
@@ -213,7 +179,7 @@ export default function App() {
   const [tahunAktif, setTahunAktif] = useState<number>(2026);
   const [rolloverNotice, setRolloverNotice] = useState<string | null>(null);
 
-  // Server + Socket.IO Sync indicator ('connecting' | 'pending' | 'success' | 'synced' | 'error')
+  // Cloud MQTT WSS Sync indicator ('connecting' | 'pending' | 'success' | 'synced' | 'error')
   const [syncStatus, setSyncStatus] = useState<'connecting' | 'pending' | 'success' | 'synced' | 'error'>('connecting');
   const [serverConnected, setServerConnected] = useState<boolean>(true);
   const [sseConnected, setSseConnected] = useState<boolean>(false);
@@ -222,25 +188,20 @@ export default function App() {
   const [adminSyncBusy, setAdminSyncBusy] = useState<boolean>(false);
   const [cloudSyncBusy, setCloudSyncBusy] = useState<boolean>(false);
   const [cloudError, setCloudError] = useState<string | null>(null);
-  const [hasPendingLocalMigration, setHasPendingLocalMigration] = useState<boolean>(false);
+  const [hasPendingLocalMigration] = useState<boolean>(false);
   const [pendingOpsCount, setPendingOpsCount] = useState<number>(0);
 
   const successFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const retryAttemptRef = useRef<number>(0);
-  const flushInFlightRef = useRef<Promise<{ remaining: number; lastError?: string; terminalError?: string }> | null>(null);
-  const lastRevisionRef = useRef<number>(0);
-  const inFlightWritesRef = useRef<number>(0);
   const isMountedRef = useRef<boolean>(true);
+  const lastSeenNotifIdRef = useRef<string | null>(null);
 
-  const getPendingServerWriteCount = () => inFlightWritesRef.current;
+  const getPendingServerWriteCount = () => pendingOpsCount;
 
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
       if (successFlashTimerRef.current) clearTimeout(successFlashTimerRef.current);
-      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
     };
   }, []);
 
@@ -255,26 +216,15 @@ export default function App() {
     successFlashTimerRef.current = setTimeout(() => {
       successFlashTimerRef.current = null;
       if (!isMountedRef.current) return;
-      const stillPending = readPendingOps().length > 0 || getPendingServerWriteCount() > 0;
-      setSyncStatus((prev) => {
-        if (prev !== 'success') return prev;
-        return stillPending ? 'pending' : 'synced';
-      });
-    }, 3500);
-  };
-
-  const applyWriteSuccessStatus = (isPending?: boolean) => {
-    const pendingNow =
-      Boolean(isPending) || getPendingServerWriteCount() > 0 || readPendingOps().length > 0;
-    if (pendingNow) {
-      if (successFlashTimerRef.current) {
-        clearTimeout(successFlashTimerRef.current);
-        successFlashTimerRef.current = null;
-      }
-      setSyncStatus('pending');
-    } else {
-      flashWriteSuccess();
-    }
+      const st = mqttSync.getStatus();
+      setSyncStatus(
+        st.connectionState === 'connected'
+          ? 'synced'
+          : st.connectionState === 'syncing'
+          ? 'pending'
+          : 'error'
+      );
+    }, 2500);
   };
 
   // Navigation active tab
@@ -319,47 +269,13 @@ export default function App() {
     };
   }, []);
 
-  // System Configuration (Jimpitan Tahunan -> Auto Bulanan, Kas Kematian, Kontak RT)
-  const [pengaturanKas, setPengaturanKas] = useState<PengaturanKas>({
-    nominalJimpitanTahunan: 300000,
-    nominalJimpitanBulanan: 25000,
-    nominalKematianTahunan: 120000,
-    nominalKematianBulanan: 10000,
-    saldoAwalKasUmum: 0,
-    saldoAwalKasKematian: 0,
-    keteranganSaldoAwal: 'Sisa Kas RT Periode Lalu (Pindahan Buku Manual)',
-    tanggalSaldoAwal: '2026-01-01',
-    kontakKetuaRT: { nama: 'Bpk. Suwardi', telp: '0812-3456-7890' },
-    kontakBendahara: { nama: 'Bpk. Bambang S.', telp: '0813-9876-5432' },
-    tahunAktif: 2026,
-    profilRT: {
-      namaRT: '08',
-      namaRW: '05',
-      dusun: 'Dusun III',
-      desa: 'Desa Kotayasa',
-      kecamatan: 'Kecamatan Sumbang',
-      kabupaten: 'Kabupaten Banyumas',
-      provinsi: 'Jawa Tengah',
-      kodePos: '53183',
-      alamatSekretariat: 'RT 08 RW 05 Desa Kotayasa, Kec. Sumbang, Kab. Banyumas 53183',
-      judulKopSurat: 'PENGURUS RUKUN TETANGGA 08 RUKUN WARGA 05',
-      sebutanWilayah: 'RT 08 RW 05 Desa Kotayasa',
-    },
-  });
-
-  // Transactions State (Siap Pakai - Bersih 0 Data)
+  // System Configuration
+  const [pengaturanKas, setPengaturanKas] = useState<PengaturanKas>(DEFAULT_PENGATURAN_KAS);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-
-  // Registered Residents (Siap Pakai - Bersih 0 Data)
   const [wargaList, setWargaList] = useState<Warga[]>([]);
-
-  // Announcements from RT (Siap Pakai - Bersih 0 Data)
   const [pengumumanList, setPengumumanList] = useState<PengumumanRT[]>([]);
-
-  // Active announcements (filtered by expiration date)
   const activeAnnouncements = pengumumanList.filter((p) => !isPengumumanExpired(p.tanggalBerakhir));
 
-  // Dismissed notifications memory (Once closed/deleted, never appear again)
   const [dismissedNotificationIds, setDismissedNotificationIds] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem('rt_dismissed_notifications_v2');
@@ -378,119 +294,13 @@ export default function App() {
     }
   }, [dismissedNotificationIds]);
 
-  // Government Aid Data (Siap Pakai - Bersih 0 Data)
   const [bantuanList, setBantuanList] = useState<BantuanPemerintah[]>([]);
-
-  // Document PDF Archive (Siap Pakai - Bersih 0 Data)
   const [dokumenList, setDokumenList] = useState<DokumenPdfWarga[]>([]);
-
-  // Admin RT Accounts (Loaded from Central SQL Server)
   const [adminAccounts, setAdminAccounts] = useState<AdminRTAccount[]>([]);
-
-  // Monthly Submissions sent by RT Admins to the Server
   const [laporanBulananRT, setLaporanBulananRT] = useState<PembaruanBulananRT[]>([]);
 
-  // Server Real-time Refs
-  const migrationCheckedRef = useRef<boolean>(false);
-  const migrationInFlightRef = useRef<boolean>(false);
-  const hasRemoteSettingsRef = useRef<boolean>(false);
-
-  const getActiveUserKey = (u: AuthUser | null = currentUserRef.current): string => {
-    if (!u) return '';
-    if (u.role === 'warga') {
-      return `warga_${u.wargaId || u.noKK || u.username}`;
-    }
-    return `${u.role}_${u.username.toLowerCase()}`;
-  };
-
-  // Transient per-user retry buffer for failed CRUD writes (never primary database storage)
-  const getPendingOpsStorageKey = () =>
-    `kaswarga_pending_ops_v1_${getActiveUserKey() || 'anon'}`;
-
-  const readPendingOps = (): PendingSyncOp[] => {
-    if (!getActiveUserKey()) return [];
-    try {
-      const raw = localStorage.getItem(getPendingOpsStorageKey());
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  };
-
-  const writePendingOps = (ops: PendingSyncOp[]) => {
-    if (!getActiveUserKey()) return;
-    try {
-      if (ops.length === 0) {
-        localStorage.removeItem(getPendingOpsStorageKey());
-      } else {
-        localStorage.setItem(getPendingOpsStorageKey(), JSON.stringify(ops));
-      }
-    } catch {
-      // ignore storage quota errors
-    }
-    if (isMountedRef.current) {
-      setPendingOpsCount(ops.length);
-    }
-  };
-
-  const schedulePendingRetry = () => {
-    if (retryTimerRef.current) {
-      clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
-    if (!isMountedRef.current || !currentUserRef.current || !getAuthToken()) return;
-    const ops = readPendingOps();
-    if (ops.length === 0) {
-      retryAttemptRef.current = 0;
-      return;
-    }
-    const delayMs = computeBackoffDelayMs(retryAttemptRef.current);
-    retryTimerRef.current = setTimeout(() => {
-      retryTimerRef.current = null;
-      if (!isMountedRef.current || !currentUserRef.current || !getAuthToken()) return;
-      void flushPendingOps();
-    }, delayMs);
-  };
-
-  const enqueuePendingOps = (newOps: PendingSyncOp[]) => {
-    if (!currentUserRef.current || !getAuthToken() || newOps.length === 0) return;
-    let queue = readPendingOps();
-    for (const op of newOps) {
-      queue = upsertPendingSyncOp(queue, op);
-    }
-    writePendingOps(queue);
-    if (successFlashTimerRef.current) {
-      clearTimeout(successFlashTimerRef.current);
-      successFlashTimerRef.current = null;
-    }
-    if (isMountedRef.current) {
-      setSyncStatus('pending');
-    }
-    schedulePendingRetry();
-  };
-
-  const clearPendingOpsByEntity = (keys: string[]) => {
-    if (!getActiveUserKey() || keys.length === 0) return;
-    const current = readPendingOps();
-    if (current.length === 0) return;
-    const next = removePendingSyncOpsByKey(current, keys);
-    if (next.length !== current.length) {
-      writePendingOps(next);
-    }
-    if (next.length === 0) {
-      retryAttemptRef.current = 0;
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
-    }
-  };
-
   const buildCurrentSchema = (): AppDatabaseSchema => ({
-    version: 2,
-    revision: lastRevisionRef.current || 1,
+    version: 3,
     lastUpdated: new Date().toISOString(),
     tahunAktif,
     pengaturanKas: { ...pengaturanKas, tahunAktif },
@@ -506,827 +316,103 @@ export default function App() {
   const latestStateRef = useRef<AppDatabaseSchema>(buildCurrentSchema());
   latestStateRef.current = buildCurrentSchema();
 
-  const applyAuthoritativeSnapshot = (snapshot: AppDatabaseSchema) => {
+  const applyScopedStoreToUI = (fullStore: MqttDatabaseStore, user: AuthUser | null) => {
     if (!isMountedRef.current) return;
-    const normalizedWarga = dedupeEntityList(
-      Array.isArray(snapshot.wargaList) ? snapshot.wargaList : [],
-      [],
-      (a, b) => Boolean(a.noKK && b.noKK && a.noKK === b.noKK)
-    );
-    const normalizedTx = dedupeEntityList(
-      Array.isArray(snapshot.transactions) ? snapshot.transactions : [],
-      []
-    );
-    const normalizedBantuan = dedupeEntityList(
-      Array.isArray(snapshot.bantuanList) ? snapshot.bantuanList : [],
-      []
-    );
-    const normalizedPengumuman = dedupeEntityList(
-      Array.isArray(snapshot.pengumumanList) ? snapshot.pengumumanList : [],
-      []
-    );
-    const normalizedDokumen = dedupeEntityList(
-      Array.isArray(snapshot.dokumenList) ? snapshot.dokumenList : [],
-      []
-    );
-    const normalizedAdmins = dedupeEntityList(
-      Array.isArray(snapshot.adminAccounts) ? snapshot.adminAccounts : [],
-      [],
-      (a, b) => a.username.toLowerCase() === b.username.toLowerCase()
-    );
-    const normalizedLap = dedupeEntityList(
-      Array.isArray(snapshot.laporanBulananRT) ? snapshot.laporanBulananRT : [],
-      []
-    );
-    const nextTahun = Number(snapshot.tahunAktif || snapshot.pengaturanKas?.tahunAktif) || 2026;
-    const nextPengaturan = snapshot.pengaturanKas || latestStateRef.current.pengaturanKas;
+    const scoped = filterStoreForUser(fullStore, user);
+    setWargaList(scoped.wargaList);
+    setTransactions(scoped.transactions);
+    setBantuanList(scoped.bantuanList);
+    setPengumumanList(scoped.pengumumanList);
+    setDokumenList(scoped.dokumenList);
+    setAdminAccounts(scoped.adminAccounts);
+    setServerAdminAccounts(fullStore.accounts);
+    setLaporanBulananRT(scoped.laporanBulananRT);
+    setPengaturanKas(scoped.pengaturanKas);
+    setTahunAktif(scoped.tahunAktif);
+    setNotifications(scoped.notifications);
+    setUnreadCount(scoped.unreadCount);
 
-    if (typeof snapshot.revision === 'number' && snapshot.revision > 0) {
-      lastRevisionRef.current = Math.max(lastRevisionRef.current, snapshot.revision);
+    const newestNotif = scoped.notifications[0];
+    if (
+      newestNotif &&
+      newestNotif.id !== lastSeenNotifIdRef.current &&
+      lastSeenNotifIdRef.current !== null &&
+      newestNotif.createdBy !== user?.username &&
+      !newestNotif.isRead
+    ) {
+      showBrowserLocalNotification(newestNotif.title, newestNotif.body);
     }
-    hasRemoteSettingsRef.current = true;
-
-    setWargaList(normalizedWarga);
-    setTransactions(normalizedTx);
-    setBantuanList(normalizedBantuan);
-    setPengumumanList(normalizedPengumuman);
-    setDokumenList(normalizedDokumen);
-    setAdminAccounts(normalizedAdmins);
-    setServerAdminAccounts(normalizedAdmins);
-    setLaporanBulananRT(normalizedLap);
-    setTahunAktif(nextTahun);
-    if (nextPengaturan) {
-      setPengaturanKas(nextPengaturan);
-    }
-    if (currentUserRef.current?.role === 'warga' && normalizedWarga[0]?.pin) {
-      setCurrentPin(normalizedWarga[0].pin);
+    if (newestNotif) {
+      lastSeenNotifIdRef.current = newestNotif.id;
     }
 
-    latestStateRef.current = {
-      version: 2,
-      revision: lastRevisionRef.current,
-      lastUpdated: snapshot.lastUpdated || new Date().toISOString(),
-      tahunAktif: nextTahun,
-      pengaturanKas: nextPengaturan,
-      wargaList: normalizedWarga,
-      transactions: normalizedTx,
-      bantuanList: normalizedBantuan,
-      pengumumanList: normalizedPengumuman,
-      dokumenList: normalizedDokumen,
-      adminAccounts: normalizedAdmins,
-      laporanBulananRT: normalizedLap,
-    };
+    if (user?.role === 'warga' && scoped.wargaList[0]?.pin) {
+      setCurrentPin(scoped.wargaList[0].pin);
+    }
+    setDataLoadedReady(true);
   };
 
-  const refreshAuthoritativeSnapshot = async (): Promise<boolean> => {
-    if (!getAuthToken()) return false;
-    const res = await fetchServerSnapshotWithStatus();
-    if (!isMountedRef.current) return false;
-    if (res.ok && res.data) {
-      applyAuthoritativeSnapshot(res.data);
-      setServerConnected(true);
-      return true;
-    }
-    if (res.status === 401) {
-      logoutFromServer().catch(() => {});
+  // 1. Bootstrap Session & Connect MQTT WSS Cloud Sync automatically
+  useEffect(() => {
+    mqttSync.start();
+
+    const saved = getSavedAuthSession();
+    if (saved) {
+      setCurrentUser(saved);
+      setIsLoginModalOpen(false);
+      setCurrentView(
+        saved.role === 'server'
+          ? 'server-kontrol'
+          : saved.role === 'warga'
+          ? 'dasbor-warga'
+          : 'beranda'
+      );
+    } else {
       setCurrentUser(null);
       setIsLoginModalOpen(true);
     }
-    return false;
-  };
+    setAuthReady(true);
 
-  const refreshNotificationsFromServer = async () => {
-    if (!getAuthToken()) return;
-    const res = await fetchNotificationsFromServer(60);
-    if (!isMountedRef.current || !res.ok) return;
-    setNotifications(res.notifications);
-    setUnreadCount(res.unreadCount);
-  };
-
-  const executePendingOp = async (op: PendingSyncOp): Promise<ServerWriteResult> => {
-    switch (op.kind) {
-      case 'saveWarga':
-        return saveSingleWargaToServer(op.payload, {
-          isUpdate: op.isUpdate,
-          expectedVersion: op.expectedVersion ?? op.payload.version,
-          clientMutationId: op.clientMutationId,
-        });
-      case 'upgradeKK':
-        return upgradeWargaKKOnServer({
-          wargaId: op.targetId,
-          ...op.payload,
-          clientMutationId: op.clientMutationId || op.payload.clientMutationId,
-        });
-      case 'deleteWarga':
-        return deleteWargaFromServer(op.targetId, {
-          expectedVersion: op.expectedVersion,
-          clientMutationId: op.clientMutationId,
-        });
-      case 'saveTx':
-        return saveTransactionOnServer(op.payload, {
-          isUpdate: op.isUpdate,
-          expectedVersion: op.expectedVersion ?? op.payload.version,
-          clientMutationId: op.clientMutationId,
-        });
-      case 'deleteTx':
-        return deleteTransactionOnServer(op.targetId, op.expectedVersion);
-      case 'saveBantuan':
-        return saveBantuanOnServer(op.payload, {
-          isUpdate: op.isUpdate,
-          expectedVersion: op.expectedVersion ?? op.payload.version,
-        });
-      case 'deleteBantuan':
-        return deleteBantuanOnServer(op.targetId);
-      case 'savePengumuman':
-        return savePengumumanOnServer(op.payload, {
-          isUpdate: op.isUpdate,
-          expectedVersion: op.expectedVersion ?? op.payload.version,
-          clientMutationId: op.clientMutationId,
-        });
-      case 'deletePengumuman':
-        return deletePengumumanOnServer(op.targetId);
-      case 'saveDokumen':
-        return saveDokumenOnServer(op.payload);
-      case 'deleteDokumen':
-        return deleteDokumenOnServer(op.targetId);
-      case 'saveLaporan':
-        return saveLaporanOnServer(op.payload);
-      case 'saveAdmin':
-        return op.isUpdate
-          ? updateAdminAccountOnServer(op.payload, op.expectedVersion ?? op.payload.version)
-          : createAdminAccountOnServer(op.payload);
-      case 'deleteAdmin':
-        return deleteAdminAccountOnServer(op.targetId);
-      case 'saveSettings':
-        return saveSettingsOnServer(
-          op.payload,
-          op.tahunAktif,
-          op.expectedVersion ?? op.payload.version
-        );
-    }
-  };
-
-  const flushPendingOps = async (): Promise<{
-    remaining: number;
-    lastError?: string;
-    terminalError?: string;
-  }> => {
-    if (flushInFlightRef.current) {
-      return flushInFlightRef.current;
-    }
-
-    const task = (async () => {
-      const ops = readPendingOps();
-      if (ops.length === 0) {
-        setPendingOpsCount(0);
-        retryAttemptRef.current = 0;
-        return { remaining: 0 };
-      }
-
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-        if (isMountedRef.current) {
-          setSyncStatus('pending');
-        }
-        return { remaining: ops.length, lastError: 'Perangkat sedang offline. Menunggu koneksi kembali.' };
-      }
-
-      if (!currentUserRef.current || !getAuthToken()) {
-        if (isMountedRef.current) {
-          setSyncStatus('pending');
-        }
-        return {
-          remaining: ops.length,
-          lastError: 'Menunggu sesi autentikasi server aktif...',
-        };
-      }
-
-      const stillFailed: PendingSyncOp[] = [];
-      let lastError: string | undefined;
-      let terminalError: string | undefined;
-      let hadSuccess = false;
-
-      for (const op of ops) {
-        const res = await executePendingOp(op);
-        if (res.ok && !res.pending) {
-          hadSuccess = true;
-          continue;
-        }
-        if (res.terminal) {
-          terminalError = formatFriendlyFirestoreError(
-            res.message,
-            'Perubahan ditolak oleh Server Pusat.'
-          );
-          continue;
-        }
-        const nextAttempts = (op.attempts ?? 0) + 1;
-        stillFailed.push({ ...op, attempts: nextAttempts, updatedAtMs: Date.now() });
-        lastError = formatFriendlyFirestoreError(res.message, lastError || 'Menunggu koneksi server.');
-      }
-
-      writePendingOps(stillFailed);
-
-      if (hadSuccess || terminalError) {
-        await refreshAuthoritativeSnapshot().catch(() => false);
-      }
-
-      if (stillFailed.length === 0) {
-        retryAttemptRef.current = 0;
-        if (retryTimerRef.current) {
-          clearTimeout(retryTimerRef.current);
-          retryTimerRef.current = null;
-        }
-        if (terminalError && isMountedRef.current) {
-          setSyncStatus('error');
-          setCloudError(terminalError);
-        } else if (isMountedRef.current) {
-          applyWriteSuccessStatus(false);
-        }
-      } else {
-        retryAttemptRef.current = Math.min(retryAttemptRef.current + 1, 10);
-        if (isMountedRef.current) {
-          setSyncStatus('pending');
-        }
-        schedulePendingRetry();
-      }
-
-      return { remaining: stillFailed.length, lastError, terminalError };
-    })().finally(() => {
-      flushInFlightRef.current = null;
+    const unsubStore = mqttSync.subscribeStore((store) => {
+      applyScopedStoreToUI(store, currentUserRef.current);
     });
 
-    flushInFlightRef.current = task;
-    return task;
-  };
-
-  const settleWriteBatch = async (params: {
-    ops: PendingSyncOp[];
-    results: ServerWriteResult[];
-    rollback: () => void;
-    fallbackError: string;
-    onConfirmed?: () => Promise<void> | void;
-  }) => {
-    const entityKeys = params.ops.map(getCanonicalEntityKey);
-    const terminalRes = params.results.find((r) => !r.ok && r.terminal);
-    if (terminalRes) {
-      clearPendingOpsByEntity(entityKeys);
-      params.rollback();
-      if (terminalRes.status === 409) {
-        await refreshAuthoritativeSnapshot().catch(() => false);
-      }
-      if (successFlashTimerRef.current) {
-        clearTimeout(successFlashTimerRef.current);
-        successFlashTimerRef.current = null;
-      }
-      if (isMountedRef.current) {
-        setSyncStatus('error');
-        setCloudError(formatFriendlyFirestoreError(terminalRes, params.fallbackError));
-      }
-      return;
-    }
-
-    const failedOrPendingOps: PendingSyncOp[] = [];
-    let firstTransientError: string | undefined;
-    params.results.forEach((res, idx) => {
-      const op = params.ops[idx];
-      if (!op) return;
-      if (!res.ok || res.pending) {
-        failedOrPendingOps.push(op);
-        if (!res.ok && !firstTransientError) {
-          firstTransientError = res.message;
-        }
-      }
-    });
-
-    if (failedOrPendingOps.length > 0) {
-      enqueuePendingOps(failedOrPendingOps);
-      if (firstTransientError && isMountedRef.current) {
-        setCloudError(formatFriendlyFirestoreError(firstTransientError, params.fallbackError));
-      }
-      if (isMountedRef.current) {
-        setSyncStatus('pending');
-      }
-      return;
-    }
-
-    clearPendingOpsByEntity(entityKeys);
-    if (params.onConfirmed) {
-      await params.onConfirmed();
-    }
-    applyWriteSuccessStatus(false);
-  };
-
-  // 1. Server Session Recovery + Connectivity Probe
-  useEffect(() => {
-    let active = true;
-    let wasDisconnected = typeof navigator !== 'undefined' && navigator.onLine === false;
-
-    const bootstrapSession = async () => {
-      try {
-        const pubInfo = await fetchPublicBootstrapInfo();
-        if (active && pubInfo) {
-          setPengaturanKas(pubInfo.pengaturanKas);
-          setTahunAktif(pubInfo.tahunAktif || 2026);
-        }
-
-        const verified = await verifySavedSession();
-        if (!active) return;
-
-        if (verified.ok && verified.user) {
-          setCurrentUser(verified.user);
-          setIsLoginModalOpen(false);
-          setCurrentView(
-            verified.user.role === 'server'
-              ? 'server-kontrol'
-              : verified.user.role === 'warga'
-              ? 'dasbor-warga'
-              : 'beranda'
-          );
-        } else {
-          setCurrentUser(null);
-          setIsLoginModalOpen(true);
-        }
-      } finally {
-        if (active) setAuthReady(true);
-      }
-    };
-
-    void bootstrapSession();
-
-    const runReconnectCycle = async () => {
-      if (!active) return;
-      const diag = await checkServerHealth();
-      if (!active) return;
-      setServerConnected(diag.connected);
-      wasDisconnected = !diag.connected;
-      if (diag.connected) {
-        setCloudError((prev) =>
-          prev && (prev.includes('koneksi') || prev.includes('jaringan') || prev.includes('offline') || prev.includes('menjangkau'))
-            ? null
-            : prev
-        );
-        if (currentUserRef.current && getAuthToken()) {
-          retryAttemptRef.current = 0;
-          await flushPendingOps().catch(() => {});
-          if (lastRevisionRef.current > 0) {
-            const delta = await fetchDeltaSinceRevision(lastRevisionRef.current).catch(() => null);
-            if (active && delta?.ok && delta.changed && delta.data) {
-              applyAuthoritativeSnapshot(delta.data);
-            }
-          }
-          await refreshNotificationsFromServer().catch(() => {});
-        }
-      } else if (diag.message) {
-        setCloudError(formatFriendlyFirestoreError(diag.message, diag.message));
+    const unsubStatus = mqttSync.subscribeStatus((st) => {
+      if (!isMountedRef.current) return;
+      setPendingOpsCount(st.pendingTopics);
+      if (st.connectionState === 'connected') {
+        setServerConnected(true);
+        setSseConnected(true);
+        setCloudError(null);
+        setSyncStatus((prev) => (prev === 'success' ? prev : 'synced'));
+      } else if (st.connectionState === 'syncing') {
+        setServerConnected(true);
         setSseConnected(false);
-        if (readPendingOps().length > 0) {
-          setSyncStatus('pending');
-        } else {
-          setSyncStatus('error');
-        }
-      }
-    };
-
-    const healthCheckInterval = setInterval(async () => {
-      if (!active) return;
-      const diag = await checkServerHealth();
-      if (!active) return;
-      setServerConnected(diag.connected);
-      wasDisconnected = !diag.connected;
-      if (diag.connected) {
-        setCloudError((prev) =>
-          prev && (prev.includes('koneksi') || prev.includes('jaringan') || prev.includes('offline') || prev.includes('menjangkau'))
-            ? null
-            : prev
-        );
-        if (currentUserRef.current && getAuthToken() && readPendingOps().length > 0 && !flushInFlightRef.current) {
-          void flushPendingOps();
-        }
-      } else if (diag.message) {
-        setCloudError(formatFriendlyFirestoreError(diag.message, diag.message));
-        setSseConnected(false);
-      }
-    }, 30000);
-
-    let lastResumeTriggerAt = 0;
-    const handleResumeOrOnline = (fromOfflineEvent = false) => {
-      if (fromOfflineEvent) {
-        wasDisconnected = true;
-        retryAttemptRef.current = 0;
-      }
-      const now = Date.now();
-      if (!fromOfflineEvent && now - lastResumeTriggerAt < 4000) return;
-      lastResumeTriggerAt = now;
-      if (wasDisconnected || fromOfflineEvent) {
-        void runReconnectCycle();
-      } else if (currentUserRef.current && getAuthToken()) {
-        void runReconnectCycle();
-      }
-    };
-    const handleOnlineEvent = () => handleResumeOrOnline(true);
-    const handleFocusEvent = () => handleResumeOrOnline(false);
-    const handleVisibilityChange = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        handleResumeOrOnline(false);
-      }
-    };
-    const handleBrowserOffline = () => {
-      if (!active) return;
-      wasDisconnected = true;
-      setServerConnected(false);
-      setSseConnected(false);
-      if (readPendingOps().length > 0) {
+        setCloudError(null);
         setSyncStatus('pending');
       } else {
+        setServerConnected(false);
+        setSseConnected(false);
         setSyncStatus('error');
+        if (st.error) setCloudError(st.error);
       }
-    };
-
-    window.addEventListener('online', handleOnlineEvent);
-    window.addEventListener('focus', handleFocusEvent);
-    window.addEventListener('offline', handleBrowserOffline);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    });
 
     return () => {
-      active = false;
-      clearInterval(healthCheckInterval);
-      window.removeEventListener('online', handleOnlineEvent);
-      window.removeEventListener('focus', handleFocusEvent);
-      window.removeEventListener('offline', handleBrowserOffline);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      unsubStore();
+      unsubStatus();
     };
   }, []);
 
-  // 2. Authoritative PostgreSQL Snapshot + Notifications + Real-Time Socket.IO Sync
+  // Re-apply strict RT scope whenever currentUser changes
   useEffect(() => {
-    const token = getAuthToken();
-    if (!currentUser || !token) {
-      disconnectSocket();
-      setDataLoadedReady(false);
-      setSseConnected(false);
-      setSyncStatus('connecting');
-      migrationCheckedRef.current = false;
-      hasRemoteSettingsRef.current = false;
-      return;
-    }
+    applyScopedStoreToUI(mqttSync.getStore(), currentUser);
+  }, [currentUser?.role, currentUser?.username, currentUser?.rtScope, currentUser?.rtId, currentUser?.noKK, currentUser?.wargaId]);
 
-    let active = true;
-    setDataLoadedReady(false);
-    setSyncStatus('connecting');
-    migrationCheckedRef.current = false;
-    hasRemoteSettingsRef.current = false;
-    setPendingOpsCount(readPendingOps().length);
-
-    const applySocketDeltaEvent = (event: RealtimeDeltaEvent) => {
-      if (!active || !event) return;
-      if (typeof event.revision === 'number' && event.revision > 0) {
-        lastRevisionRef.current = Math.max(lastRevisionRef.current, event.revision);
-      }
-
-      if (event.entityType === 'snapshot' || event.action === 'bulk_import') {
-        void refreshAuthoritativeSnapshot();
-        return;
-      }
-
-      if (event.entityType === 'warga') {
-        if (event.action === 'delete' && event.entityId) {
-          setWargaList((prev) => {
-            const next = prev.filter((w) => w.id !== event.entityId);
-            latestStateRef.current = { ...latestStateRef.current, wargaList: next };
-            return next;
-          });
-          clearPendingOpsByEntity([`warga:${event.entityId}`]);
-        } else if (event.action === 'upgrade_kk' && event.payload?.warga) {
-          const upgradedW: Warga = event.payload.warga;
-          const updTxs: Transaction[] = Array.isArray(event.payload.updatedTransactions)
-            ? event.payload.updatedTransactions
-            : [];
-          const newTxs: Transaction[] = Array.isArray(event.payload.createdTransactions)
-            ? event.payload.createdTransactions
-            : [];
-          const updBantuan: BantuanPemerintah[] = Array.isArray(event.payload.updatedBantuan)
-            ? event.payload.updatedBantuan
-            : [];
-
-          setWargaList((prev) => {
-            const exists = prev.some((w) => w.id === upgradedW.id);
-            const next = exists
-              ? prev.map((w) => (w.id === upgradedW.id ? upgradedW : w))
-              : [upgradedW, ...prev];
-            latestStateRef.current = { ...latestStateRef.current, wargaList: next };
-            return next;
-          });
-          if (updTxs.length > 0 || newTxs.length > 0) {
-            setTransactions((prev) => {
-              const map = new Map(prev.map((t) => [t.id, t]));
-              for (const t of [...updTxs, ...newTxs]) {
-                if (t?.id) map.set(t.id, t);
-              }
-              const next = Array.from(map.values()).sort((a, b) => b.tanggal.localeCompare(a.tanggal));
-              latestStateRef.current = { ...latestStateRef.current, transactions: next };
-              return next;
-            });
-          }
-          if (updBantuan.length > 0) {
-            setBantuanList((prev) => {
-              const map = new Map(prev.map((b) => [b.id, b]));
-              for (const b of updBantuan) {
-                if (b?.id) map.set(b.id, b);
-              }
-              const next = Array.from(map.values());
-              latestStateRef.current = { ...latestStateRef.current, bantuanList: next };
-              return next;
-            });
-          }
-        } else if (event.action === 'upsert' && event.payload) {
-          const incomingW: Warga = event.payload;
-          setWargaList((prev) => {
-            const exists = prev.some((w) => w.id === incomingW.id);
-            const next = exists
-              ? prev.map((w) => (w.id === incomingW.id ? incomingW : w))
-              : [...prev, incomingW];
-            latestStateRef.current = { ...latestStateRef.current, wargaList: next };
-            return next;
-          });
-          if (currentUserRef.current?.role === 'warga' && incomingW.pin) {
-            setCurrentPin(incomingW.pin);
-          }
-        }
-        return;
-      }
-
-      if (event.entityType === 'transaction') {
-        if (event.action === 'delete' && event.entityId) {
-          setTransactions((prev) => {
-            const next = prev.filter((t) => t.id !== event.entityId);
-            latestStateRef.current = { ...latestStateRef.current, transactions: next };
-            return next;
-          });
-        } else if (event.action === 'upsert' && event.payload) {
-          const incomingT: Transaction = event.payload;
-          setTransactions((prev) => {
-            const exists = prev.some((t) => t.id === incomingT.id);
-            const next = (
-              exists ? prev.map((t) => (t.id === incomingT.id ? incomingT : t)) : [incomingT, ...prev]
-            ).sort((a, b) => b.tanggal.localeCompare(a.tanggal));
-            latestStateRef.current = { ...latestStateRef.current, transactions: next };
-            return next;
-          });
-        }
-        return;
-      }
-
-      if (event.entityType === 'bantuan') {
-        if (event.action === 'delete' && event.entityId) {
-          setBantuanList((prev) => {
-            const next = prev.filter((b) => b.id !== event.entityId);
-            latestStateRef.current = { ...latestStateRef.current, bantuanList: next };
-            return next;
-          });
-        } else if (event.action === 'upsert' && event.payload) {
-          const incomingB: BantuanPemerintah = event.payload;
-          setBantuanList((prev) => {
-            const exists = prev.some((b) => b.id === incomingB.id);
-            const next = exists ? prev.map((b) => (b.id === incomingB.id ? incomingB : b)) : [incomingB, ...prev];
-            latestStateRef.current = { ...latestStateRef.current, bantuanList: next };
-            return next;
-          });
-        }
-        return;
-      }
-
-      if (event.entityType === 'pengumuman') {
-        if (event.action === 'delete' && event.entityId) {
-          setPengumumanList((prev) => {
-            const next = prev.filter((p) => p.id !== event.entityId);
-            latestStateRef.current = { ...latestStateRef.current, pengumumanList: next };
-            return next;
-          });
-        } else if (event.action === 'upsert' && event.payload) {
-          const incomingP: PengumumanRT = event.payload;
-          setPengumumanList((prev) => {
-            const exists = prev.some((p) => p.id === incomingP.id);
-            const next = exists ? prev.map((p) => (p.id === incomingP.id ? incomingP : p)) : [incomingP, ...prev];
-            latestStateRef.current = { ...latestStateRef.current, pengumumanList: next };
-            return next;
-          });
-        }
-        return;
-      }
-
-      if (event.entityType === 'dokumen') {
-        if (event.action === 'delete' && event.entityId) {
-          setDokumenList((prev) => {
-            const next = prev.filter((d) => d.id !== event.entityId);
-            latestStateRef.current = { ...latestStateRef.current, dokumenList: next };
-            return next;
-          });
-        } else if (event.action === 'upsert' && event.payload) {
-          const incomingD: DokumenPdfWarga = event.payload;
-          setDokumenList((prev) => {
-            const exists = prev.some((d) => d.id === incomingD.id);
-            const next = exists ? prev.map((d) => (d.id === incomingD.id ? incomingD : d)) : [incomingD, ...prev];
-            latestStateRef.current = { ...latestStateRef.current, dokumenList: next };
-            return next;
-          });
-        }
-        return;
-      }
-
-      if (event.entityType === 'laporan' && event.payload) {
-        const incomingL: PembaruanBulananRT = event.payload;
-        setLaporanBulananRT((prev) => {
-          const exists = prev.some((l) => l.id === incomingL.id);
-          const next = exists ? prev.map((l) => (l.id === incomingL.id ? incomingL : l)) : [incomingL, ...prev];
-          latestStateRef.current = { ...latestStateRef.current, laporanBulananRT: next };
-          return next;
-        });
-        return;
-      }
-
-      if (event.entityType === 'settings' && event.payload) {
-        const incomingS: PengaturanKas = event.payload;
-        if (currentUserRef.current?.role !== 'server') {
-          setPengaturanKas(incomingS);
-          if (incomingS.tahunAktif) setTahunAktif(incomingS.tahunAktif);
-          latestStateRef.current = {
-            ...latestStateRef.current,
-            pengaturanKas: incomingS,
-            tahunAktif: incomingS.tahunAktif || latestStateRef.current.tahunAktif,
-          };
-        }
-        return;
-      }
-
-      if (event.entityType === 'admin_account' && currentUserRef.current?.role === 'server') {
-        void fetchServerAdminAccounts().then((res) => {
-          if (!active || !res) return;
-          setAdminAccounts(res.adminAccounts);
-          setServerAdminAccounts(res.adminAccounts);
-          latestStateRef.current = { ...latestStateRef.current, adminAccounts: res.adminAccounts };
-        });
-      }
-    };
-
-    const applyAnnouncementEvent = (payload: SocketAnnouncementPayload) => {
-      if (!active || !payload) return;
-      if (typeof payload.revision === 'number' && payload.revision > 0) {
-        lastRevisionRef.current = Math.max(lastRevisionRef.current, payload.revision);
-      }
-      if (payload.action === 'delete') {
-        setPengumumanList((prev) => {
-          const next = prev.filter((p) => p.id !== payload.id);
-          latestStateRef.current = { ...latestStateRef.current, pengumumanList: next };
-          return next;
-        });
-        setFloatingAnnouncement((cur) => (cur?.id === payload.id ? null : cur));
-      } else if (payload.action === 'upsert' && payload.announcement) {
-        const incomingP: PengumumanRT = payload.announcement;
-        setPengumumanList((prev) => {
-          const exists = prev.some((p) => p.id === incomingP.id);
-          const next = exists ? prev.map((p) => (p.id === incomingP.id ? incomingP : p)) : [incomingP, ...prev];
-          latestStateRef.current = { ...latestStateRef.current, pengumumanList: next };
-          return next;
-        });
-      }
-    };
-
-    const loadInitialState = async () => {
-      const snapRes = await fetchServerSnapshotWithStatus();
-      if (!active) return;
-
-      if (snapRes.ok && snapRes.data) {
-        applyAuthoritativeSnapshot(snapRes.data);
-        setServerConnected(true);
-        setCloudError(null);
-        setDataLoadedReady(true);
-
-        const pendingCount = readPendingOps().length;
-        setSyncStatus(pendingCount > 0 ? 'pending' : 'synced');
-
-        // One-time safe legacy migration if local legacy cache still exists
-        if (
-          (currentUser.role === 'admin' || currentUser.role === 'server') &&
-          !migrationCheckedRef.current &&
-          !migrationInFlightRef.current
-        ) {
-          migrationCheckedRef.current = true;
-          migrationInFlightRef.current = true;
-          try {
-            const flushRes = await flushPendingOps();
-            if (!active) return;
-            const legacySnap = readLegacyLocalCacheForMigration();
-            if (legacySnap) {
-              const migRes = await migrateLegacyLocalDataToServer(legacySnap);
-              if (!active) return;
-              if (migRes.ok) {
-                if (migRes.serverData) applyAuthoritativeSnapshot(migRes.serverData);
-                if (flushRes.remaining === 0) {
-                  clearLegacyLocalCache();
-                  setHasPendingLocalMigration(false);
-                }
-              } else {
-                setHasPendingLocalMigration(true);
-              }
-            }
-          } finally {
-            migrationInFlightRef.current = false;
-          }
-        }
-      } else {
-        setDataLoadedReady(true);
-        if (snapRes.status === 401) {
-          await logoutFromServer();
-          if (active) {
-            setCurrentUser(null);
-            setIsLoginModalOpen(true);
-          }
-          return;
-        }
-        setServerConnected(false);
-        setSyncStatus(readPendingOps().length > 0 ? 'pending' : 'error');
-        if (snapRes.message) setCloudError(snapRes.message);
-      }
-
-      await refreshNotificationsFromServer().catch(() => {});
-    };
-
-    void loadInitialState();
-
-    const unsubSocket = connectSocket(token, {
-      onConnectionChange: (connected) => {
-        if (!active) return;
-        setSseConnected(connected);
-        if (connected) {
-          setServerConnected(true);
-          setCloudError((prev) =>
-            prev && (prev.includes('koneksi') || prev.includes('jaringan') || prev.includes('offline') || prev.includes('menjangkau'))
-              ? null
-              : prev
-          );
-          const pending = readPendingOps().length + getPendingServerWriteCount();
-          setSyncStatus((prev) => (prev === 'success' ? prev : pending > 0 ? 'pending' : 'synced'));
-        }
-      },
-      onConnected: () => {
-        if (!active) return;
-        if (lastRevisionRef.current > 0) {
-          void fetchDeltaSinceRevision(lastRevisionRef.current).then((delta) => {
-            if (active && delta?.ok && delta.changed && delta.data) {
-              applyAuthoritativeSnapshot(delta.data);
-            }
-          });
-        }
-        void refreshNotificationsFromServer();
-        if (readPendingOps().length > 0) {
-          void flushPendingOps();
-        }
-      },
-      onDelta: applySocketDeltaEvent,
-      onAnnouncement: applyAnnouncementEvent,
-      onNotification: (notif) => {
-        if (!active || !notif) return;
-        setNotifications((prev) => {
-          if (prev.some((n) => n.id === notif.id)) return prev;
-          const next = [notif, ...prev].slice(0, 80);
-          setUnreadCount(next.filter((n) => !n.isRead).length);
-          return next;
-        });
-      },
-      onAdminRegistry: () => {
-        if (!active || currentUserRef.current?.role !== 'server') return;
-        void fetchServerAdminAccounts().then((res) => {
-          if (!active || !res) return;
-          setAdminAccounts(res.adminAccounts);
-          setServerAdminAccounts(res.adminAccounts);
-          latestStateRef.current = { ...latestStateRef.current, adminAccounts: res.adminAccounts };
-        });
-      },
-      onAuthError: () => {
-        if (!active) return;
-        void verifySavedSession().then((v) => {
-          if (active && v.unauthorized) {
-            setCurrentUser(null);
-            setIsLoginModalOpen(true);
-          }
-        });
-      },
-    });
-
-    return () => {
-      active = false;
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
-      unsubSocket();
-    };
-  }, [currentUser?.role, currentUser?.username, currentUser?.rtScope, currentUser?.noKK, currentUser?.wargaId]);
-
-  // 3. Safe one-time reconciliation for pre-existing transactions -> Warga accounts (non-destructive)
+  // 2. Safe reconciliation for pre-existing transactions -> Warga cash/iuran state
   const lastTxWargaBackfillSigRef = useRef<string>('');
   useEffect(() => {
-    if (!dataLoadedReady || !serverConnected || !currentUser || !getAuthToken()) return;
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    if (!dataLoadedReady || !currentUser) return;
     if (currentUser.role !== 'admin' && currentUser.role !== 'server') return;
     if (wargaList.length === 0 || transactions.length === 0) return;
 
@@ -1337,15 +423,17 @@ export default function App() {
     const assignedAdminRT =
       currentUser.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '';
     const nowIso = new Date().toISOString();
-    const changedWarga: Warga[] = [];
-    const nextWargaList = wargaList.map((w) => {
+    const changedIds = new Set<string>();
+    const reconciledMap = new Map<string, Warga>();
+
+    wargaList.forEach((w) => {
       if (
         currentUser.role === 'admin' &&
         assignedAdminRT &&
         assignedAdminRT !== 'SEMUA' &&
         getWargaRTCode(w, assignedAdminRT) !== assignedAdminRT
       ) {
-        return w;
+        return;
       }
       const reconciled = reconcileWargaCashFromTransactions({
         warga: w,
@@ -1359,211 +447,49 @@ export default function App() {
       const hasAnyTxPayment =
         (reconciled.iuranUmumTerbayar || 0) > 0 || (reconciled.iuranKematianTerbayar || 0) > 0;
       if (hasAnyTxPayment && hasWargaCashDiff(w, reconciled, tahunAktif)) {
-        changedWarga.push(reconciled);
-        return reconciled;
+        changedIds.add(w.id);
+        reconciledMap.set(w.id, reconciled);
       }
-      return w;
     });
 
-    if (changedWarga.length === 0) return;
+    if (changedIds.size === 0) return;
 
-    setWargaList(nextWargaList);
-    latestStateRef.current = { ...latestStateRef.current, wargaList: nextWargaList };
-
-    const timer = setTimeout(() => {
-      void Promise.all(
-        changedWarga.map((w) =>
-          putWargaToServer(w, {
-            expectedVersion: w.version,
-            clientMutationId: generateClientMutationId('reconcile'),
-          })
-        )
-      )
-        .then((results) => {
-          if (!isMountedRef.current) return;
-          const savedMap = new Map<string, Warga>();
-          results.forEach((r) => {
-            if (r.ok && r.warga) savedMap.set(r.warga.id, r.warga);
-          });
-          if (savedMap.size > 0) {
-            setWargaList((prev) => {
-              const next = prev.map((w) => savedMap.get(w.id) || w);
-              latestStateRef.current = { ...latestStateRef.current, wargaList: next };
-              return next;
-            });
-          }
-        })
-        .catch(() => {});
-    }, 500);
-
-    return () => clearTimeout(timer);
-  }, [dataLoadedReady, serverConnected, currentUser?.role, tahunAktif, wargaList.length, transactions.length]);
+    void mqttSync.mutate((draft) => {
+      draft.warga = draft.warga.map((w) => reconciledMap.get(w.id) || w);
+      return ['warga'];
+    });
+  }, [dataLoadedReady, currentUser?.role, tahunAktif, wargaList.length, transactions.length]);
 
   const handleForceSyncNow = async () => {
     setCloudSyncBusy(true);
-    setSyncStatus('pending');
     setCloudError(null);
     try {
-      const diag = await checkServerHealth();
-      setServerConnected(diag.connected);
-      if (!diag.connected) {
-        setSyncStatus(readPendingOps().length > 0 ? 'pending' : 'error');
-        setSseConnected(false);
-        setCloudError(formatFriendlyFirestoreError(diag.message, 'Tidak dapat terhubung ke Database Server Pusat.'));
-        return;
+      const ok = await mqttSync.forceSyncNow();
+      if (ok) {
+        flashWriteSuccess();
       }
-
-      if (currentUserRef.current && getAuthToken()) {
-        retryAttemptRef.current = 0;
-        const flushRes = await flushPendingOps();
-
-        let migFailedMsg = '';
-        if (currentUserRef.current.role === 'admin' || currentUserRef.current.role === 'server') {
-          const legacySnap = readLegacyLocalCacheForMigration();
-          if (legacySnap) {
-            const migRes = await migrateLegacyLocalDataToServer(legacySnap);
-            if (migRes.ok) {
-              if (migRes.serverData) applyAuthoritativeSnapshot(migRes.serverData);
-              if (flushRes.remaining === 0) {
-                clearLegacyLocalCache();
-                setHasPendingLocalMigration(false);
-              }
-            } else {
-              migFailedMsg = migRes.message || 'Sebagian data lokal gagal disinkronkan.';
-              setHasPendingLocalMigration(true);
-            }
-          }
-        }
-
-        await refreshAuthoritativeSnapshot();
-        await refreshNotificationsFromServer();
-
-        if (flushRes.terminalError || migFailedMsg) {
-          setSyncStatus('error');
-          setCloudError(
-            flushRes.terminalError ||
-              migFailedMsg ||
-              'Sebagian perubahan ditolak oleh Server Pusat.'
-          );
-          return;
-        }
-        if (flushRes.remaining > 0) {
-          setSyncStatus('pending');
-          setCloudError(
-            flushRes.lastError ||
-              `${flushRes.remaining} perubahan lokal masih menunggu disinkronkan ke Server Pusat.`
-          );
-          return;
-        }
-      }
-
-      applyWriteSuccessStatus(false);
-      setSseConnected(getSocketConnected());
-      setServerConnected(true);
     } catch (err: any) {
-      setServerConnected(false);
-      setSyncStatus(readPendingOps().length > 0 ? 'pending' : 'error');
-      setSseConnected(false);
-      setCloudError(formatFriendlyFirestoreError(err, 'Gagal menyinkronkan Database Server Pusat.'));
+      setCloudError(err?.message || 'Gagal menyinkronkan ke cloud broker MQTT.');
     } finally {
       setCloudSyncBusy(false);
     }
   };
 
-  // Explicit Admin Account Sync to PostgreSQL Server
   const handleSyncAdminAccountToServer = async (
     overrideAccount?: AdminRTAccount
   ): Promise<{ ok: boolean; message?: string; account?: AdminRTAccount; user?: AuthUser }> => {
     setAdminSyncBusy(true);
-    setSyncStatus('connecting');
-    setCloudError(null);
     try {
-      const currentSnapshot = latestStateRef.current;
-      const rtStr = currentSnapshot.pengaturanKas?.profilRT?.namaRT || '08';
-      const rwStr = currentSnapshot.pengaturanKas?.profilRT?.namaRW || '05';
-      const ketuaNama = currentSnapshot.pengaturanKas?.kontakKetuaRT?.nama?.trim();
-      const ketuaTelp = currentSnapshot.pengaturanKas?.kontakKetuaRT?.telp?.trim();
-      const nowLabel = formatWaktuSyncID();
-      const nowIso = new Date().toISOString();
-
-      let targetAccount: AdminRTAccount | undefined = overrideAccount;
-
-      if (!targetAccount && currentUser?.role === 'admin') {
-        const matchedLocal =
-          currentSnapshot.adminAccounts.find(
-            (a) => a.username.toLowerCase() === currentUser.username.toLowerCase()
-          ) ||
-          serverAdminAccounts.find(
-            (a) => a.username.toLowerCase() === currentUser.username.toLowerCase()
-          );
-
-        targetAccount = matchedLocal || {
-          id: currentUser.username.toLowerCase() === 'admin' ? 'adm_rt08' : `adm_${Date.now()}`,
-          username: currentUser.username,
-          passwordHash:
-            currentUser.username.toLowerCase() === 'admin' ? 'rt08rw05' : `rt${rtStr}rw${rwStr}`,
-          nama: currentUser.nama || (ketuaNama ? `${ketuaNama} (Ketua RT ${rtStr})` : `Admin RT ${rtStr}`),
-          rt: rtStr,
-          rw: rwStr,
-          kontak: ketuaTelp || '0812-3456-7890',
-          jabatan: `Ketua RT ${rtStr} RW ${rwStr}`,
-          status: 'aktif',
-        };
-      }
-
-      if (!targetAccount) {
-        setSyncStatus('error');
-        return { ok: false, message: 'Tidak ada akun Admin RT aktif untuk disinkronkan.' };
-      }
-
-      const stampedAccount: AdminRTAccount = {
-        ...targetAccount,
-        terakhirLogin: targetAccount.terakhirLogin || nowLabel,
-        terakhirSinkronisasi: `Tersinkron ${nowLabel}`,
-        updatedAt: nowIso,
-      };
-
-      const res = await syncAdminAccountToServer({
-        account: stampedAccount,
-        syncData: readLegacyLocalCacheForMigration() || undefined,
-      });
-
-      if (!res.ok) {
-        const friendlyMsg = formatFriendlyFirestoreError(
-          res.message,
-          'Gagal menyinkronkan akun admin ke Server Pusat.'
-        );
-        setSyncStatus('error');
-        setCloudError(friendlyMsg);
-        return { ok: false, message: friendlyMsg };
-      }
-
-      if (res.serverData) {
-        applyAuthoritativeSnapshot(res.serverData);
-      } else {
-        await refreshAuthoritativeSnapshot();
-      }
-
-      clearLegacyLocalCache();
-      setHasPendingLocalMigration(false);
-      await flushPendingOps();
-
-      setServerConnected(true);
-      setSseConnected(getSocketConnected());
+      await mqttSync.forceSyncNow();
       flashWriteSuccess();
-      setRolloverNotice(
-        `Akun Admin "${stampedAccount.username}" & seluruh data tersinkron real-time ke Database Server Pusat!`
-      );
-      setTimeout(() => setRolloverNotice(null), 6000);
-      return { ok: true, account: res.account || stampedAccount, user: res.user || currentUser || undefined };
-    } catch (err: any) {
-      const msg = formatFriendlyFirestoreError(
-        err,
-        'Gagal menyinkronkan akun admin ke Server Pusat.'
-      );
-      setSyncStatus('error');
-      setCloudError(msg);
-      return { ok: false, message: msg };
+      const target =
+        overrideAccount ||
+        mqttSync
+          .getStore()
+          .accounts.find(
+            (a) => a.username.toLowerCase() === (currentUser?.username || '').toLowerCase()
+          );
+      return { ok: true, account: target, user: currentUser || undefined };
     } finally {
       setAdminSyncBusy(false);
     }
@@ -1628,132 +554,109 @@ export default function App() {
   // Annual Rollover Handler (Pergantian Tahun Otomatis - Saldo Berlanjut Tanpa Dikosongkan)
   const handleSwitchTahunAktif = async (newYear: number) => {
     if (newYear === tahunAktif) return;
+    const perm = assertRtWriteAllowed(currentUser);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
+    }
 
     const prevTahun = tahunAktif;
     const prevPengaturan = latestStateRef.current.pengaturanKas;
     const prevWarga = latestStateRef.current.wargaList;
     const currentEndSaldoUmum = totalKasUmumMasuk - totalKasUmumKeluar;
     const currentEndSaldoKematian = saldoKasKematianBerjalan;
-    const nowIso = new Date().toISOString();
+    const actorName = currentUser?.username || 'system';
+    const assignedRT =
+      currentUser?.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '';
 
-    if (newYear > tahunAktif) {
-      const updatedWarga = prevWarga.map((w) => {
-        const priorHistory = w.riwayatIuranPerTahun || {};
-        const currentYearHistory = priorHistory[tahunAktif] || w.riwayatIuran || {};
-        const currentYearStatus =
-          (w.statusIuranPerTahun && w.statusIuranPerTahun[tahunAktif]) || w.statusIuran;
-
-        const updatedPerTahun: Record<number, Record<number, boolean>> = {
-          ...priorHistory,
-          [tahunAktif]: currentYearHistory,
-        };
-
-        const updatedStatusPerTahun: Record<number, 'Sudah' | 'Belum'> = {
-          ...(w.statusIuranPerTahun || {}),
-          [tahunAktif]: currentYearStatus as 'Sudah' | 'Belum',
-        };
-
-        const newYearPaid: 'Sudah' | 'Belum' = updatedStatusPerTahun[newYear] || 'Belum';
-
-        return {
-          ...w,
-          statusIuran: newYearPaid,
-          riwayatIuranPerTahun: updatedPerTahun,
-          statusIuranPerTahun: updatedStatusPerTahun,
-          riwayatIuran: updatedPerTahun[newYear] || {},
-          updatedAt: nowIso,
-        };
-      });
-
+    if (newYear > prevTahun) {
       const nextPengaturan: PengaturanKas = {
         ...prevPengaturan,
         tahunAktif: newYear,
         saldoAwalKasUmum: currentEndSaldoUmum,
         saldoAwalKasKematian: currentEndSaldoKematian,
-        keteranganSaldoAwal: `Pindahan Saldo Akhir Tahun ${tahunAktif} ke Tahun ${newYear} (Otomatis Berlanjut)`,
+        keteranganSaldoAwal: `Pindahan Saldo Akhir Tahun ${prevTahun} ke Tahun ${newYear} (Otomatis Berlanjut)`,
         tanggalSaldoAwal: `${newYear}-01-01`,
-        updatedAt: nowIso,
       };
 
-      setWargaList(updatedWarga);
-      setPengaturanKas(nextPengaturan);
-      setTahunAktif(newYear);
-      latestStateRef.current = {
-        ...latestStateRef.current,
-        tahunAktif: newYear,
-        pengaturanKas: nextPengaturan,
-        wargaList: updatedWarga,
-      };
+      const res = await mqttSync.mutate(
+        (draft, nowIso) => {
+          draft.warga = draft.warga.map((w) => {
+            if (
+              currentUser?.role === 'admin' &&
+              assignedRT &&
+              assignedRT !== 'SEMUA' &&
+              getWargaRTCode(w, assignedRT) !== assignedRT
+            ) {
+              return w;
+            }
+            const priorHistory = w.riwayatIuranPerTahun || {};
+            const currentYearHistory = priorHistory[prevTahun] || w.riwayatIuran || {};
+            const currentYearStatus =
+              (w.statusIuranPerTahun && w.statusIuranPerTahun[prevTahun]) || w.statusIuran;
+
+            const updatedPerTahun: Record<number, Record<number, boolean>> = {
+              ...priorHistory,
+              [prevTahun]: currentYearHistory,
+            };
+            const updatedStatusPerTahun: Record<number, 'Sudah' | 'Belum'> = {
+              ...(w.statusIuranPerTahun || {}),
+              [prevTahun]: currentYearStatus as 'Sudah' | 'Belum',
+            };
+            const newYearPaid: 'Sudah' | 'Belum' = updatedStatusPerTahun[newYear] || 'Belum';
+
+            return {
+              ...w,
+              statusIuran: newYearPaid,
+              riwayatIuranPerTahun: updatedPerTahun,
+              statusIuranPerTahun: updatedStatusPerTahun,
+              riwayatIuran: updatedPerTahun[newYear] || {},
+              updatedAt: nowIso,
+              updatedBy: actorName,
+            };
+          });
+
+          draft.settings = {
+            pengaturanKas: { ...nextPengaturan, updatedAt: nowIso, updatedBy: actorName },
+            tahunAktif: newYear,
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          };
+
+          return ['settings', 'warga'];
+        },
+        {
+          user: currentUser,
+          action: 'ROLLOVER_TAHUN',
+          entityType: 'settings',
+          entityId: `tahun_${newYear}`,
+          rtScope: currentUser?.rtScope || 'SEMUA',
+          summary: `Pergantian tahun aktif dari ${prevTahun} ke ${newYear}.`,
+        }
+      );
+
+      if (res.synced) {
+        flashWriteSuccess();
+      }
       setRolloverNotice(
         `Pergantian Tahun ${newYear} Berhasil! Saldo kas berlanjut otomatis (Rp ${currentEndSaldoUmum.toLocaleString('id-ID')}). Status iuran tahun ${newYear} siap dicatat.`
       );
-
-      setSyncStatus('pending');
-      const queuedOps: PendingSyncOp[] = [
-        {
-          opKey: 'settings:active',
-          kind: 'saveSettings',
-          payload: nextPengaturan,
-          tahunAktif: newYear,
-          expectedVersion: prevPengaturan.version,
-        },
-        ...updatedWarga.map((w) => ({
-          opKey: `warga:${w.id}`,
-          kind: 'saveWarga' as const,
-          payload: w,
-          isUpdate: true,
-          expectedVersion: w.version,
-        })),
-      ];
-      const rollback = () => {
-        setWargaList(prevWarga);
-        setPengaturanKas(prevPengaturan);
-        setTahunAktif(prevTahun);
-        latestStateRef.current = {
-          ...latestStateRef.current,
-          tahunAktif: prevTahun,
-          pengaturanKas: prevPengaturan,
-          wargaList: prevWarga,
-        };
-      };
-
-      const settingsRes = await saveSettingsOnServer(nextPengaturan, newYear, prevPengaturan.version);
-      if (settingsRes.ok && settingsRes.pengaturanKas && isMountedRef.current) {
-        setPengaturanKas(settingsRes.pengaturanKas);
-        latestStateRef.current = {
-          ...latestStateRef.current,
-          pengaturanKas: settingsRes.pengaturanKas,
-        };
-      }
-
-      const wargaResults = await Promise.all(
-        updatedWarga.map((w) =>
-          putWargaToServer(w, {
-            expectedVersion: w.version,
-            clientMutationId: generateClientMutationId('rollover'),
-          })
-        )
-      );
-
-      const savedWargaMap = new Map<string, Warga>();
-      wargaResults.forEach((r) => {
-        if (r.ok && r.warga) savedWargaMap.set(r.warga.id, r.warga);
-      });
-      if (savedWargaMap.size > 0 && isMountedRef.current) {
-        setWargaList((prev) => {
-          const next = prev.map((w) => savedWargaMap.get(w.id) || w);
-          latestStateRef.current = { ...latestStateRef.current, wargaList: next };
-          return next;
-        });
-      }
-
-      await settleWriteBatch({
-        ops: queuedOps,
-        results: [settingsRes, ...wargaResults],
-        rollback,
-        fallbackError: 'Gagal menyinkronkan pergantian tahun ke Database Server Pusat.',
-      });
     } else {
+      const res = await mqttSync.mutate((draft, nowIso) => {
+        draft.settings = {
+          pengaturanKas: {
+            ...draft.settings.pengaturanKas,
+            tahunAktif: newYear,
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          },
+          tahunAktif: newYear,
+          updatedAt: nowIso,
+          updatedBy: actorName,
+        };
+        return ['settings'];
+      });
+
       const updatedWargaView = prevWarga.map((w) => {
         const pastStatus = (w.statusIuranPerTahun && w.statusIuranPerTahun[newYear]) || 'Sudah';
         const pastHistory = (w.riwayatIuranPerTahun && w.riwayatIuranPerTahun[newYear]) || {};
@@ -1763,555 +666,581 @@ export default function App() {
           riwayatIuran: pastHistory,
         };
       });
-      const nextPengaturan: PengaturanKas = {
-        ...prevPengaturan,
-        tahunAktif: newYear,
-        updatedAt: nowIso,
-      };
       setWargaList(updatedWargaView);
-      setPengaturanKas(nextPengaturan);
-      setTahunAktif(newYear);
-      latestStateRef.current = {
-        ...latestStateRef.current,
-        tahunAktif: newYear,
-        pengaturanKas: nextPengaturan,
-        wargaList: updatedWargaView,
-      };
-      setRolloverNotice(`Melihat arsip pembukuan tahun ${newYear}.`);
-
-      setSyncStatus('pending');
-      const ops: PendingSyncOp[] = [
-        {
-          opKey: 'settings:active',
-          kind: 'saveSettings',
-          payload: nextPengaturan,
-          tahunAktif: newYear,
-          expectedVersion: prevPengaturan.version,
-        },
-      ];
-      const rollback = () => {
-        setWargaList(prevWarga);
-        setPengaturanKas(prevPengaturan);
-        setTahunAktif(prevTahun);
-        latestStateRef.current = {
-          ...latestStateRef.current,
-          tahunAktif: prevTahun,
-          pengaturanKas: prevPengaturan,
-          wargaList: prevWarga,
-        };
-      };
-      const setRes = await saveSettingsOnServer(nextPengaturan, newYear, prevPengaturan.version);
-      if (setRes.ok && setRes.pengaturanKas && isMountedRef.current) {
-        setPengaturanKas(setRes.pengaturanKas);
-        latestStateRef.current = { ...latestStateRef.current, pengaturanKas: setRes.pengaturanKas };
+      if (res.synced) {
+        flashWriteSuccess();
       }
-      await settleWriteBatch({
-        ops,
-        results: [setRes],
-        rollback,
-        fallbackError: 'Gagal menyimpan tahun aktif ke Database Server Pusat.',
-      });
+      setRolloverNotice(`Melihat arsip pembukuan tahun ${newYear}.`);
     }
 
     setTimeout(() => setRolloverNotice(null), 5000);
   };
 
+  // Helper: reconcile affected warga dues within an atomic MQTT draft mutation
+  const reconcileAffectedWargaInDraft = (
+    draft: MqttDatabaseStore,
+    affectedTxs: Transaction[],
+    forceClearIfZero: boolean,
+    nowIso: string
+  ): boolean => {
+    if (draft.warga.length === 0 || affectedTxs.length === 0) return false;
+    const activeYear = draft.settings?.tahunAktif || tahunAktif;
+    const activeSettings = draft.settings?.pengaturanKas || pengaturanKas;
+    const actorName = currentUserRef.current?.username || 'system';
+
+    const matchedIds = new Set<string>();
+    for (const tx of affectedTxs) {
+      if (!tx || tx.isSaldoAwal) continue;
+      if (tx.residentId) matchedIds.add(tx.residentId);
+      for (const w of draft.warga) {
+        if (doesTransactionBelongToWarga(tx, w, draft.warga)) {
+          matchedIds.add(w.id);
+        }
+      }
+    }
+
+    if (matchedIds.size === 0) return false;
+
+    const scopedAdminRT =
+      currentUserRef.current?.role === 'admin'
+        ? normalizeRTCode(currentUserRef.current.rtScope)
+        : '';
+
+    let anyChanged = false;
+    draft.warga = draft.warga.map((w) => {
+      if (!matchedIds.has(w.id)) return w;
+      if (
+        currentUserRef.current?.role === 'admin' &&
+        scopedAdminRT &&
+        scopedAdminRT !== 'SEMUA' &&
+        getWargaRTCode(w, scopedAdminRT) !== scopedAdminRT
+      ) {
+        return w;
+      }
+      const reconciled = reconcileWargaCashFromTransactions({
+        warga: w,
+        transactions: draft.transactions,
+        tahunAktif: activeYear,
+        pengaturanKas: activeSettings,
+        allWarga: draft.warga,
+        nowIso,
+        forceClearIfZero,
+      });
+      if (hasWargaCashDiff(w, reconciled, activeYear)) {
+        anyChanged = true;
+        return { ...reconciled, updatedBy: actorName };
+      }
+      return w;
+    });
+
+    return anyChanged;
+  };
+
   // Handlers for Government Aid
   const handleAddBantuan = async (b: Omit<BantuanPemerintah, 'id'>) => {
-    const prevList = latestStateRef.current.bantuanList;
-    const nowIso = new Date().toISOString();
-    const newItem: BantuanPemerintah = {
-      ...b,
-      id: toValidDocId('b_' + Date.now(), 'b'),
-      updatedAt: nowIso,
-    };
-    const nextList = [newItem, ...prevList];
-    setBantuanList(nextList);
-    latestStateRef.current = { ...latestStateRef.current, bantuanList: nextList };
-    setSyncStatus('pending');
-    const ops: PendingSyncOp[] = [
-      { opKey: `bantuan:${newItem.id}`, kind: 'saveBantuan', payload: newItem, isUpdate: false },
-    ];
-    const rollback = () => {
-      setBantuanList(prevList);
-      latestStateRef.current = { ...latestStateRef.current, bantuanList: prevList };
-    };
-    const res = await saveBantuanOnServer(newItem, { isUpdate: false });
-    if (res.ok && res.bantuan && isMountedRef.current) {
-      setBantuanList((prev) => {
-        const next = prev.map((item) => (item.id === newItem.id ? res.bantuan! : item));
-        latestStateRef.current = { ...latestStateRef.current, bantuanList: next };
-        return next;
-      });
+    const resolvedRt =
+      normalizeRTCode(b.rtScope) ||
+      (currentUser?.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '') ||
+      (currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
+        ? normalizeRTCode(selectedServerRT)
+        : '') ||
+      normalizeRTCode(pengaturanKas.profilRT?.namaRT) ||
+      '08';
+    const perm = assertRtWriteAllowed(currentUser, resolvedRt);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
     }
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal menyinkronkan data bantuan ke Database Server Pusat.',
-    });
+
+    const newId = toValidDocId('b_' + Date.now(), 'b');
+    const actorName = currentUser?.username || 'system';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        const newItem: BantuanPemerintah = {
+          ...b,
+          id: newId,
+          rtScope: b.rtScope || `RT ${resolvedRt} RW ${pengaturanKas.profilRT?.namaRW || '05'}`,
+          updatedAt: nowIso,
+          updatedBy: actorName,
+        };
+        draft.bantuan = [newItem, ...draft.bantuan];
+        return ['bantuan'];
+      },
+      {
+        user: currentUser,
+        action: 'ADD_BANTUAN',
+        entityType: 'bantuan',
+        entityId: newId,
+        rtScope: `RT ${resolvedRt}`,
+        summary: `Menambah penerima bantuan ${b.jenisBantuan} untuk ${b.namaPenerima} (RT ${resolvedRt})`,
+        notification: {
+          title: `Data Bantuan Baru (RT ${resolvedRt})`,
+          body: `Penerima bantuan ${b.jenisBantuan}: ${b.namaPenerima} telah dicatat pada RT ${resolvedRt}.`,
+          category: 'bantuan',
+          entityType: 'bantuan',
+          entityId: newId,
+          targetRts: [resolvedRt],
+          targetRoles: ['server', 'admin'],
+          createdBy: actorName,
+        },
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
   const handleUpdateStatusBantuan = async (id: string, newStatus: BantuanPemerintah['status']) => {
-    const prevList = latestStateRef.current.bantuanList;
-    const nowIso = new Date().toISOString();
-    const existing = prevList.find((item) => item.id === id);
+    const fullStore = mqttSync.getStore();
+    const existing = fullStore.bantuan.find((item) => item.id === id);
     if (!existing) return;
-    const updatedItem: BantuanPemerintah = { ...existing, status: newStatus, updatedAt: nowIso };
-    const nextList = prevList.map((item) => (item.id === id ? updatedItem : item));
-    setBantuanList(nextList);
-    latestStateRef.current = { ...latestStateRef.current, bantuanList: nextList };
-    setSyncStatus('pending');
-    const ops: PendingSyncOp[] = [
-      {
-        opKey: `bantuan:${updatedItem.id}`,
-        kind: 'saveBantuan',
-        payload: updatedItem,
-        isUpdate: true,
-        expectedVersion: existing.version,
-      },
-    ];
-    const rollback = () => {
-      setBantuanList(prevList);
-      latestStateRef.current = { ...latestStateRef.current, bantuanList: prevList };
-    };
-    const res = await saveBantuanOnServer(updatedItem, {
-      isUpdate: true,
-      expectedVersion: existing.version,
-    });
-    if (res.ok && res.bantuan && isMountedRef.current) {
-      setBantuanList((prev) => {
-        const next = prev.map((item) => (item.id === id ? res.bantuan! : item));
-        latestStateRef.current = { ...latestStateRef.current, bantuanList: next };
-        return next;
-      });
+    const itemRt = getBantuanRTCode(existing, fullStore.warga, '');
+    const perm = assertRtWriteAllowed(currentUser, itemRt);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
     }
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal memperbarui status bantuan di Database Server Pusat.',
-    });
+
+    const actorName = currentUser?.username || 'system';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.bantuan = draft.bantuan.map((item) =>
+          item.id === id
+            ? { ...item, status: newStatus, updatedAt: nowIso, updatedBy: actorName }
+            : item
+        );
+        return ['bantuan'];
+      },
+      {
+        user: currentUser,
+        action: 'UPDATE_BANTUAN_STATUS',
+        entityType: 'bantuan',
+        entityId: id,
+        rtScope: existing.rtScope || (itemRt ? `RT ${itemRt}` : undefined),
+        summary: `Memperbarui status bantuan ${existing.namaPenerima} menjadi ${newStatus}`,
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
   const handleDeleteBantuan = async (id: string) => {
-    const prevList = latestStateRef.current.bantuanList;
-    const nextList = prevList.filter((b) => b.id !== id);
-    setBantuanList(nextList);
-    latestStateRef.current = { ...latestStateRef.current, bantuanList: nextList };
-    setSyncStatus('pending');
-    const ops: PendingSyncOp[] = [
-      { opKey: `bantuan:${id}`, kind: 'deleteBantuan', targetId: id },
-    ];
-    const rollback = () => {
-      setBantuanList(prevList);
-      latestStateRef.current = { ...latestStateRef.current, bantuanList: prevList };
-    };
-    const res = await deleteBantuanOnServer(id);
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal menghapus data bantuan di Database Server Pusat.',
-    });
+    const fullStore = mqttSync.getStore();
+    const existing = fullStore.bantuan.find((item) => item.id === id);
+    if (!existing) return;
+    const itemRt = getBantuanRTCode(existing, fullStore.warga, '');
+    const perm = assertRtWriteAllowed(currentUser, itemRt);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
+    }
+
+    const actorName = currentUser?.username || 'system';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.bantuan = draft.bantuan.filter((b) => b.id !== id);
+        mqttSync.addTombstone(draft, 'bantuan', id, nowIso, actorName);
+        return ['bantuan', 'tombstones'];
+      },
+      {
+        user: currentUser,
+        action: 'DELETE_BANTUAN',
+        entityType: 'bantuan',
+        entityId: id,
+        rtScope: existing.rtScope || (itemRt ? `RT ${itemRt}` : undefined),
+        summary: `Menghapus data bantuan ${existing.namaPenerima} (${existing.jenisBantuan})`,
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
   // Handlers for PDF Documents
   const handleUploadDokumen = async (docItem: Omit<DokumenPdfWarga, 'id'>) => {
-    const prevList = latestStateRef.current.dokumenList;
-    const nowIso = new Date().toISOString();
-    const newDoc: DokumenPdfWarga = {
-      ...docItem,
-      id: toValidDocId('doc_' + Date.now(), 'doc'),
-      updatedAt: nowIso,
-    };
-    const nextList = [newDoc, ...prevList];
-    setDokumenList(nextList);
-    latestStateRef.current = { ...latestStateRef.current, dokumenList: nextList };
-    setSyncStatus('pending');
-    const ops: PendingSyncOp[] = [
-      { opKey: `dokumen:${newDoc.id}`, kind: 'saveDokumen', payload: newDoc },
-    ];
-    const rollback = () => {
-      setDokumenList(prevList);
-      latestStateRef.current = { ...latestStateRef.current, dokumenList: prevList };
-    };
-    const res = await saveDokumenOnServer(newDoc);
-    if (res.ok && res.dokumen && isMountedRef.current) {
-      setDokumenList((prev) => {
-        const next = prev.map((d) => (d.id === newDoc.id ? res.dokumen! : d));
-        latestStateRef.current = { ...latestStateRef.current, dokumenList: next };
-        return next;
-      });
+    const resolvedRt =
+      normalizeRTCode(docItem.rtScope) ||
+      (currentUser?.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '') ||
+      normalizeRTCode(pengaturanKas.profilRT?.namaRT) ||
+      '08';
+    const perm = assertRtWriteAllowed(currentUser, resolvedRt);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
     }
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal menyinkronkan dokumen PDF ke Database Server Pusat.',
-    });
+
+    const newId = toValidDocId('doc_' + Date.now(), 'doc');
+    const actorName = currentUser?.username || 'system';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        const newDoc: DokumenPdfWarga = {
+          ...docItem,
+          id: newId,
+          rtScope: docItem.rtScope || `RT ${resolvedRt} RW ${pengaturanKas.profilRT?.namaRW || '05'}`,
+          updatedAt: nowIso,
+          updatedBy: actorName,
+        };
+        draft.dokumen = [newDoc, ...draft.dokumen];
+        return ['dokumen'];
+      },
+      {
+        user: currentUser,
+        action: 'UPLOAD_DOKUMEN',
+        entityType: 'dokumen',
+        entityId: newId,
+        rtScope: `RT ${resolvedRt}`,
+        summary: `Mengunggah dokumen arsip PDF: ${docItem.judul}`,
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
   const handleDeleteDokumen = async (id: string) => {
-    const prevList = latestStateRef.current.dokumenList;
-    const nextList = prevList.filter((d) => d.id !== id);
-    setDokumenList(nextList);
-    latestStateRef.current = { ...latestStateRef.current, dokumenList: nextList };
-    setSyncStatus('pending');
-    const ops: PendingSyncOp[] = [
-      { opKey: `dokumen:${id}`, kind: 'deleteDokumen', targetId: id },
-    ];
-    const rollback = () => {
-      setDokumenList(prevList);
-      latestStateRef.current = { ...latestStateRef.current, dokumenList: prevList };
-    };
-    const res = await deleteDokumenOnServer(id);
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal menghapus dokumen PDF di Database Server Pusat.',
-    });
+    const fullStore = mqttSync.getStore();
+    const existing = fullStore.dokumen.find((d) => d.id === id);
+    if (!existing) return;
+    const perm = assertRtWriteAllowed(currentUser, normalizeRTCode(existing.rtScope || ''));
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
+    }
+
+    const actorName = currentUser?.username || 'system';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.dokumen = draft.dokumen.filter((d) => d.id !== id);
+        mqttSync.addTombstone(draft, 'dokumen', id, nowIso, actorName);
+        return ['dokumen', 'tombstones'];
+      },
+      {
+        user: currentUser,
+        action: 'DELETE_DOKUMEN',
+        entityType: 'dokumen',
+        entityId: id,
+        rtScope: existing.rtScope,
+        summary: `Menghapus dokumen arsip PDF: ${existing.judul}`,
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
   // Sample data loader for demo
   const handleLoadSample = async () => {
-    const prevTransactions = latestStateRef.current.transactions;
-    const nowIso = new Date().toISOString();
-    const rtStr = pengaturanKas.profilRT?.namaRT || '08';
+    const rtStr =
+      currentUser?.role === 'admin'
+        ? normalizeRTCode(currentUser.rtScope) || '08'
+        : currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
+        ? normalizeRTCode(selectedServerRT) || '08'
+        : pengaturanKas.profilRT?.namaRT || '08';
+    const perm = assertRtWriteAllowed(currentUser, rtStr);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
+    }
     const rwStr = pengaturanKas.profilRT?.namaRW || '05';
     const scopeStr = `RT ${rtStr} RW ${rwStr}`;
-    const samples: Transaction[] = [
-      { id: 'sample_1_' + Date.now(), tanggal: `${tahunAktif}-10-12`, kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan Periode Aktif', nominal: 250000, tipe: 'masuk', namaWarga: 'Ahmad Fauzi', tahun: tahunAktif, rtScope: scopeStr, updatedAt: nowIso },
-      { id: 'sample_2_' + (Date.now() + 1), tanggal: `${tahunAktif}-10-10`, kategori: 'Iuran Warga', keterangan: 'Iuran Jimpitan & Kas Kematian', nominal: 350000, tipe: 'masuk', namaWarga: 'Siti Aminah', tahun: tahunAktif, rtScope: scopeStr, updatedAt: nowIso },
-      { id: 'sample_3_' + (Date.now() + 2), tanggal: `${tahunAktif}-10-08`, kategori: 'Kas Kematian', keterangan: 'Pengadaan Kain Mori & Perlengkapan Jenazah', nominal: 200000, tipe: 'keluar', namaWarga: 'Bendahara Kas', tahun: tahunAktif, rtScope: scopeStr, updatedAt: nowIso },
-    ];
-    const nextTransactions = [...samples, ...prevTransactions];
-    setTransactions(nextTransactions);
-    latestStateRef.current = { ...latestStateRef.current, transactions: nextTransactions };
-    setSyncStatus('pending');
-    const ops: PendingSyncOp[] = samples.map((tx) => ({
-      opKey: `tx:${tx.id}`,
-      kind: 'saveTx' as const,
-      payload: tx,
-      isUpdate: false,
-    }));
-    const results = await Promise.all(
-      samples.map((tx) =>
-        saveTransactionOnServer(tx, {
-          isUpdate: false,
-          clientMutationId: generateClientMutationId('sample'),
-        })
-      )
-    );
-    const savedMap = new Map<string, Transaction>();
-    results.forEach((r) => {
-      if (r.ok && r.transaction) savedMap.set(r.transaction.id, r.transaction);
-    });
-    if (savedMap.size > 0 && isMountedRef.current) {
-      setTransactions((prev) => {
-        const next = prev.map((t) => savedMap.get(t.id) || t);
-        latestStateRef.current = { ...latestStateRef.current, transactions: next };
-        return next;
-      });
-    }
-    await settleWriteBatch({
-      ops,
-      results,
-      rollback: () => {
-        setTransactions(prevTransactions);
-        latestStateRef.current = { ...latestStateRef.current, transactions: prevTransactions };
+    const actorName = currentUser?.username || 'system';
+    const base = Date.now();
+
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        const samples: Transaction[] = [
+          {
+            id: `sample_1_${base}`,
+            tanggal: `${tahunAktif}-10-12`,
+            kategori: 'Iuran Warga',
+            keterangan: 'Iuran Jimpitan Periode Aktif',
+            nominal: 250000,
+            tipe: 'masuk',
+            namaWarga: 'Ahmad Fauzi',
+            tahun: tahunAktif,
+            rtScope: scopeStr,
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          },
+          {
+            id: `sample_2_${base + 1}`,
+            tanggal: `${tahunAktif}-10-10`,
+            kategori: 'Iuran Warga',
+            keterangan: 'Iuran Jimpitan & Kas Kematian',
+            nominal: 350000,
+            tipe: 'masuk',
+            namaWarga: 'Siti Aminah',
+            tahun: tahunAktif,
+            rtScope: scopeStr,
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          },
+          {
+            id: `sample_3_${base + 2}`,
+            tanggal: `${tahunAktif}-10-08`,
+            kategori: 'Kas Kematian',
+            keterangan: 'Pengadaan Kain Mori & Perlengkapan Jenazah',
+            nominal: 200000,
+            tipe: 'keluar',
+            namaWarga: 'Bendahara Kas',
+            tahun: tahunAktif,
+            rtScope: scopeStr,
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          },
+        ];
+        draft.transactions = [...samples, ...draft.transactions];
+        return ['transactions'];
       },
-      fallbackError: 'Sebagian transaksi contoh gagal disimpan ke Database Server Pusat.',
-    });
+      {
+        user: currentUser,
+        action: 'LOAD_SAMPLE_TX',
+        entityType: 'transactions',
+        entityId: `sample_${base}`,
+        rtScope: scopeStr,
+        summary: `Menambahkan 3 transaksi contoh untuk ${scopeStr}`,
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
-  // Complete Reset (Super Admin RW Only): Wipes all operational records from PostgreSQL
+  // Complete Reset (Super Admin RW Only)
   const handleResetEmpty = async () => {
-    const nowIso = new Date().toISOString();
-    const prevSnapshot = latestStateRef.current;
-
-    if (currentUser?.role !== 'server') {
+    if (!isSuperAdminUser(currentUser)) {
       setSyncStatus('error');
-      setCloudError('Reset total database hanya diperbolehkan untuk Super Admin Server RW 05.');
+      setCloudError('Reset total database hanya diperbolehkan untuk Super Admin RW 05.');
       return;
     }
 
-    const resetSettings: PengaturanKas = {
-      ...prevSnapshot.pengaturanKas,
-      saldoAwalKasUmum: 0,
-      saldoAwalKasKematian: 0,
-      keteranganSaldoAwal: 'Sisa Kas RT Periode Lalu',
-      tanggalSaldoAwal: `${tahunAktif}-01-01`,
-      updatedAt: nowIso,
-    };
+    const actorName = currentUser?.username || 'adminrw05';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.warga.forEach((w) => mqttSync.addTombstone(draft, 'warga', w.id, nowIso, actorName));
+        draft.transactions.forEach((t) =>
+          mqttSync.addTombstone(draft, 'transactions', t.id, nowIso, actorName)
+        );
+        draft.bantuan.forEach((b) =>
+          mqttSync.addTombstone(draft, 'bantuan', b.id, nowIso, actorName)
+        );
+        draft.pengumuman.forEach((p) =>
+          mqttSync.addTombstone(draft, 'pengumuman', p.id, nowIso, actorName)
+        );
+        draft.dokumen.forEach((d) =>
+          mqttSync.addTombstone(draft, 'dokumen', d.id, nowIso, actorName)
+        );
+        draft.laporan.forEach((l) =>
+          mqttSync.addTombstone(draft, 'laporan', l.id, nowIso, actorName)
+        );
 
-    setWargaList([]);
-    setTransactions([]);
-    setBantuanList([]);
-    setPengumumanList([]);
-    setDokumenList([]);
-    setLaporanBulananRT([]);
+        draft.warga = [];
+        draft.transactions = [];
+        draft.bantuan = [];
+        draft.pengumuman = [];
+        draft.dokumen = [];
+        draft.laporan = [];
+        draft.notifications = [];
+        draft.settings = {
+          pengaturanKas: {
+            ...draft.settings.pengaturanKas,
+            saldoAwalKasUmum: 0,
+            saldoAwalKasKematian: 0,
+            keteranganSaldoAwal: 'Sisa Kas RT Periode Lalu',
+            tanggalSaldoAwal: `${tahunAktif}-01-01`,
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          },
+          tahunAktif,
+          updatedAt: nowIso,
+          updatedBy: actorName,
+        };
+        return [
+          'warga',
+          'transactions',
+          'bantuan',
+          'pengumuman',
+          'dokumen',
+          'laporan',
+          'notifications',
+          'settings',
+          'tombstones',
+        ];
+      },
+      {
+        user: currentUser,
+        action: 'RESET_ALL_DATA',
+        entityType: 'system',
+        entityId: 'reset_all',
+        rtScope: 'SEMUA',
+        summary: 'Melakukan reset bersih seluruh data operasional RW 05.',
+      }
+    );
+
     setFloatingAnnouncement(null);
     setDismissedNotificationIds([]);
-    setPengaturanKas(resetSettings);
-
-    setSyncStatus('connecting');
-    const ok = await clearAppData(prevSnapshot.adminAccounts);
-
-    if (ok) {
-      await refreshAuthoritativeSnapshot().catch(() => false);
-      setServerConnected(true);
-      applyWriteSuccessStatus(false);
-      setCloudError(null);
-      setRolloverNotice('Seluruh data berhasil direset secara bersih di Database Server Pusat.');
+    if (res.synced) {
+      flashWriteSuccess();
+      setRolloverNotice('Seluruh data berhasil direset secara bersih dan disinkronkan ke cloud.');
     } else {
-      setWargaList(prevSnapshot.wargaList);
-      setTransactions(prevSnapshot.transactions);
-      setBantuanList(prevSnapshot.bantuanList);
-      setPengumumanList(prevSnapshot.pengumumanList);
-      setDokumenList(prevSnapshot.dokumenList);
-      setLaporanBulananRT(prevSnapshot.laporanBulananRT);
-      setPengaturanKas(prevSnapshot.pengaturanKas);
-      latestStateRef.current = prevSnapshot;
-      setSyncStatus('error');
-      setCloudError('Gagal mereset database server pusat. Periksa hak akses dan koneksi internet Anda.');
+      setRolloverNotice('Data direset lokal dan akan otomatis tersinkron ke cloud saat online.');
     }
     setTimeout(() => setRolloverNotice(null), 5000);
   };
 
   const handleUpdatePengaturan = async (newSetting: Partial<PengaturanKas>) => {
-    const nowIso = new Date().toISOString();
+    const perm = assertRtWriteAllowed(currentUser);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
+    }
+
     const prev = latestStateRef.current.pengaturanKas || pengaturanKas;
-    const prevPengumuman = latestStateRef.current.pengumumanList;
-    const prevAdmins = latestStateRef.current.adminAccounts;
-    const merged: PengaturanKas = { ...prev, ...newSetting, updatedAt: nowIso };
-    setPengaturanKas(merged);
-    latestStateRef.current = { ...latestStateRef.current, pengaturanKas: merged };
-    setSyncStatus('pending');
-
-    const queuedOps: PendingSyncOp[] = [
-      {
-        opKey: 'settings:active',
-        kind: 'saveSettings',
-        payload: merged,
-        tahunAktif,
-        expectedVersion: prev.version,
-      },
-    ];
-    const settingsRes = await saveSettingsOnServer(merged, tahunAktif, prev.version);
-    if (settingsRes.ok && settingsRes.pengaturanKas && isMountedRef.current) {
-      setPengaturanKas(settingsRes.pengaturanKas);
-      latestStateRef.current = {
-        ...latestStateRef.current,
-        pengaturanKas: settingsRes.pengaturanKas,
-      };
-    }
-    const results: ServerWriteResult[] = [settingsRes];
-
     const oldKetua = (prev.kontakKetuaRT?.nama || '').trim();
-    const newKetua = (merged.kontakKetuaRT?.nama || '').trim();
+    const newKetua = (newSetting.kontakKetuaRT?.nama ?? prev.kontakKetuaRT?.nama ?? '').trim();
     const oldBendahara = (prev.kontakBendahara?.nama || '').trim();
-    const newBendahara = (merged.kontakBendahara?.nama || '').trim();
+    const newBendahara = (newSetting.kontakBendahara?.nama ?? prev.kontakBendahara?.nama ?? '').trim();
     const oldRT = (prev.profilRT?.namaRT || '08').trim();
-    const newRT = (merged.profilRT?.namaRT || '08').trim();
-    const newRW = (merged.profilRT?.namaRW || '05').trim();
-    const newKetuaTelp = (merged.kontakKetuaRT?.telp || '').trim();
+    const newRT = (newSetting.profilRT?.namaRT ?? prev.profilRT?.namaRT ?? '08').trim();
+    const newRW = (newSetting.profilRT?.namaRW ?? prev.profilRT?.namaRW ?? '05').trim();
+    const newKetuaTelp = (newSetting.kontakKetuaRT?.telp ?? prev.kontakKetuaRT?.telp ?? '').trim();
+    const actorName = currentUser?.username || 'system';
+    const isSuper = isSuperAdminUser(currentUser);
+    const myRT = normalizeRTCode(currentUser?.rtScope);
 
-    const pengurusChanged =
-      (newKetua && newKetua !== oldKetua) ||
-      (newBendahara && newBendahara !== oldBendahara) ||
-      newRT !== oldRT;
-
-    let updatedPengumumanList = prevPengumuman;
-
-    if (pengurusChanged) {
-      const legacyKetuaPlaceholders = ['bpk. suwardi', 'bapak suwardi', oldKetua.toLowerCase()].filter(Boolean);
-      const legacyBendaharaPlaceholders = ['bpk. bambang s.', 'bapak bambang s.', 'bpk. bambang', 'bapak bambang', oldBendahara.toLowerCase()].filter(Boolean);
-
-      const canEditAnnouncement = (p: PengumumanRT): boolean => {
-        if (currentUser?.role === 'server') return true;
-        const scopeStr = (p.rtScope || '').trim();
-        const targets = Array.isArray(p.targetRts) ? p.targetRts : [];
-        if (targets.includes('SEMUA') || /^semua(\s+rt)?$/i.test(scopeStr)) return false;
-        const myRT = normalizeRTCode(currentUser?.rtScope);
-        if (targets.length > 0 && myRT) {
-          return targets.length === 1 && targets[0] === myRT;
-        }
-        return !/^semua(\s+rt)?$/i.test(scopeStr);
-      };
-
-      const changedPengumumanTargets: PengumumanRT[] = [];
-      const syncPengumumanItem = (p: PengumumanRT): PengumumanRT => {
-        if (!canEditAnnouncement(p)) return p;
-        const curNama = (p.namaPengurus || '').trim().toLowerCase();
-        const curJabatan = (p.jabatanPengurus || '').trim();
-        const curJabatanLower = curJabatan.toLowerCase();
-        const isBendaharaTarget =
-          curJabatanLower.includes('bendahara') ||
-          (curNama !== '' && legacyBendaharaPlaceholders.includes(curNama));
-        const shouldSyncName =
-          !curNama ||
-          legacyKetuaPlaceholders.includes(curNama) ||
-          legacyBendaharaPlaceholders.includes(curNama);
-
-        const nextNama = shouldSyncName
-          ? (isBendaharaTarget ? newBendahara || newKetua : newKetua || p.namaPengurus)
-          : p.namaPengurus;
-
-        let nextJabatan = curJabatan;
-        if (!curJabatan) {
-          nextJabatan = isBendaharaTarget ? `Bendahara RT ${newRT}` : `Ketua RT ${newRT}`;
-        } else if (/^ketua\s+rt\b/i.test(curJabatan)) {
-          nextJabatan = `Ketua RT ${newRT}`;
-        } else if (/^bendahara\s+rt\b/i.test(curJabatan)) {
-          nextJabatan = `Bendahara RT ${newRT}`;
-        }
-
-        const nextPenulis =
-          nextNama && (!p.penulis || p.penulis.startsWith('Pengurus RT') || p.penulis.startsWith('Ketua RT') || p.penulis.startsWith('Bendahara RT') || legacyKetuaPlaceholders.includes(p.penulis.toLowerCase()) || legacyBendaharaPlaceholders.includes(p.penulis.toLowerCase()))
-            ? `${nextJabatan} (${nextNama})`
-            : p.penulis;
-
-        if (
-          nextNama === p.namaPengurus &&
-          nextJabatan === p.jabatanPengurus &&
-          nextPenulis === p.penulis
-        ) {
-          return p;
-        }
-
-        const updatedItem: PengumumanRT = {
-          ...p,
-          namaPengurus: nextNama,
-          jabatanPengurus: nextJabatan,
-          penulis: nextPenulis,
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        const merged: PengaturanKas = {
+          ...draft.settings.pengaturanKas,
+          ...newSetting,
           updatedAt: nowIso,
+          updatedBy: actorName,
         };
-        changedPengumumanTargets.push(updatedItem);
-        return updatedItem;
-      };
-
-      updatedPengumumanList = prevPengumuman.map(syncPengumumanItem);
-      setPengumumanList(updatedPengumumanList);
-      latestStateRef.current = { ...latestStateRef.current, pengumumanList: updatedPengumumanList };
-      setFloatingAnnouncement((prevFloat) => (prevFloat ? syncPengumumanItem(prevFloat) : prevFloat));
-      if (changedPengumumanTargets.length > 0) {
-        const pengResults = await Promise.all(
-          changedPengumumanTargets.map((p) =>
-            savePengumumanOnServer(p, {
-              isUpdate: true,
-              expectedVersion: p.version,
-              clientMutationId: generateClientMutationId('peng'),
-            })
-          )
-        );
-        const savedPengMap = new Map<string, PengumumanRT>();
-        changedPengumumanTargets.forEach((p, idx) => {
-          const pr = pengResults[idx];
-          if (pr?.ok && pr.pengumuman) savedPengMap.set(pr.pengumuman.id, pr.pengumuman);
-          queuedOps.push({
-            opKey: `pengumuman:${p.id}`,
-            kind: 'savePengumuman',
-            payload: p,
-            isUpdate: true,
-            expectedVersion: p.version,
-          });
-          results.push(pr);
-        });
-        if (savedPengMap.size > 0 && isMountedRef.current) {
-          setPengumumanList((prevList) => {
-            const nextList = prevList.map((item) => savedPengMap.get(item.id) || item);
-            latestStateRef.current = { ...latestStateRef.current, pengumumanList: nextList };
-            return nextList;
-          });
-        }
-      }
-
-      if (newKetua) {
-        const myUsernameLower = (currentUser?.username || '').trim().toLowerCase();
-        const isTargetAdminAcc = (acc: AdminRTAccount): boolean => {
-          if (currentUser?.role === 'server') {
-            return (
-              acc.id === 'adm_rt08' ||
-              acc.username.toLowerCase() === 'admin' ||
-              Boolean(oldKetua && acc.nama.toLowerCase().includes(oldKetua.toLowerCase()))
-            );
-          }
-          return Boolean(myUsernameLower) && acc.username.trim().toLowerCase() === myUsernameLower;
+        draft.settings = {
+          pengaturanKas: merged,
+          tahunAktif: merged.tahunAktif || draft.settings.tahunAktif,
+          updatedAt: nowIso,
+          updatedBy: actorName,
         };
 
-        const adminsToSave: Array<{ nextAcc: AdminRTAccount; expectedVersion?: number }> = [];
-        const updatedAdmins = prevAdmins.map((acc) => {
-          if (!isTargetAdminAcc(acc)) return acc;
-          const nextAcc: AdminRTAccount = {
-            ...acc,
-            nama: `${newKetua} (Ketua RT ${newRT})`,
-            rt: currentUser?.role === 'server' ? newRT : acc.rt,
-            rw: newRW,
-            kontak: newKetuaTelp || acc.kontak,
-            jabatan: `Ketua RT ${newRT} RW ${newRW}`,
-            updatedAt: nowIso,
+        const touched: MqttModuleTopic[] = ['settings'];
+        const pengurusChanged =
+          (newKetua && newKetua !== oldKetua) ||
+          (newBendahara && newBendahara !== oldBendahara) ||
+          newRT !== oldRT;
+
+        if (pengurusChanged) {
+          const legacyKetuaPlaceholders = ['bpk. suwardi', 'bapak suwardi', oldKetua.toLowerCase()].filter(Boolean);
+          const legacyBendaharaPlaceholders = ['bpk. bambang s.', 'bapak bambang s.', 'bpk. bambang', 'bapak bambang', oldBendahara.toLowerCase()].filter(Boolean);
+
+          const canEditAnnouncement = (p: PengumumanRT): boolean => {
+            if (isSuper) return true;
+            const scopeStr = (p.rtScope || '').trim();
+            const targets = Array.isArray(p.targetRts) ? p.targetRts : [];
+            if (targets.includes('SEMUA') || /^semua(\s+rt)?$/i.test(scopeStr)) return false;
+            if (targets.length > 0 && myRT) {
+              return targets.length === 1 && normalizeRTCode(targets[0]) === myRT;
+            }
+            return normalizeRTCode(scopeStr) === myRT;
           };
-          adminsToSave.push({ nextAcc, expectedVersion: acc.version });
-          return nextAcc;
-        });
-        setAdminAccounts(updatedAdmins);
-        latestStateRef.current = { ...latestStateRef.current, adminAccounts: updatedAdmins };
 
-        for (const item of adminsToSave) {
-          const adminRes = await updateAdminAccountOnServer(item.nextAcc, item.expectedVersion);
-          if (adminRes.ok && adminRes.account && isMountedRef.current) {
-            setAdminAccounts((prevList) => {
-              const nextList = prevList.map((a) =>
-                a.id === adminRes.account!.id ? adminRes.account! : a
-              );
-              latestStateRef.current = { ...latestStateRef.current, adminAccounts: nextList };
-              return nextList;
+          let pengChanged = false;
+          draft.pengumuman = draft.pengumuman.map((p) => {
+            if (!canEditAnnouncement(p)) return p;
+            const curNama = (p.namaPengurus || '').trim().toLowerCase();
+            const curJabatan = (p.jabatanPengurus || '').trim();
+            const curJabatanLower = curJabatan.toLowerCase();
+            const isBendaharaTarget =
+              curJabatanLower.includes('bendahara') ||
+              (curNama !== '' && legacyBendaharaPlaceholders.includes(curNama));
+            const shouldSyncName =
+              !curNama ||
+              legacyKetuaPlaceholders.includes(curNama) ||
+              legacyBendaharaPlaceholders.includes(curNama);
+
+            const nextNama = shouldSyncName
+              ? (isBendaharaTarget ? newBendahara || newKetua : newKetua || p.namaPengurus)
+              : p.namaPengurus;
+
+            let nextJabatan = curJabatan;
+            if (!curJabatan) {
+              nextJabatan = isBendaharaTarget ? `Bendahara RT ${newRT}` : `Ketua RT ${newRT}`;
+            } else if (/^ketua\s+rt\b/i.test(curJabatan)) {
+              nextJabatan = `Ketua RT ${newRT}`;
+            } else if (/^bendahara\s+rt\b/i.test(curJabatan)) {
+              nextJabatan = `Bendahara RT ${newRT}`;
+            }
+
+            const nextPenulis =
+              nextNama &&
+              (!p.penulis ||
+                p.penulis.startsWith('Pengurus RT') ||
+                p.penulis.startsWith('Ketua RT') ||
+                p.penulis.startsWith('Bendahara RT') ||
+                legacyKetuaPlaceholders.includes(p.penulis.toLowerCase()) ||
+                legacyBendaharaPlaceholders.includes(p.penulis.toLowerCase()))
+                ? `${nextJabatan} (${nextNama})`
+                : p.penulis;
+
+            if (
+              nextNama === p.namaPengurus &&
+              nextJabatan === p.jabatanPengurus &&
+              nextPenulis === p.penulis
+            ) {
+              return p;
+            }
+            pengChanged = true;
+            return {
+              ...p,
+              namaPengurus: nextNama,
+              jabatanPengurus: nextJabatan,
+              penulis: nextPenulis,
+              updatedAt: nowIso,
+              updatedBy: actorName,
+            };
+          });
+          if (pengChanged) touched.push('pengumuman');
+
+          if (newKetua) {
+            const myUsernameLower = actorName.trim().toLowerCase();
+            let accChanged = false;
+            draft.accounts = draft.accounts.map((acc) => {
+              const isTarget = isSuper
+                ? acc.id === 'acc_admin_rt08' ||
+                  acc.username.toLowerCase() === 'adminrt08' ||
+                  Boolean(oldKetua && acc.nama.toLowerCase().includes(oldKetua.toLowerCase()))
+                : Boolean(myUsernameLower) && acc.username.trim().toLowerCase() === myUsernameLower;
+              if (!isTarget) return acc;
+              accChanged = true;
+              const accRt = isSuper ? newRT : acc.rt;
+              return {
+                ...acc,
+                nama: `${newKetua} (Ketua RT ${accRt})`,
+                rt: accRt,
+                rtId: formatRtId(accRt),
+                rw: newRW,
+                kontak: newKetuaTelp || acc.kontak,
+                jabatan: `Ketua RT ${accRt} RW ${newRW}`,
+                updatedAt: nowIso,
+                updatedBy: actorName,
+              };
             });
+            if (accChanged) touched.push('accounts');
           }
-          queuedOps.push({
-            opKey: `admin:${item.nextAcc.id}`,
-            kind: 'saveAdmin',
-            payload: item.nextAcc,
-            isUpdate: true,
-            expectedVersion: item.expectedVersion,
-          });
-          results.push(adminRes);
         }
 
-        setCurrentUser((prevUser) => {
-          if (!prevUser || prevUser.role !== 'admin') return prevUser;
-          const isPrimaryUser =
-            prevUser.username.toLowerCase() === 'admin' ||
-            prevUser.username.toLowerCase() === myUsernameLower ||
-            (oldKetua && prevUser.nama.toLowerCase().includes(oldKetua.toLowerCase()));
-          if (!isPrimaryUser) return prevUser;
-          return {
-            ...prevUser,
-            nama: `${newKetua} (Ketua RT ${newRT})`,
-            rtScope: `RT ${newRT} RW ${newRW}`,
-          };
-        });
+        return touched;
+      },
+      {
+        user: currentUser,
+        action: 'UPDATE_PENGATURAN',
+        entityType: 'settings',
+        entityId: 'pengaturan_kas',
+        rtScope: currentUser?.rtScope || 'SEMUA',
+        summary: `Memperbarui pengaturan kas dan profil pengurus wilayah`,
       }
+    );
+
+    if (newKetua && currentUser?.role === 'admin') {
+      const updatedUser: AuthUser = {
+        ...currentUser,
+        nama: `${newKetua} (Ketua RT ${newRT})`,
+        rtScope: `RT ${myRT || newRT} RW ${newRW}`,
+      };
+      setCurrentUser(updatedUser);
+      saveAuthSession(updatedUser);
     }
 
-    await settleWriteBatch({
-      ops: queuedOps,
-      results,
-      rollback: () => {
-        setPengaturanKas(prev);
-        setPengumumanList(prevPengumuman);
-        setAdminAccounts(prevAdmins);
-        latestStateRef.current = {
-          ...latestStateRef.current,
-          pengaturanKas: prev,
-          pengumumanList: prevPengumuman,
-          adminAccounts: prevAdmins,
-        };
-      },
-      fallbackError: 'Gagal menyimpan pengaturan ke Database Server Pusat.',
-    });
+    if (res.synced) flashWriteSuccess();
   };
 
   const handleSaveSaldoAwal = async (
@@ -2320,262 +1249,103 @@ export default function App() {
     keterangan: string,
     tanggal: string
   ) => {
-    const nowIso = new Date().toISOString();
-    const prevPengaturan = latestStateRef.current.pengaturanKas;
-    const prevTxs = latestStateRef.current.transactions;
-    const nextPengaturan: PengaturanKas = {
-      ...prevPengaturan,
-      saldoAwalKasUmum: kasUmum,
-      saldoAwalKasKematian: kasKematian,
-      keteranganSaldoAwal: keterangan,
-      tanggalSaldoAwal: tanggal,
-      updatedAt: nowIso,
-    };
-
-    const oldSaldoAwal = prevTxs.filter((t) => t.isSaldoAwal);
-    const nonSaldoAwal = prevTxs.filter((t) => !t.isSaldoAwal);
-    const newSaldoTxs: Transaction[] = [];
     const scopedAdminRT =
       currentUser?.role === 'admin'
         ? normalizeRTCode(currentUser.rtScope)
         : currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
         ? normalizeRTCode(selectedServerRT)
         : '';
-    const rtCodeForSaldo = scopedAdminRT || nextPengaturan.profilRT?.namaRT || '08';
-    const rwCodeForSaldo = nextPengaturan.profilRT?.namaRW || '05';
+    const rtCodeForSaldo = scopedAdminRT || pengaturanKas.profilRT?.namaRT || '08';
+    const perm = assertRtWriteAllowed(currentUser, rtCodeForSaldo);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
+    }
+
+    const rwCodeForSaldo = pengaturanKas.profilRT?.namaRW || '05';
     const rtScopeStr = `RT ${rtCodeForSaldo} RW ${rwCodeForSaldo}`;
+    const actorName = currentUser?.username || 'system';
+    const baseTime = Date.now();
 
-    if (kasUmum > 0) {
-      newSaldoTxs.push({
-        id: 'saldo_awal_umum_' + Date.now(),
-        tanggal: tanggal || `${tahunAktif}-01-01`,
-        kategori: 'Saldo Awal / Pindahan Kas Lalu',
-        keterangan: `Saldo Kas Umum Masa Lalu: ${keterangan}`,
-        nominal: kasUmum,
-        tipe: 'masuk',
-        namaWarga: 'Pindahan Kas Masa Lalu',
-        isSaldoAwal: true,
-        tahun: tahunAktif,
-        rtScope: rtScopeStr,
-        updatedAt: nowIso,
-      });
-    }
-
-    if (kasKematian > 0) {
-      newSaldoTxs.push({
-        id: 'saldo_awal_kematian_' + (Date.now() + 1),
-        tanggal: tanggal || `${tahunAktif}-01-01`,
-        kategori: 'Kas Kematian',
-        keterangan: `Saldo Kas Kematian Masa Lalu: ${keterangan}`,
-        nominal: kasKematian,
-        tipe: 'kematian',
-        namaWarga: 'Pindahan Kas Kematian Lalu',
-        isSaldoAwal: true,
-        tahun: tahunAktif,
-        rtScope: rtScopeStr,
-        updatedAt: nowIso,
-      });
-    }
-
-    const nextTransactions = [...newSaldoTxs, ...nonSaldoAwal];
-    setPengaturanKas(nextPengaturan);
-    setTransactions(nextTransactions);
-    latestStateRef.current = {
-      ...latestStateRef.current,
-      pengaturanKas: nextPengaturan,
-      transactions: nextTransactions,
-    };
-    setSyncStatus('pending');
-
-    const ops: PendingSyncOp[] = [
-      {
-        opKey: 'settings:active',
-        kind: 'saveSettings',
-        payload: nextPengaturan,
-        tahunAktif,
-        expectedVersion: prevPengaturan.version,
-      },
-      ...oldSaldoAwal.map((t) => ({
-        opKey: `tx:${t.id}`,
-        kind: 'deleteTx' as const,
-        targetId: t.id,
-        expectedVersion: t.version,
-      })),
-      ...newSaldoTxs.map((t) => ({
-        opKey: `tx:${t.id}`,
-        kind: 'saveTx' as const,
-        payload: t,
-        isUpdate: false,
-      })),
-    ];
-
-    const [settingsRes, delResults, saveResults] = await Promise.all([
-      saveSettingsOnServer(nextPengaturan, tahunAktif, prevPengaturan.version),
-      Promise.all(oldSaldoAwal.map((t) => deleteTransactionOnServer(t.id, t.version))),
-      Promise.all(
-        newSaldoTxs.map((t) =>
-          saveTransactionOnServer(t, {
-            isUpdate: false,
-            clientMutationId: generateClientMutationId('saldo'),
-          })
-        )
-      ),
-    ]);
-
-    if (isMountedRef.current) {
-      if (settingsRes.ok && settingsRes.pengaturanKas) {
-        setPengaturanKas(settingsRes.pengaturanKas);
-        latestStateRef.current = {
-          ...latestStateRef.current,
-          pengaturanKas: settingsRes.pengaturanKas,
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.settings = {
+          pengaturanKas: {
+            ...draft.settings.pengaturanKas,
+            saldoAwalKasUmum: kasUmum,
+            saldoAwalKasKematian: kasKematian,
+            keteranganSaldoAwal: keterangan,
+            tanggalSaldoAwal: tanggal,
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          },
+          tahunAktif: draft.settings.tahunAktif || tahunAktif,
+          updatedAt: nowIso,
+          updatedBy: actorName,
         };
-      }
-      const savedTxMap = new Map<string, Transaction>();
-      saveResults.forEach((r) => {
-        if (r.ok && r.transaction) savedTxMap.set(r.transaction.id, r.transaction);
-      });
-      if (savedTxMap.size > 0) {
-        setTransactions((prev) => {
-          const next = prev.map((t) => savedTxMap.get(t.id) || t);
-          latestStateRef.current = { ...latestStateRef.current, transactions: next };
-          return next;
+
+        const isAllRTReset = isSuperAdminUser(currentUser) && selectedServerRT === 'SEMUA';
+        const remainingTxs = draft.transactions.filter((t) => {
+          if (!t.isSaldoAwal) return true;
+          if (isAllRTReset) {
+            mqttSync.addTombstone(draft, 'transactions', t.id, nowIso, actorName);
+            return false;
+          }
+          const tRt = getTransactionRTCode(t, draft.warga, rtCodeForSaldo);
+          if (tRt === rtCodeForSaldo) {
+            mqttSync.addTombstone(draft, 'transactions', t.id, nowIso, actorName);
+            return false;
+          }
+          return true;
         });
-      }
-    }
 
-    await settleWriteBatch({
-      ops,
-      results: [settingsRes, ...delResults, ...saveResults],
-      rollback: () => {
-        setPengaturanKas(prevPengaturan);
-        setTransactions(prevTxs);
-        latestStateRef.current = {
-          ...latestStateRef.current,
-          pengaturanKas: prevPengaturan,
-          transactions: prevTxs,
-        };
+        const newSaldoTxs: Transaction[] = [];
+        if (kasUmum > 0) {
+          newSaldoTxs.push({
+            id: `saldo_awal_umum_${rtCodeForSaldo}_${baseTime}`,
+            tanggal: tanggal || `${tahunAktif}-01-01`,
+            kategori: 'Saldo Awal / Pindahan Kas Lalu',
+            keterangan: `Saldo Kas Umum Masa Lalu: ${keterangan}`,
+            nominal: kasUmum,
+            tipe: 'masuk',
+            namaWarga: 'Pindahan Kas Masa Lalu',
+            isSaldoAwal: true,
+            tahun: tahunAktif,
+            rtScope: rtScopeStr,
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          });
+        }
+        if (kasKematian > 0) {
+          newSaldoTxs.push({
+            id: `saldo_awal_kematian_${rtCodeForSaldo}_${baseTime + 1}`,
+            tanggal: tanggal || `${tahunAktif}-01-01`,
+            kategori: 'Kas Kematian',
+            keterangan: `Saldo Kas Kematian Masa Lalu: ${keterangan}`,
+            nominal: kasKematian,
+            tipe: 'kematian',
+            namaWarga: 'Pindahan Kas Kematian Lalu',
+            isSaldoAwal: true,
+            tahun: tahunAktif,
+            rtScope: rtScopeStr,
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          });
+        }
+
+        draft.transactions = [...newSaldoTxs, ...remainingTxs];
+        return ['settings', 'transactions', 'tombstones'];
       },
-      fallbackError: 'Gagal menyinkronkan saldo awal ke Database Server Pusat.',
-    });
-  };
-
-  // Helper: Reconcile affected Warga cash/dues totals & monthly maps from current transactions
-  const syncAffectedWargaAfterTxMutation = async (
-    nextTransactions: Transaction[],
-    affectedTxs: Transaction[],
-    forceClearIfZero: boolean
-  ): Promise<{
-    wargaList: Warga[];
-    changedWarga: Warga[];
-    pending: boolean;
-    terminal?: boolean;
-    errorMessage?: string;
-  }> => {
-    const currentWarga = latestStateRef.current.wargaList || [];
-    if (currentWarga.length === 0 || affectedTxs.length === 0) {
-      return { wargaList: currentWarga, changedWarga: [], pending: false };
-    }
-
-    const nowIso = new Date().toISOString();
-    const matchedIds = new Set<string>();
-    for (const tx of affectedTxs) {
-      if (!tx || tx.isSaldoAwal) continue;
-      if (tx.residentId) matchedIds.add(tx.residentId);
-      for (const w of currentWarga) {
-        if (doesTransactionBelongToWarga(tx, w, currentWarga)) {
-          matchedIds.add(w.id);
-        }
+      {
+        user: currentUser,
+        action: 'SAVE_SALDO_AWAL',
+        entityType: 'settings',
+        entityId: `saldo_${rtCodeForSaldo}`,
+        rtScope: rtScopeStr,
+        summary: `Menyimpan saldo awal Kas Umum Rp ${kasUmum.toLocaleString('id-ID')} & Kas Kematian Rp ${kasKematian.toLocaleString('id-ID')} (${rtScopeStr})`,
       }
-    }
-
-    if (matchedIds.size === 0) {
-      return { wargaList: currentWarga, changedWarga: [], pending: false };
-    }
-
-    const scopedAdminRT =
-      currentUserRef.current?.role === 'admin'
-        ? normalizeRTCode(currentUserRef.current.rtScope)
-        : '';
-    const rwMatch = currentUserRef.current?.rtScope?.match(/RW[\s.\-:_]*0*([0-9]+)/i)?.[1];
-    const scopedAdminRW =
-      currentUserRef.current?.role === 'admin' && rwMatch ? normalizeRWCode(rwMatch) : '';
-
-    const changedWarga: Warga[] = [];
-    const nextWargaList = currentWarga.map((w) => {
-      if (!matchedIds.has(w.id)) return w;
-      if (currentUserRef.current?.role === 'admin') {
-        const wRT = getWargaRTCode(w, scopedAdminRT || '');
-        const wRW = normalizeRWCode(w.rw) || scopedAdminRW;
-        if (scopedAdminRT && scopedAdminRT !== 'SEMUA' && wRT && wRT !== scopedAdminRT) {
-          return w;
-        }
-        if (scopedAdminRW && wRW && wRW !== scopedAdminRW) {
-          return w;
-        }
-      }
-      const reconciled = reconcileWargaCashFromTransactions({
-        warga: w,
-        transactions: nextTransactions,
-        tahunAktif,
-        pengaturanKas,
-        allWarga: currentWarga,
-        nowIso,
-        forceClearIfZero,
-      });
-      if (hasWargaCashDiff(w, reconciled, tahunAktif)) {
-        changedWarga.push(reconciled);
-        return reconciled;
-      }
-      return w;
-    });
-
-    if (changedWarga.length === 0) {
-      return { wargaList: currentWarga, changedWarga: [], pending: false };
-    }
-
-    setWargaList(nextWargaList);
-    latestStateRef.current = { ...latestStateRef.current, wargaList: nextWargaList };
-
-    const wargaResults = await Promise.all(
-      changedWarga.map((w) =>
-        putWargaToServer(w, {
-          expectedVersion: w.version,
-          clientMutationId: generateClientMutationId('txwarga'),
-        })
-      )
     );
-    const savedMap = new Map<string, Warga>();
-    wargaResults.forEach((r) => {
-      if (r.ok && r.warga) savedMap.set(r.warga.id, r.warga);
-    });
-    let finalWargaList = nextWargaList;
-    if (savedMap.size > 0 && isMountedRef.current) {
-      finalWargaList = nextWargaList.map((w) => savedMap.get(w.id) || w);
-      setWargaList(finalWargaList);
-      latestStateRef.current = { ...latestStateRef.current, wargaList: finalWargaList };
-    }
-
-    const wargaFailed = wargaResults.find((r) => !r.ok);
-    if (wargaFailed && !wargaFailed.terminal) {
-      enqueuePendingOps(
-        changedWarga
-          .filter((_, idx) => !wargaResults[idx]?.ok || wargaResults[idx]?.pending)
-          .map((w) => ({
-            opKey: `warga:${w.id}`,
-            kind: 'saveWarga' as const,
-            payload: w,
-            isUpdate: true,
-            expectedVersion: w.version,
-          }))
-      );
-    }
-    return {
-      wargaList: finalWargaList,
-      changedWarga,
-      pending: wargaResults.some((r) => r.pending || (!r.ok && !r.terminal)),
-      terminal: wargaFailed?.terminal,
-      errorMessage: wargaFailed?.message,
-    };
+    if (res.synced) flashWriteSuccess();
   };
 
   // Add Transaction or Paired Kas Warga + Kas Kematian Batch (with double-submit guard)
@@ -2588,17 +1358,29 @@ export default function App() {
       const inputs = Array.isArray(txInput) ? txInput : [txInput];
       if (inputs.length === 0) return;
 
-      const prevTransactions = latestStateRef.current.transactions;
-      const prevWarga = latestStateRef.current.wargaList;
-      const nowIso = new Date().toISOString();
+      const actorName = currentUser?.username || 'system';
+      const defaultRt =
+        currentUser?.role === 'admin'
+          ? normalizeRTCode(currentUser.rtScope) || '08'
+          : currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
+          ? normalizeRTCode(selectedServerRT) || '08'
+          : normalizeRTCode(pengaturanKas.profilRT?.namaRT) || '08';
+      const rwStr = pengaturanKas.profilRT?.namaRW || '05';
+
+      for (const tx of inputs) {
+        const txRt = normalizeRTCode(tx.rtScope) || defaultRt;
+        const perm = assertRtWriteAllowed(currentUser, txRt);
+        if (!perm.ok) {
+          setCloudError(perm.message);
+          return;
+        }
+      }
+
       const baseTime = Date.now();
+      const fullStore = mqttSync.getStore();
       const newTxs: Transaction[] = inputs.map((tx, idx) => {
-        const resolvedRtScope =
-          tx.rtScope ||
-          (currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
-            ? `RT ${selectedServerRT}`
-            : currentUser?.rtScope ||
-              `RT ${pengaturanKas.profilRT?.namaRT || '08'} RW ${pengaturanKas.profilRT?.namaRW || '05'}`);
+        const resolvedRt = normalizeRTCode(tx.rtScope) || defaultRt;
+        const resolvedRtScope = tx.rtScope || `RT ${resolvedRt} RW ${rwStr}`;
         const tempTx: Transaction = {
           ...tx,
           id: toValidDocId(
@@ -2607,96 +1389,47 @@ export default function App() {
           ),
           tahun: tahunAktif,
           rtScope: resolvedRtScope,
-          updatedAt: nowIso,
+          updatedAt: new Date().toISOString(),
+          updatedBy: actorName,
         };
         const resolvedResidentId =
-          tempTx.residentId || resolveTransactionResidentId(tempTx, prevWarga, resolvedRtScope);
+          tempTx.residentId ||
+          resolveTransactionResidentId(tempTx, fullStore.warga, resolvedRtScope);
         return resolvedResidentId ? { ...tempTx, residentId: resolvedResidentId } : tempTx;
       });
 
-      const nextTransactions = [...newTxs, ...prevTransactions];
-      setTransactions(nextTransactions);
-      latestStateRef.current = { ...latestStateRef.current, transactions: nextTransactions };
-      setSyncStatus('pending');
-
-      const txOps: PendingSyncOp[] = newTxs.map((item) => ({
-        opKey: `tx:${item.id}`,
-        kind: 'saveTx',
-        payload: item,
-        isUpdate: false,
-        clientMutationId: generateClientMutationId('tx'),
-      }));
-      const rollback = () => {
-        setTransactions(prevTransactions);
-        setWargaList(prevWarga);
-        latestStateRef.current = {
-          ...latestStateRef.current,
-          transactions: prevTransactions,
-          wargaList: prevWarga,
-        };
-      };
-
-      const results = await Promise.all(
-        newTxs.map((item, idx) =>
-          saveTransactionOnServer(item, {
-            isUpdate: false,
-            clientMutationId: (txOps[idx] as { clientMutationId?: string })?.clientMutationId,
-          })
-        )
+      const targetRts = Array.from(
+        new Set(newTxs.map((t) => normalizeRTCode(t.rtScope) || defaultRt))
       );
-      const savedTxMap = new Map<string, Transaction>();
-      results.forEach((r) => {
-        if (r.ok && r.transaction) savedTxMap.set(r.transaction.id, r.transaction);
-      });
-      if (savedTxMap.size > 0 && isMountedRef.current) {
-        const syncedTxs = nextTransactions.map((t) => savedTxMap.get(t.id) || t);
-        setTransactions(syncedTxs);
-        latestStateRef.current = { ...latestStateRef.current, transactions: syncedTxs };
-      }
+      const totalNominal = newTxs.reduce((s, t) => s + (t.nominal || 0), 0);
 
-      const terminalRes = results.find((r) => !r.ok && r.terminal);
-      if (terminalRes) {
-        clearPendingOpsByEntity(txOps.map(getCanonicalEntityKey));
-        rollback();
-        setSyncStatus('error');
-        setCloudError(
-          formatFriendlyFirestoreError(
-            terminalRes.message,
-            'Gagal menyinkronkan transaksi ke Database Server Pusat.'
-          )
-        );
-        return;
-      }
-
-      const wargaSync = await syncAffectedWargaAfterTxMutation(
-        latestStateRef.current.transactions,
-        newTxs,
-        false
-      );
-      if (wargaSync.terminal) {
-        clearPendingOpsByEntity(txOps.map(getCanonicalEntityKey));
-        rollback();
-        setSyncStatus('error');
-        setCloudError(
-          formatFriendlyFirestoreError(
-            wargaSync.errorMessage,
-            'Gagal memperbarui status iuran warga di Database Server Pusat.'
-          )
-        );
-        return;
-      }
-
-      await settleWriteBatch({
-        ops: txOps,
-        results,
-        rollback,
-        fallbackError: 'Gagal menyinkronkan transaksi ke Database Server Pusat.',
-        onConfirmed: () => {
-          if (wargaSync.pending) {
-            setSyncStatus('pending');
-          }
+      const res = await mqttSync.mutate(
+        (draft, nowIso) => {
+          const stampedNewTxs = newTxs.map((t) => ({ ...t, updatedAt: nowIso }));
+          draft.transactions = [...stampedNewTxs, ...draft.transactions];
+          const wargaChanged = reconcileAffectedWargaInDraft(draft, stampedNewTxs, false, nowIso);
+          return wargaChanged ? ['transactions', 'warga'] : ['transactions'];
         },
-      });
+        {
+          user: currentUser,
+          action: 'ADD_TRANSACTION',
+          entityType: 'transactions',
+          entityId: newTxs[0].id,
+          rtScope: newTxs[0].rtScope,
+          summary: `Mencatat transaksi ${newTxs[0].kategori} (${newTxs[0].namaWarga || 'Kas'}) sebesar Rp ${totalNominal.toLocaleString('id-ID')}`,
+          notification: {
+            title: `Transaksi Kas Baru (${newTxs[0].rtScope || 'RT'})`,
+            body: `${newTxs[0].kategori} - ${newTxs[0].namaWarga || newTxs[0].keterangan} senilai Rp ${totalNominal.toLocaleString('id-ID')}.`,
+            category: 'kas',
+            entityType: 'transactions',
+            entityId: newTxs[0].id,
+            targetRts,
+            targetRoles: ['server', 'admin'],
+            createdBy: actorName,
+          },
+        }
+      );
+      if (res.synced) flashWriteSuccess();
     } finally {
       txSubmitLockRef.current = false;
     }
@@ -2718,187 +1451,98 @@ export default function App() {
     if (txSubmitLockRef.current) return;
     txSubmitLockRef.current = true;
     try {
-      const prevTransactions = latestStateRef.current.transactions;
-      const prevWarga = latestStateRef.current.wargaList;
-      const nowIso = new Date().toISOString();
-      const oldTx = prevTransactions.find((t) => t.id === updatedTx.id);
-      const resolvedRtScope =
-        updatedTx.rtScope ||
-        (currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
-          ? `RT ${selectedServerRT}`
-          : currentUser?.rtScope ||
-            `RT ${pengaturanKas.profilRT?.namaRT || '08'} RW ${pengaturanKas.profilRT?.namaRW || '05'}`);
+      const fullStore = mqttSync.getStore();
+      const oldTx = fullStore.transactions.find((t) => t.id === updatedTx.id);
+      const oldRt = oldTx ? getTransactionRTCode(oldTx, fullStore.warga, '') : '';
+      const permOld = assertRtWriteAllowed(currentUser, oldRt);
+      if (!permOld.ok) {
+        setCloudError(permOld.message);
+        return;
+      }
 
-      const preStamped: Transaction = {
-        ...updatedTx,
-        tahun: updatedTx.tahun ?? tahunAktif,
-        rtScope: resolvedRtScope,
-        updatedAt: nowIso,
-      };
+      const defaultRt =
+        currentUser?.role === 'admin'
+          ? normalizeRTCode(currentUser.rtScope) || '08'
+          : currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
+          ? normalizeRTCode(selectedServerRT) || '08'
+          : oldRt || normalizeRTCode(pengaturanKas.profilRT?.namaRT) || '08';
+      const rwStr = pengaturanKas.profilRT?.namaRW || '05';
+      const resolvedRtScope = updatedTx.rtScope || `RT ${defaultRt} RW ${rwStr}`;
+      const newRt = normalizeRTCode(resolvedRtScope);
+      const permNew = assertRtWriteAllowed(currentUser, newRt);
+      if (!permNew.ok) {
+        setCloudError(permNew.message);
+        return;
+      }
+
+      const actorName = currentUser?.username || 'system';
       const resolvedResidentId =
-        preStamped.residentId || resolveTransactionResidentId(preStamped, prevWarga, resolvedRtScope);
-      const stampedTx: Transaction = resolvedResidentId
-        ? { ...preStamped, residentId: resolvedResidentId }
-        : preStamped;
+        updatedTx.residentId ||
+        resolveTransactionResidentId(updatedTx, fullStore.warga, resolvedRtScope);
 
-      const nextTransactions = prevTransactions.map((t) =>
-        t.id === stampedTx.id ? stampedTx : t
-      );
-      setTransactions(nextTransactions);
-      latestStateRef.current = { ...latestStateRef.current, transactions: nextTransactions };
-      setSyncStatus('pending');
-
-      const expectedVer = oldTx?.version ?? stampedTx.version;
-      const mutId = generateClientMutationId('txu');
-      const txOps: PendingSyncOp[] = [
+      const res = await mqttSync.mutate(
+        (draft, nowIso) => {
+          const stampedTx: Transaction = {
+            ...updatedTx,
+            tahun: updatedTx.tahun ?? tahunAktif,
+            rtScope: resolvedRtScope,
+            ...(resolvedResidentId ? { residentId: resolvedResidentId } : {}),
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          };
+          draft.transactions = draft.transactions.map((t) =>
+            t.id === stampedTx.id ? stampedTx : t
+          );
+          const affected = oldTx ? [oldTx, stampedTx] : [stampedTx];
+          const wargaChanged = reconcileAffectedWargaInDraft(draft, affected, true, nowIso);
+          return wargaChanged ? ['transactions', 'warga'] : ['transactions'];
+        },
         {
-          opKey: `tx:${stampedTx.id}`,
-          kind: 'saveTx',
-          payload: stampedTx,
-          isUpdate: true,
-          expectedVersion: expectedVer,
-          clientMutationId: mutId,
-        },
-      ];
-      const rollback = () => {
-        setTransactions(prevTransactions);
-        setWargaList(prevWarga);
-        latestStateRef.current = {
-          ...latestStateRef.current,
-          transactions: prevTransactions,
-          wargaList: prevWarga,
-        };
-      };
-
-      const res = await saveTransactionOnServer(stampedTx, {
-        isUpdate: true,
-        expectedVersion: expectedVer,
-        clientMutationId: mutId,
-      });
-      if (res.ok && res.transaction && isMountedRef.current) {
-        const syncedTxs = latestStateRef.current.transactions.map((t) =>
-          t.id === stampedTx.id ? res.transaction! : t
-        );
-        setTransactions(syncedTxs);
-        latestStateRef.current = { ...latestStateRef.current, transactions: syncedTxs };
-      }
-
-      if (!res.ok && res.terminal) {
-        clearPendingOpsByEntity(txOps.map(getCanonicalEntityKey));
-        rollback();
-        if (res.status === 409) {
-          await refreshAuthoritativeSnapshot().catch(() => false);
+          user: currentUser,
+          action: 'UPDATE_TRANSACTION',
+          entityType: 'transactions',
+          entityId: updatedTx.id,
+          rtScope: resolvedRtScope,
+          summary: `Memperbarui transaksi ${updatedTx.kategori} (${updatedTx.namaWarga || 'Kas'}) menjadi Rp ${(updatedTx.nominal || 0).toLocaleString('id-ID')}`,
         }
-        setSyncStatus('error');
-        setCloudError(
-          formatFriendlyFirestoreError(
-            res,
-            'Gagal memperbarui transaksi di Database Server Pusat.'
-          )
-        );
-        return;
-      }
-
-      const affected = oldTx ? [oldTx, stampedTx] : [stampedTx];
-      const wargaSync = await syncAffectedWargaAfterTxMutation(
-        latestStateRef.current.transactions,
-        affected,
-        true
       );
-      if (wargaSync.terminal) {
-        clearPendingOpsByEntity(txOps.map(getCanonicalEntityKey));
-        rollback();
-        setSyncStatus('error');
-        setCloudError(
-          formatFriendlyFirestoreError(
-            wargaSync.errorMessage,
-            'Gagal memperbarui status iuran warga di Database Server Pusat.'
-          )
-        );
-        return;
-      }
-
-      await settleWriteBatch({
-        ops: txOps,
-        results: [res],
-        rollback,
-        fallbackError: 'Gagal memperbarui transaksi di Database Server Pusat.',
-        onConfirmed: () => {
-          if (wargaSync.pending) {
-            setSyncStatus('pending');
-          }
-        },
-      });
+      if (res.synced) flashWriteSuccess();
     } finally {
       txSubmitLockRef.current = false;
     }
   };
 
   const handleDeleteTransaction = async (id: string) => {
-    const prevTransactions = latestStateRef.current.transactions;
-    const prevWarga = latestStateRef.current.wargaList;
-    const deletedTx = prevTransactions.find((t) => t.id === id);
-    const nextTransactions = prevTransactions.filter((t) => t.id !== id);
-    setTransactions(nextTransactions);
-    latestStateRef.current = { ...latestStateRef.current, transactions: nextTransactions };
-    setSyncStatus('pending');
-
-    const txOps: PendingSyncOp[] = [
-      { opKey: `tx:${id}`, kind: 'deleteTx', targetId: id, expectedVersion: deletedTx?.version },
-    ];
-    const rollback = () => {
-      setTransactions(prevTransactions);
-      setWargaList(prevWarga);
-      latestStateRef.current = {
-        ...latestStateRef.current,
-        transactions: prevTransactions,
-        wargaList: prevWarga,
-      };
-    };
-
-    const res = await deleteTransactionOnServer(id, deletedTx?.version);
-    if (!res.ok && res.terminal) {
-      clearPendingOpsByEntity(txOps.map(getCanonicalEntityKey));
-      rollback();
-      if (res.status === 409) {
-        await refreshAuthoritativeSnapshot().catch(() => false);
-      }
-      setSyncStatus('error');
-      setCloudError(
-        formatFriendlyFirestoreError(res, 'Gagal menghapus transaksi dari Database Server Pusat.')
-      );
+    const fullStore = mqttSync.getStore();
+    const deletedTx = fullStore.transactions.find((t) => t.id === id);
+    if (!deletedTx) return;
+    const txRt = getTransactionRTCode(deletedTx, fullStore.warga, '');
+    const perm = assertRtWriteAllowed(currentUser, txRt);
+    if (!perm.ok) {
+      setCloudError(perm.message);
       return;
     }
 
-    const wargaSync = await syncAffectedWargaAfterTxMutation(
-      nextTransactions,
-      deletedTx ? [deletedTx] : [],
-      true
-    );
-    if (wargaSync.terminal) {
-      clearPendingOpsByEntity(txOps.map(getCanonicalEntityKey));
-      rollback();
-      setSyncStatus('error');
-      setCloudError(
-        formatFriendlyFirestoreError(
-          wargaSync.errorMessage,
-          'Gagal memperbarui data warga setelah penghapusan transaksi.'
-        )
-      );
-      return;
-    }
-
-    await settleWriteBatch({
-      ops: txOps,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal menghapus transaksi dari Database Server Pusat.',
-      onConfirmed: () => {
-        if (wargaSync.pending) {
-          setSyncStatus('pending');
-        }
+    const actorName = currentUser?.username || 'system';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.transactions = draft.transactions.filter((t) => t.id !== id);
+        mqttSync.addTombstone(draft, 'transactions', id, nowIso, actorName);
+        const wargaChanged = reconcileAffectedWargaInDraft(draft, [deletedTx], true, nowIso);
+        return wargaChanged
+          ? ['transactions', 'warga', 'tombstones']
+          : ['transactions', 'tombstones'];
       },
-    });
+      {
+        user: currentUser,
+        action: 'DELETE_TRANSACTION',
+        entityType: 'transactions',
+        entityId: id,
+        rtScope: deletedTx.rtScope || (txRt ? `RT ${txRt}` : undefined),
+        summary: `Menghapus transaksi ${deletedTx.kategori} (${deletedTx.namaWarga || 'Kas'}) senilai Rp ${(deletedTx.nominal || 0).toLocaleString('id-ID')}`,
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
   const handleOpenNewWarga = () => {
@@ -2907,15 +1551,11 @@ export default function App() {
   };
 
   const handleOpenEditWarga = (target: Warga) => {
-    if (currentUser?.role === 'admin' && currentUser.rtScope) {
-      const assignedRT = normalizeRTCode(currentUser.rtScope);
-      const targetRT = getWargaRTCode(target, assignedRT);
-      if (assignedRT && assignedRT !== 'SEMUA' && targetRT && targetRT !== assignedRT) {
-        setCloudError(
-          `Admin RT ${assignedRT} tidak memiliki izin mengubah data warga milik RT ${targetRT}.`
-        );
-        return;
-      }
+    const targetRT = getWargaRTCode(target, '');
+    const perm = assertRtWriteAllowed(currentUser, targetRT);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
     }
     setEditingWarga(target);
     setIsWargaModalOpen(true);
@@ -2923,75 +1563,85 @@ export default function App() {
 
   // Add Resident
   const handleSaveWarga = async (w: Omit<Warga, 'id' | 'no'>): Promise<ServerWriteResult> => {
-    const prevWarga = latestStateRef.current.wargaList;
-    const nowIso = new Date().toISOString();
     const assignedAdminRT =
       currentUser?.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '';
     const fallbackRT =
       currentUser?.role === 'server' && selectedServerRT !== 'SEMUA'
         ? selectedServerRT
         : assignedAdminRT || pengaturanKas.profilRT?.namaRT || '08';
-    const newW: Warga = {
-      ...w,
-      rt:
-        currentUser?.role === 'admin' && assignedAdminRT
-          ? assignedAdminRT
-          : normalizeRTCode(w.rt) || fallbackRT,
-      id: toValidDocId('w_' + Date.now(), 'w'),
-      no: prevWarga.length + 1,
-      statusIuran: w.statusIuran || 'Belum',
-      statusIuranPerTahun: { [tahunAktif]: w.statusIuran || 'Belum' },
-      updatedAt: nowIso,
-    };
-    const nextWarga = [...prevWarga, newW];
-    setWargaList(nextWarga);
-    latestStateRef.current = { ...latestStateRef.current, wargaList: nextWarga };
-    setSyncStatus('pending');
+    const effectiveRT =
+      currentUser?.role === 'admin' && assignedAdminRT
+        ? assignedAdminRT
+        : normalizeRTCode(w.rt) || fallbackRT;
 
-    const mutId = generateClientMutationId('wadd');
-    const ops: PendingSyncOp[] = [
-      { opKey: `warga:${newW.id}`, kind: 'saveWarga', payload: newW, isUpdate: false, clientMutationId: mutId },
-    ];
-    const rollback = () => {
-      setWargaList(prevWarga);
-      latestStateRef.current = { ...latestStateRef.current, wargaList: prevWarga };
-    };
-    const res = await saveSingleWargaToServer(newW, { isUpdate: false, clientMutationId: mutId });
-    if (res.ok && res.warga && isMountedRef.current) {
-      setWargaList((prev) => {
-        const next = prev.map((item) => (item.id === newW.id ? res.warga! : item));
-        latestStateRef.current = { ...latestStateRef.current, wargaList: next };
-        return next;
-      });
+    const perm = assertRtWriteAllowed(currentUser, effectiveRT);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'permission-denied',
+        message: perm.message,
+      };
     }
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal menyimpan data warga ke Database Server Pusat.',
-      onConfirmed: () => {
-        setRolloverNotice(
-          `Data warga & KK "${newW.nama}" berhasil ditambahkan dan tersimpan ke Database Server Pusat.`
-        );
-        setTimeout(() => setRolloverNotice(null), 6000);
+
+    const newId = toValidDocId('w_' + Date.now(), 'w');
+    const actorName = currentUser?.username || 'system';
+    let createdWarga: Warga | undefined;
+
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        const newW: Warga = {
+          ...w,
+          rt: effectiveRT,
+          rw: normalizeRWCode(w.rw, pengaturanKas.profilRT?.namaRW || '05'),
+          id: newId,
+          no: draft.warga.length + 1,
+          statusIuran: w.statusIuran || 'Belum',
+          statusIuranPerTahun: { [tahunAktif]: w.statusIuran || 'Belum' },
+          pin: w.pin || '123456',
+          updatedAt: nowIso,
+          updatedBy: actorName,
+        };
+        createdWarga = newW;
+        draft.warga = [...draft.warga, newW];
+        return ['warga'];
       },
-    });
-    if (!res.ok && !res.terminal) {
-      setRolloverNotice(
-        `Data warga & KK "${newW.nama}" menunggu koneksi untuk tersinkron otomatis ke server.`
-      );
-      setTimeout(() => setRolloverNotice(null), 6000);
+      {
+        user: currentUser,
+        action: 'ADD_WARGA',
+        entityType: 'warga',
+        entityId: newId,
+        rtScope: `RT ${effectiveRT}`,
+        summary: `Menambah data warga/KK ${w.nama} di RT ${effectiveRT}`,
+        notification: {
+          title: `Warga Baru Terdaftar (RT ${effectiveRT})`,
+          body: `Data KK atas nama ${w.nama} (${w.jumlahJiwa || 1} jiwa) berhasil ditambahkan di RT ${effectiveRT}.`,
+          category: 'warga',
+          entityType: 'warga',
+          entityId: newId,
+          targetRts: [effectiveRT],
+          targetRoles: ['server', 'admin'],
+          createdBy: actorName,
+        },
+      }
+    );
+
+    if (res.synced) {
+      flashWriteSuccess();
+      setRolloverNotice(`Data warga & KK "${w.nama}" berhasil ditambahkan dan tersinkron ke cloud.`);
+    } else {
+      setRolloverNotice(`Data warga & KK "${w.nama}" disimpan lokal dan menunggu sinkronisasi otomatis.`);
     }
-    return res;
+    setTimeout(() => setRolloverNotice(null), 6000);
+
+    return { ok: true, pending: !res.synced, warga: createdWarga };
   };
 
   // Update Resident / Kepala Keluarga / Susunan Anggota KK
   const handleUpdateWarga = async (updatedWarga: Warga): Promise<ServerWriteResult> => {
-    const prevWarga = latestStateRef.current.wargaList;
-    const prevTxs = latestStateRef.current.transactions;
-    const prevBantuan = latestStateRef.current.bantuanList;
-    const oldWarga = prevWarga.find((w) => w.id === updatedWarga.id);
-
+    const fullStore = mqttSync.getStore();
+    const oldWarga = fullStore.warga.find((w) => w.id === updatedWarga.id);
     if (!oldWarga) {
       return {
         ok: false,
@@ -3004,15 +1654,14 @@ export default function App() {
     const assignedAdminRT =
       currentUser?.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '';
     const oldRT = getWargaRTCode(oldWarga, assignedAdminRT || pengaturanKas.profilRT?.namaRT || '08');
-
-    if (currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA' && oldRT !== assignedAdminRT) {
-      const msg = `Admin RT ${assignedAdminRT} tidak memiliki izin mengubah data warga milik RT ${oldRT}.`;
-      setCloudError(msg);
+    const perm = assertRtWriteAllowed(currentUser, oldRT);
+    if (!perm.ok) {
+      setCloudError(perm.message);
       return {
         ok: false,
         terminal: true,
         errorCode: 'permission-denied',
-        message: msg,
+        message: perm.message,
       };
     }
 
@@ -3025,239 +1674,137 @@ export default function App() {
         ? updatedWarga.rw || oldWarga.rw || pengaturanKas.profilRT?.namaRW || '05'
         : oldWarga.rw || pengaturanKas.profilRT?.namaRW || '05';
 
-    const nowIso = new Date().toISOString();
     const cleanedMembers = Array.isArray(updatedWarga.anggotaKeluarga)
       ? updatedWarga.anggotaKeluarga
       : oldWarga.anggotaKeluarga || [];
+    const actorName = currentUser?.username || 'system';
+    let savedWarga: Warga | undefined;
 
-    const finalWarga: Warga = {
-      ...oldWarga,
-      ...updatedWarga,
-      id: oldWarga.id,
-      no: oldWarga.no,
-      rt: effectiveRT,
-      rw: effectiveRW,
-      jumlahJiwa:
-        cleanedMembers.length > 0
-          ? cleanedMembers.length
-          : updatedWarga.jumlahJiwa || oldWarga.jumlahJiwa || 1,
-      anggotaKeluarga: cleanedMembers,
-      statusIuran: updatedWarga.statusIuran || oldWarga.statusIuran || 'Belum',
-      statusIuranPerTahun: {
-        ...(oldWarga.statusIuranPerTahun || {}),
-        [tahunAktif]: updatedWarga.statusIuran || oldWarga.statusIuran || 'Belum',
-      },
-      pin: updatedWarga.pin || oldWarga.pin || '123456',
-      riwayatPerubahanKK: oldWarga.riwayatPerubahanKK,
-      updatedAt: nowIso,
-    };
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        const finalWarga: Warga = {
+          ...oldWarga,
+          ...updatedWarga,
+          id: oldWarga.id,
+          no: oldWarga.no,
+          rt: effectiveRT,
+          rw: effectiveRW,
+          jumlahJiwa:
+            cleanedMembers.length > 0
+              ? cleanedMembers.length
+              : updatedWarga.jumlahJiwa || oldWarga.jumlahJiwa || 1,
+          anggotaKeluarga: cleanedMembers,
+          statusIuran: updatedWarga.statusIuran || oldWarga.statusIuran || 'Belum',
+          statusIuranPerTahun: {
+            ...(oldWarga.statusIuranPerTahun || {}),
+            [tahunAktif]: updatedWarga.statusIuran || oldWarga.statusIuran || 'Belum',
+          },
+          pin: updatedWarga.pin || oldWarga.pin || '123456',
+          riwayatPerubahanKK: oldWarga.riwayatPerubahanKK,
+          updatedAt: nowIso,
+          updatedBy: actorName,
+        };
+        savedWarga = finalWarga;
 
-    const oldNamaLower = String(oldWarga.nama || '').trim().toLowerCase();
-    const oldNoKK = String(oldWarga.noKK || '').trim();
-    const scopeChanged =
-      oldNamaLower !== String(finalWarga.nama || '').trim().toLowerCase() ||
-      oldNoKK !== String(finalWarga.noKK || '').trim() ||
-      oldRT !== effectiveRT ||
-      (oldWarga.rw || '05') !== effectiveRW;
+        const oldNamaLower = String(oldWarga.nama || '').trim().toLowerCase();
+        const oldNoKK = String(oldWarga.noKK || '').trim();
+        const scopeChanged =
+          oldNamaLower !== String(finalWarga.nama || '').trim().toLowerCase() ||
+          oldNoKK !== String(finalWarga.noKK || '').trim() ||
+          oldRT !== effectiveRT ||
+          (oldWarga.rw || '05') !== effectiveRW;
 
-    const modifiedTxs: Transaction[] = [];
-    const nextTxs = scopeChanged
-      ? prevTxs.map((t) => {
-          const matchesId = Boolean(t.residentId && t.residentId === finalWarga.id);
-          const matchesKK = Boolean(oldNoKK && t.noKK && t.noKK === oldNoKK);
-          const txNamaLower = String(t.namaWarga || '').trim().toLowerCase();
-          const txSameScope =
-            (!t.residentId || t.residentId === finalWarga.id) &&
-            (!oldNoKK || !t.noKK || t.noKK === oldNoKK) &&
-            getTransactionRTCode(t, prevWarga, oldRT) === oldRT;
-          const matchesHeadName = Boolean(oldNamaLower && txNamaLower === oldNamaLower && txSameScope);
+        const touched: MqttModuleTopic[] = ['warga'];
+        draft.warga = draft.warga.map((w) => (w.id === finalWarga.id ? finalWarga : w));
 
-          if (matchesId || matchesKK || matchesHeadName) {
-            const nextNamaWarga =
-              matchesHeadName || (!t.namaWarga && matchesKK) ? finalWarga.nama : t.namaWarga;
-            const nextRtScope =
-              oldRT !== effectiveRT || (oldWarga.rw || '05') !== effectiveRW || !t.rtScope
-                ? `RT ${effectiveRT} RW ${effectiveRW}`
-                : t.rtScope;
-            const nextTx: Transaction = {
-              ...t,
-              residentId: finalWarga.id,
-              noKK: finalWarga.noKK,
-              namaWarga: nextNamaWarga,
-              rtScope: nextRtScope,
-              updatedAt: nowIso,
-            };
-            modifiedTxs.push(nextTx);
-            return nextTx;
-          }
-          return t;
-        })
-      : prevTxs;
+        if (scopeChanged) {
+          let txTouched = false;
+          const allBeforeWarga = draft.warga;
+          draft.transactions = draft.transactions.map((t) => {
+            const matchesId = Boolean(t.residentId && t.residentId === finalWarga.id);
+            const matchesKK = Boolean(oldNoKK && t.noKK && t.noKK === oldNoKK);
+            const txNamaLower = String(t.namaWarga || '').trim().toLowerCase();
+            const txSameScope =
+              (!t.residentId || t.residentId === finalWarga.id) &&
+              (!oldNoKK || !t.noKK || t.noKK === oldNoKK) &&
+              getTransactionRTCode(t, allBeforeWarga, oldRT) === oldRT;
+            const matchesHeadName = Boolean(oldNamaLower && txNamaLower === oldNamaLower && txSameScope);
 
-    const modifiedBantuan: BantuanPemerintah[] = [];
-    const nextBantuan = scopeChanged
-      ? prevBantuan.map((b) => {
-          const matchesKK = Boolean(oldNoKK && b.noKK && b.noKK === oldNoKK);
-          const bNamaLower = String(b.namaPenerima || '').trim().toLowerCase();
-          const bantuanSameScope =
-            (!oldNoKK || !b.noKK || b.noKK === oldNoKK) &&
-            (!b.rtScope || normalizeRTCode(b.rtScope) === oldRT);
-          const matchesHeadName = Boolean(oldNamaLower && bNamaLower === oldNamaLower && bantuanSameScope);
-
-          if (matchesKK || matchesHeadName) {
-            const nextB: BantuanPemerintah = {
-              ...b,
-              noKK: finalWarga.noKK,
-              namaPenerima: matchesHeadName ? finalWarga.nama : b.namaPenerima,
-              rtScope:
-                oldRT !== effectiveRT || (oldWarga.rw || '05') !== effectiveRW || !b.rtScope
+            if (matchesId || matchesKK || matchesHeadName) {
+              txTouched = true;
+              const nextNamaWarga =
+                matchesHeadName || (!t.namaWarga && matchesKK) ? finalWarga.nama : t.namaWarga;
+              const nextRtScope =
+                oldRT !== effectiveRT || (oldWarga.rw || '05') !== effectiveRW || !t.rtScope
                   ? `RT ${effectiveRT} RW ${effectiveRW}`
-                  : b.rtScope,
-              updatedAt: nowIso,
-            };
-            modifiedBantuan.push(nextB);
-            return nextB;
-          }
-          return b;
-        })
-      : prevBantuan;
+                  : t.rtScope;
+              return {
+                ...t,
+                residentId: finalWarga.id,
+                noKK: finalWarga.noKK,
+                namaWarga: nextNamaWarga,
+                rtScope: nextRtScope,
+                updatedAt: nowIso,
+                updatedBy: actorName,
+              };
+            }
+            return t;
+          });
+          if (txTouched) touched.push('transactions');
 
-    const nextWargaList = prevWarga.map((w) => (w.id === finalWarga.id ? finalWarga : w));
-    setWargaList(nextWargaList);
-    if (modifiedTxs.length > 0) setTransactions(nextTxs);
-    if (modifiedBantuan.length > 0) setBantuanList(nextBantuan);
-    latestStateRef.current = {
-      ...latestStateRef.current,
-      wargaList: nextWargaList,
-      transactions: nextTxs,
-      bantuanList: nextBantuan,
-    };
-    setSyncStatus('pending');
+          let bantuanTouched = false;
+          draft.bantuan = draft.bantuan.map((b) => {
+            const matchesKK = Boolean(oldNoKK && b.noKK && b.noKK === oldNoKK);
+            const bNamaLower = String(b.namaPenerima || '').trim().toLowerCase();
+            const bantuanSameScope =
+              (!oldNoKK || !b.noKK || b.noKK === oldNoKK) &&
+              (!b.rtScope || normalizeRTCode(b.rtScope) === oldRT);
+            const matchesHeadName = Boolean(oldNamaLower && bNamaLower === oldNamaLower && bantuanSameScope);
 
-    const mutId = generateClientMutationId('wupd');
-    const ops: PendingSyncOp[] = [
+            if (matchesKK || matchesHeadName) {
+              bantuanTouched = true;
+              return {
+                ...b,
+                noKK: finalWarga.noKK,
+                namaPenerima: matchesHeadName ? finalWarga.nama : b.namaPenerima,
+                rtScope:
+                  oldRT !== effectiveRT || (oldWarga.rw || '05') !== effectiveRW || !b.rtScope
+                    ? `RT ${effectiveRT} RW ${effectiveRW}`
+                    : b.rtScope,
+                updatedAt: nowIso,
+                updatedBy: actorName,
+              };
+            }
+            return b;
+          });
+          if (bantuanTouched) touched.push('bantuan');
+        }
+
+        return touched;
+      },
       {
-        opKey: `warga:${finalWarga.id}`,
-        kind: 'saveWarga',
-        payload: finalWarga,
-        isUpdate: true,
-        expectedVersion: oldWarga.version,
-        clientMutationId: mutId,
-      },
-      ...modifiedTxs.map((tx) => ({
-        opKey: `tx:${tx.id}`,
-        kind: 'saveTx' as const,
-        payload: tx,
-        isUpdate: true,
-        expectedVersion: tx.version,
-      })),
-      ...modifiedBantuan.map((b) => ({
-        opKey: `bantuan:${b.id}`,
-        kind: 'saveBantuan' as const,
-        payload: b,
-        isUpdate: true,
-        expectedVersion: b.version,
-      })),
-    ];
-
-    const rollback = () => {
-      setWargaList(prevWarga);
-      setTransactions(prevTxs);
-      setBantuanList(prevBantuan);
-      latestStateRef.current = {
-        ...latestStateRef.current,
-        wargaList: prevWarga,
-        transactions: prevTxs,
-        bantuanList: prevBantuan,
-      };
-    };
-
-    const wargaRes = await putWargaToServer(finalWarga, {
-      expectedVersion: oldWarga.version,
-      clientMutationId: mutId,
-    });
-    if (!wargaRes.ok && wargaRes.terminal) {
-      await settleWriteBatch({
-        ops: [ops[0]],
-        results: [wargaRes],
-        rollback,
-        fallbackError: 'Gagal menyimpan pembaruan data warga ke Database Server Pusat.',
-      });
-      return wargaRes;
-    }
-
-    if (wargaRes.ok && wargaRes.warga && isMountedRef.current) {
-      setWargaList((prev) => {
-        const next = prev.map((w) => (w.id === finalWarga.id ? wargaRes.warga! : w));
-        latestStateRef.current = { ...latestStateRef.current, wargaList: next };
-        return next;
-      });
-    }
-
-    const txResults = await Promise.all(
-      modifiedTxs.map((tx) =>
-        saveTransactionOnServer(tx, {
-          isUpdate: true,
-          expectedVersion: tx.version,
-          clientMutationId: generateClientMutationId('wtx'),
-        })
-      )
-    );
-    const bantuanResults = await Promise.all(
-      modifiedBantuan.map((b) =>
-        saveBantuanOnServer(b, {
-          isUpdate: true,
-          expectedVersion: b.version,
-        })
-      )
+        user: currentUser,
+        action: 'UPDATE_WARGA',
+        entityType: 'warga',
+        entityId: oldWarga.id,
+        rtScope: `RT ${effectiveRT}`,
+        summary: `Memperbarui data KK/warga ${updatedWarga.nama} (${cleanedMembers.length || updatedWarga.jumlahJiwa || 1} jiwa) di RT ${effectiveRT}`,
+      }
     );
 
-    if (isMountedRef.current) {
-      const savedTxMap = new Map<string, Transaction>();
-      txResults.forEach((r) => {
-        if (r.ok && r.transaction) savedTxMap.set(r.transaction.id, r.transaction);
-      });
-      if (savedTxMap.size > 0) {
-        setTransactions((prev) => {
-          const next = prev.map((t) => savedTxMap.get(t.id) || t);
-          latestStateRef.current = { ...latestStateRef.current, transactions: next };
-          return next;
-        });
-      }
-      const savedBantuanMap = new Map<string, BantuanPemerintah>();
-      bantuanResults.forEach((r) => {
-        if (r.ok && r.bantuan) savedBantuanMap.set(r.bantuan.id, r.bantuan);
-      });
-      if (savedBantuanMap.size > 0) {
-        setBantuanList((prev) => {
-          const next = prev.map((b) => savedBantuanMap.get(b.id) || b);
-          latestStateRef.current = { ...latestStateRef.current, bantuanList: next };
-          return next;
-        });
-      }
-    }
-
-    await settleWriteBatch({
-      ops,
-      results: [wargaRes, ...txResults, ...bantuanResults],
-      rollback,
-      fallbackError: 'Gagal menyimpan pembaruan data warga ke Database Server Pusat.',
-      onConfirmed: () => {
-        setRolloverNotice(
-          `Data warga & KK "${finalWarga.nama}" (${finalWarga.jumlahJiwa} jiwa) berhasil diperbarui dan tersimpan ke Database Server Pusat.`
-        );
-        setTimeout(() => setRolloverNotice(null), 6000);
-      },
-    });
-
-    if (!wargaRes.ok && !wargaRes.terminal) {
+    if (res.synced) {
+      flashWriteSuccess();
       setRolloverNotice(
-        `Pembaruan data warga "${finalWarga.nama}" dalam antrean sinkronisasi otomatis ke server.`
+        `Data warga & KK "${savedWarga?.nama || updatedWarga.nama}" (${savedWarga?.jumlahJiwa || 1} jiwa) berhasil diperbarui dan tersinkron ke cloud.`
       );
-      setTimeout(() => setRolloverNotice(null), 6000);
+    } else {
+      setRolloverNotice(
+        `Pembaruan data warga "${savedWarga?.nama || updatedWarga.nama}" disimpan lokal dan menunggu sinkronisasi otomatis.`
+      );
     }
+    setTimeout(() => setRolloverNotice(null), 6000);
 
-    return wargaRes;
+    return { ok: true, pending: !res.synced, warga: savedWarga };
   };
 
   // Bulk Import Excel: Grouped Warga + Anggota Keluarga + Penerimaan Bantuan in 1 click
@@ -3268,8 +1815,7 @@ export default function App() {
   ) => {
     const baseTime = Date.now();
     const nonce = Math.random().toString(36).slice(2, 6);
-    const nowIso = new Date().toISOString();
-
+    const actorName = currentUser?.username || 'system';
     const assignedAdminRT =
       currentUser?.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '';
     const rtScopeRwMatch =
@@ -3286,365 +1832,274 @@ export default function App() {
         : assignedAdminRT || normalizeRTCode(pengaturanKas.profilRT?.namaRT) || '08';
     const fallbackRT = rawFallbackRT && rawFallbackRT !== 'SEMUA' ? rawFallbackRT : '08';
 
-    const currentWarga = latestStateRef.current.wargaList || [];
-    const updatedWarga = [...currentWarga];
-    const changedWargaToSave: Warga[] = [];
     let addedKKCount = 0;
     let updatedKKCount = 0;
-
-    importedWarga.forEach((incoming, idx) => {
-      const candidateRt = normalizeRTCode(incoming.rt);
-      const scopedRt =
-        currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA'
-          ? assignedAdminRT
-          : candidateRt && candidateRt !== 'SEMUA'
-            ? candidateRt
-            : fallbackRT;
-      const scopedRw =
-        currentUser?.role === 'admin'
-          ? assignedAdminRW
-          : normalizeRWCode(incoming.rw) || assignedAdminRW || '05';
-
-      const existingIndex = incoming.noKK
-        ? updatedWarga.findIndex((w) => w.noKK === incoming.noKK)
-        : updatedWarga.findIndex((w) => w.nama.toLowerCase() === incoming.nama.toLowerCase());
-
-      if (existingIndex >= 0) {
-        if (options.mergeExisting) {
-          const existing = updatedWarga[existingIndex];
-          const existingRt = normalizeRTCode(existing.rt);
-          if (
-            currentUser?.role === 'admin' &&
-            assignedAdminRT &&
-            assignedAdminRT !== 'SEMUA' &&
-            existingRt &&
-            existingRt !== assignedAdminRT
-          ) {
-            return;
-          }
-          const mergedRt =
-            currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA'
-              ? assignedAdminRT
-              : candidateRt && candidateRt !== 'SEMUA'
-                ? candidateRt
-                : existingRt && existingRt !== 'SEMUA'
-                  ? existingRt
-                  : fallbackRT;
-          const mergedRw =
-            currentUser?.role === 'admin'
-              ? assignedAdminRW
-              : normalizeRWCode(incoming.rw) || normalizeRWCode(existing.rw) || scopedRw;
-          const nextStatus = incoming.statusIuran || existing.statusIuran || 'Belum';
-          const mergedItem: Warga = {
-            ...existing,
-            nama: incoming.nama || existing.nama,
-            noKK: incoming.noKK || existing.noKK,
-            nik: incoming.nik || existing.nik,
-            noRumah: incoming.noRumah || existing.noRumah,
-            rt: mergedRt,
-            rw: mergedRw,
-            alamat: incoming.alamat || existing.alamat,
-            kodePos: incoming.kodePos || existing.kodePos,
-            jenisKelamin: incoming.jenisKelamin || existing.jenisKelamin,
-            anggotaKeluarga:
-              incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
-                ? incoming.anggotaKeluarga
-                : existing.anggotaKeluarga,
-            jumlahJiwa:
-              incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
-                ? incoming.anggotaKeluarga.length
-                : existing.jumlahJiwa,
-            telepon: incoming.telepon || existing.telepon,
-            statusIuran: nextStatus,
-            statusIuranPerTahun: {
-              ...(existing.statusIuranPerTahun || {}),
-              [tahunAktif]: nextStatus,
-            },
-            updatedAt: nowIso,
-          };
-          updatedWarga[existingIndex] = mergedItem;
-          changedWargaToSave.push(mergedItem);
-          updatedKKCount++;
-        }
-      } else {
-        const assignedId = toValidDocId(`w_${baseTime}_${idx}_${nonce}`, 'w');
-        const newWarga: Warga = {
-          ...incoming,
-          id: assignedId,
-          rt: scopedRt,
-          rw: scopedRw,
-          no: updatedWarga.length + 1,
-          statusIuran: incoming.statusIuran || 'Belum',
-          statusIuranPerTahun: { [tahunAktif]: incoming.statusIuran || 'Belum' },
-          pin: incoming.pin || '123456',
-          updatedAt: nowIso,
-        };
-        updatedWarga.push(newWarga);
-        changedWargaToSave.push(newWarga);
-        addedKKCount++;
-      }
-    });
-
-    const currentBantuan = latestStateRef.current.bantuanList || [];
-    const nextBantuanList = [...currentBantuan];
-    const newBantuanToSave: BantuanPemerintah[] = [];
     let addedBantuanCount = 0;
-
-    importedBantuan.forEach((b, idx) => {
-      const isDuplicate = nextBantuanList.some(
-        (existing) =>
-          existing.noKK === b.noKK &&
-          existing.namaPenerima.toLowerCase() === b.namaPenerima.toLowerCase() &&
-          existing.jenisBantuan.toLowerCase() === b.jenisBantuan.toLowerCase() &&
-          existing.tanggal === b.tanggal
-      );
-      if (!isDuplicate) {
-        const assignedBId = toValidDocId(`b_${baseTime}_${idx}_${nonce}`, 'b');
-        const parsedBantuanRt = normalizeRTCode(b.rtScope);
-        const safeBantuanRt =
-          currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA'
-            ? assignedAdminRT
-            : parsedBantuanRt && parsedBantuanRt !== 'SEMUA'
-              ? parsedBantuanRt
-              : fallbackRT;
-        const item: BantuanPemerintah = {
-          ...b,
-          id: assignedBId,
-          rtScope: `RT ${safeBantuanRt} RW ${assignedAdminRW}`,
-          updatedAt: nowIso,
-        };
-        nextBantuanList.unshift(item);
-        newBantuanToSave.push(item);
-        addedBantuanCount++;
-      }
-    });
-
-    const existingIdSet = new Set(currentWarga.map((w) => w.id));
-    const bulkOps: PendingSyncOp[] = [
-      ...changedWargaToSave.map((w) => ({
-        opKey: `warga:${w.id}`,
-        kind: 'saveWarga' as const,
-        payload: w,
-        isUpdate: existingIdSet.has(w.id),
-        expectedVersion: w.version,
-      })),
-      ...newBantuanToSave.map((b) => ({
-        opKey: `bantuan:${b.id}`,
-        kind: 'saveBantuan' as const,
-        payload: b,
-        isUpdate: false,
-      })),
-    ];
-
-    if (bulkOps.length === 0) {
-      setRolloverNotice('Tidak ada data baru untuk diimpor (seluruh KK & bantuan pada file sudah ada).');
-      setTimeout(() => setRolloverNotice(null), 5000);
-      return;
-    }
 
     const totalJiwa = importedWarga.reduce(
       (sum, w) => sum + (w.anggotaKeluarga?.length || w.jumlahJiwa || 1),
       0
     );
 
-    setSyncStatus('pending');
-    setWargaList(updatedWarga);
-    latestStateRef.current = { ...latestStateRef.current, wargaList: updatedWarga };
-    if (addedBantuanCount > 0) {
-      setBantuanList(nextBantuanList);
-      latestStateRef.current = { ...latestStateRef.current, bantuanList: nextBantuanList };
-    }
-    setRolloverNotice(
-      `Menyimpan ${addedKKCount + updatedKKCount} KK (${totalJiwa} jiwa)${addedBantuanCount > 0 ? ` dan ${addedBantuanCount} data bantuan` : ''} ke Database Server Pusat...`
-    );
+    void mqttSync
+      .mutate(
+        (draft, nowIso) => {
+          const updatedWarga = [...draft.warga];
 
-    const rollbackBulk = () => {
-      setWargaList(currentWarga);
-      setBantuanList(currentBantuan);
-      latestStateRef.current = {
-        ...latestStateRef.current,
-        wargaList: currentWarga,
-        bantuanList: currentBantuan,
-      };
-      setRolloverNotice(null);
-    };
+          importedWarga.forEach((incoming, idx) => {
+            const candidateRt = normalizeRTCode(incoming.rt);
+            const scopedRt =
+              currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA'
+                ? assignedAdminRT
+                : candidateRt && candidateRt !== 'SEMUA'
+                ? candidateRt
+                : fallbackRT;
+            const scopedRw =
+              currentUser?.role === 'admin'
+                ? assignedAdminRW
+                : normalizeRWCode(incoming.rw) || assignedAdminRW || '05';
 
-    const mutId = generateClientMutationId('bulk');
-    void bulkImportWargaOnServer({
-      wargaList: changedWargaToSave,
-      bantuanList: newBantuanToSave,
-      mergeExisting: options.mergeExisting,
-      tahunAktif,
-      clientMutationId: mutId,
-    }).then(async (bulkRes) => {
-      if (!isMountedRef.current) return;
-      if (bulkRes.ok) {
-        clearPendingOpsByEntity(bulkOps.map(getCanonicalEntityKey));
-        await refreshAuthoritativeSnapshot().catch(() => false);
-        applyWriteSuccessStatus(false);
-        setRolloverNotice(
-          `Import Excel Berhasil & Tersinkron! ${bulkRes.addedKK ?? addedKKCount} KK baru ditambahkan${(bulkRes.updatedKK ?? updatedKKCount) > 0 ? `, ${bulkRes.updatedKK ?? updatedKKCount} KK diperbarui` : ''} (${totalJiwa} jiwa)${(bulkRes.addedBantuan ?? addedBantuanCount) > 0 ? ` beserta ${bulkRes.addedBantuan ?? addedBantuanCount} data penerimaan bantuan` : ''}.`
-        );
+            const existingIndex = incoming.noKK
+              ? updatedWarga.findIndex((w) => w.noKK === incoming.noKK)
+              : updatedWarga.findIndex(
+                  (w) =>
+                    w.nama.toLowerCase() === incoming.nama.toLowerCase() &&
+                    getWargaRTCode(w, scopedRt) === scopedRt
+                );
+
+            if (existingIndex >= 0) {
+              if (!options.mergeExisting) return;
+              const existing = updatedWarga[existingIndex];
+              const existingRt = normalizeRTCode(existing.rt);
+              if (
+                currentUser?.role === 'admin' &&
+                assignedAdminRT &&
+                assignedAdminRT !== 'SEMUA' &&
+                existingRt &&
+                existingRt !== assignedAdminRT
+              ) {
+                return;
+              }
+              const mergedRt =
+                currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA'
+                  ? assignedAdminRT
+                  : candidateRt && candidateRt !== 'SEMUA'
+                  ? candidateRt
+                  : existingRt && existingRt !== 'SEMUA'
+                  ? existingRt
+                  : fallbackRT;
+              const mergedRw =
+                currentUser?.role === 'admin'
+                  ? assignedAdminRW
+                  : normalizeRWCode(incoming.rw) || normalizeRWCode(existing.rw) || scopedRw;
+              const nextStatus = incoming.statusIuran || existing.statusIuran || 'Belum';
+              updatedWarga[existingIndex] = {
+                ...existing,
+                nama: incoming.nama || existing.nama,
+                noKK: incoming.noKK || existing.noKK,
+                nik: incoming.nik || existing.nik,
+                noRumah: incoming.noRumah || existing.noRumah,
+                rt: mergedRt,
+                rw: mergedRw,
+                alamat: incoming.alamat || existing.alamat,
+                kodePos: incoming.kodePos || existing.kodePos,
+                jenisKelamin: incoming.jenisKelamin || existing.jenisKelamin,
+                anggotaKeluarga:
+                  incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
+                    ? incoming.anggotaKeluarga
+                    : existing.anggotaKeluarga,
+                jumlahJiwa:
+                  incoming.anggotaKeluarga && incoming.anggotaKeluarga.length > 0
+                    ? incoming.anggotaKeluarga.length
+                    : existing.jumlahJiwa,
+                telepon: incoming.telepon || existing.telepon,
+                statusIuran: nextStatus,
+                statusIuranPerTahun: {
+                  ...(existing.statusIuranPerTahun || {}),
+                  [tahunAktif]: nextStatus,
+                },
+                updatedAt: nowIso,
+                updatedBy: actorName,
+              };
+              updatedKKCount++;
+            } else {
+              const assignedId = toValidDocId(`w_${baseTime}_${idx}_${nonce}`, 'w');
+              const newWarga: Warga = {
+                ...incoming,
+                id: assignedId,
+                rt: scopedRt,
+                rw: scopedRw,
+                no: updatedWarga.length + 1,
+                statusIuran: incoming.statusIuran || 'Belum',
+                statusIuranPerTahun: { [tahunAktif]: incoming.statusIuran || 'Belum' },
+                pin: incoming.pin || '123456',
+                updatedAt: nowIso,
+                updatedBy: actorName,
+              };
+              updatedWarga.push(newWarga);
+              addedKKCount++;
+            }
+          });
+
+          const nextBantuanList = [...draft.bantuan];
+          importedBantuan.forEach((b, idx) => {
+            const isDuplicate = nextBantuanList.some(
+              (existing) =>
+                existing.noKK === b.noKK &&
+                existing.namaPenerima.toLowerCase() === b.namaPenerima.toLowerCase() &&
+                existing.jenisBantuan.toLowerCase() === b.jenisBantuan.toLowerCase() &&
+                existing.tanggal === b.tanggal
+            );
+            if (!isDuplicate) {
+              const assignedBId = toValidDocId(`b_${baseTime}_${idx}_${nonce}`, 'b');
+              const parsedBantuanRt = normalizeRTCode(b.rtScope);
+              const safeBantuanRt =
+                currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA'
+                  ? assignedAdminRT
+                  : parsedBantuanRt && parsedBantuanRt !== 'SEMUA'
+                  ? parsedBantuanRt
+                  : fallbackRT;
+              const item: BantuanPemerintah = {
+                ...b,
+                id: assignedBId,
+                rtScope: `RT ${safeBantuanRt} RW ${assignedAdminRW}`,
+                updatedAt: nowIso,
+                updatedBy: actorName,
+              };
+              nextBantuanList.unshift(item);
+              addedBantuanCount++;
+            }
+          });
+
+          draft.warga = updatedWarga;
+          draft.bantuan = nextBantuanList;
+          const touched: MqttModuleTopic[] = [];
+          if (addedKKCount > 0 || updatedKKCount > 0) touched.push('warga');
+          if (addedBantuanCount > 0) touched.push('bantuan');
+          return touched;
+        },
+        {
+          user: currentUser,
+          action: 'BULK_IMPORT_EXCEL',
+          entityType: 'warga',
+          entityId: `bulk_${baseTime}`,
+          rtScope: currentUser?.rtScope || `RT ${fallbackRT}`,
+          summary: `Import Excel: ${importedWarga.length} KK (${totalJiwa} jiwa) dan ${importedBantuan.length} bantuan`,
+        }
+      )
+      .then((res) => {
+        if (!isMountedRef.current) return;
+        if (addedKKCount === 0 && updatedKKCount === 0 && addedBantuanCount === 0) {
+          setRolloverNotice(
+            'Tidak ada data baru untuk diimpor (seluruh KK & bantuan pada file sudah ada).'
+          );
+          setTimeout(() => setRolloverNotice(null), 5000);
+          return;
+        }
+        if (res.synced) {
+          flashWriteSuccess();
+          setRolloverNotice(
+            `Import Excel Berhasil & Tersinkron! ${addedKKCount} KK baru ditambahkan${updatedKKCount > 0 ? `, ${updatedKKCount} KK diperbarui` : ''} (${totalJiwa} jiwa)${addedBantuanCount > 0 ? ` beserta ${addedBantuanCount} data penerimaan bantuan` : ''}.`
+          );
+        } else {
+          setRolloverNotice(
+            `Data import Excel (${addedKKCount + updatedKKCount} KK) disimpan lokal dan menunggu koneksi untuk tersinkron otomatis ke cloud.`
+          );
+        }
         setTimeout(() => setRolloverNotice(null), 7000);
-        return;
-      }
-
-      const isTerminal =
-        bulkRes.status === 400 ||
-        bulkRes.status === 401 ||
-        bulkRes.status === 403 ||
-        bulkRes.status === 404 ||
-        bulkRes.status === 409;
-      if (isTerminal) {
-        rollbackBulk();
-        setSyncStatus('error');
-        setCloudError(
-          formatFriendlyFirestoreError(
-            bulkRes,
-            'Gagal mengimpor data Excel ke Database Server Pusat.'
-          )
-        );
-        return;
-      }
-
-      enqueuePendingOps(bulkOps);
-      setSyncStatus('pending');
-      setCloudError(
-        formatFriendlyFirestoreError(
-          bulkRes.message,
-          'Koneksi terputus saat import Excel. Data akan dikirim ulang otomatis.'
-        )
-      );
-      setRolloverNotice(
-        `Data import Excel (${addedKKCount + updatedKKCount} KK) menunggu koneksi untuk tersinkron otomatis ke server.`
-      );
-      setTimeout(() => setRolloverNotice(null), 7000);
-    });
+      });
   };
 
   // Toggle resident fee status
   const handleToggleWargaStatus = async (id: string) => {
-    const prevWarga = latestStateRef.current.wargaList;
-    const nowIso = new Date().toISOString();
-    const target = prevWarga.find((w) => w.id === id);
+    const fullStore = mqttSync.getStore();
+    const target = fullStore.warga.find((w) => w.id === id);
     if (!target) return;
+    const targetRt = getWargaRTCode(target, '');
+    const perm = assertRtWriteAllowed(currentUser, targetRt);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
+    }
 
     const nextStatus: 'Sudah' | 'Belum' = target.statusIuran === 'Sudah' ? 'Belum' : 'Sudah';
-    const perTahun: Record<number, 'Sudah' | 'Belum'> = {
-      ...(target.statusIuranPerTahun || {}),
-      [tahunAktif]: nextStatus,
-    };
-    const updatedTarget: Warga = {
-      ...target,
-      statusIuran: nextStatus,
-      statusIuranPerTahun: perTahun,
-      updatedAt: nowIso,
-    };
-
-    const nextWarga = prevWarga.map((w) => (w.id === id ? updatedTarget : w));
-    setWargaList(nextWarga);
-    latestStateRef.current = { ...latestStateRef.current, wargaList: nextWarga };
-    setSyncStatus('pending');
-
-    const mutId = generateClientMutationId('wtgl');
-    const ops: PendingSyncOp[] = [
-      {
-        opKey: `warga:${updatedTarget.id}`,
-        kind: 'saveWarga',
-        payload: updatedTarget,
-        isUpdate: true,
-        expectedVersion: target.version,
-        clientMutationId: mutId,
+    const actorName = currentUser?.username || 'system';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.warga = draft.warga.map((w) => {
+          if (w.id !== id) return w;
+          return {
+            ...w,
+            statusIuran: nextStatus,
+            statusIuranPerTahun: {
+              ...(w.statusIuranPerTahun || {}),
+              [tahunAktif]: nextStatus,
+            },
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          };
+        });
+        return ['warga'];
       },
-    ];
-    const rollback = () => {
-      setWargaList(prevWarga);
-      latestStateRef.current = { ...latestStateRef.current, wargaList: prevWarga };
-    };
-    const res = await putWargaToServer(updatedTarget, {
-      expectedVersion: target.version,
-      clientMutationId: mutId,
-    });
-    if (res.ok && res.warga && isMountedRef.current) {
-      setWargaList((prev) => {
-        const next = prev.map((w) => (w.id === id ? res.warga! : w));
-        latestStateRef.current = { ...latestStateRef.current, wargaList: next };
-        return next;
-      });
-    }
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal memperbarui status iuran ke Database Server Pusat.',
-    });
+      {
+        user: currentUser,
+        action: 'TOGGLE_IURAN_STATUS',
+        entityType: 'warga',
+        entityId: id,
+        rtScope: `RT ${targetRt}`,
+        summary: `Mengubah status iuran ${target.nama} menjadi ${nextStatus}`,
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
   // Delete resident
   const handleDeleteWarga = async (id: string): Promise<ServerWriteResult> => {
-    const prevWarga = latestStateRef.current.wargaList;
-    const target = prevWarga.find((w) => w.id === id);
-
-    if (target && currentUser?.role === 'admin' && currentUser.rtScope) {
-      const assignedRT = normalizeRTCode(currentUser.rtScope);
-      const targetRT = getWargaRTCode(target, assignedRT);
-      if (assignedRT && assignedRT !== 'SEMUA' && targetRT && targetRT !== assignedRT) {
-        const msg = `Admin RT ${assignedRT} tidak memiliki izin menghapus data warga milik RT ${targetRT}.`;
-        setCloudError(msg);
-        return {
-          ok: false,
-          terminal: true,
-          errorCode: 'permission-denied',
-          message: msg,
-        };
-      }
+    const fullStore = mqttSync.getStore();
+    const target = fullStore.warga.find((w) => w.id === id);
+    const targetRt = target ? getWargaRTCode(target, '') : '';
+    const perm = assertRtWriteAllowed(currentUser, targetRt);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return {
+        ok: false,
+        terminal: true,
+        errorCode: 'permission-denied',
+        message: perm.message,
+      };
     }
 
-    const nextWarga = prevWarga.filter((w) => w.id !== id);
-    setWargaList(nextWarga);
-    latestStateRef.current = { ...latestStateRef.current, wargaList: nextWarga };
-    setSyncStatus('pending');
-
-    const mutId = generateClientMutationId('wdel');
-    const ops: PendingSyncOp[] = [
+    const actorName = currentUser?.username || 'system';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.warga = draft.warga.filter((w) => w.id !== id);
+        mqttSync.addTombstone(draft, 'warga', id, nowIso, actorName);
+        return ['warga', 'tombstones'];
+      },
       {
-        opKey: `warga:${id}`,
-        kind: 'deleteWarga',
-        targetId: id,
-        expectedVersion: target?.version,
-        clientMutationId: mutId,
-      },
-    ];
-    const rollback = () => {
-      setWargaList(prevWarga);
-      latestStateRef.current = { ...latestStateRef.current, wargaList: prevWarga };
-    };
-    const res = await deleteWargaFromServer(id, {
-      expectedVersion: target?.version,
-      clientMutationId: mutId,
-    });
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal menghapus data warga di Database Server Pusat.',
-      onConfirmed: () => {
-        setRolloverNotice(
-          `Data warga "${target?.nama || id}" berhasil dihapus dari Database Server Pusat.`
-        );
-        setTimeout(() => setRolloverNotice(null), 6000);
-      },
-    });
-    if (!res.ok && !res.terminal) {
+        user: currentUser,
+        action: 'DELETE_WARGA',
+        entityType: 'warga',
+        entityId: id,
+        rtScope: targetRt ? `RT ${targetRt}` : undefined,
+        summary: `Menghapus data warga/KK ${target?.nama || id}`,
+      }
+    );
+
+    if (res.synced) {
+      flashWriteSuccess();
+      setRolloverNotice(`Data warga "${target?.nama || id}" berhasil dihapus dan tersinkron.`);
+    } else {
       setRolloverNotice(
-        `Penghapusan data warga "${target?.nama || id}" sedang menunggu koneksi untuk tersinkron ke server.`
+        `Penghapusan data warga "${target?.nama || id}" disimpan lokal dan menunggu koneksi cloud.`
       );
-      setTimeout(() => setRolloverNotice(null), 6000);
     }
-    return res;
+    setTimeout(() => setRolloverNotice(null), 6000);
+
+    return { ok: true, pending: !res.synced };
   };
 
-  // Upgrade / Perbarui Data KK Warga (Atomic Server Transaction + Relink Kas & Bantuan)
+  // Upgrade / Perbarui Data KK Warga (Atomic Relink Kas, Bantuan & Optional Santunan Kematian)
   const handleApplyUpgradeKK = async ({
     wargaId,
     oldWarga,
@@ -3672,11 +2127,8 @@ export default function App() {
     catatSantunanKematian: boolean;
     namaMeninggal?: string;
   }): Promise<ServerWriteResult> => {
-    const prevWarga = latestStateRef.current.wargaList;
-    const prevTxs = latestStateRef.current.transactions;
-    const prevBantuan = latestStateRef.current.bantuanList;
-
-    const existingWarga = prevWarga.find((w) => w.id === wargaId) || oldWarga;
+    const fullStore = mqttSync.getStore();
+    const existingWarga = fullStore.warga.find((w) => w.id === wargaId) || oldWarga;
     if (!existingWarga) {
       return {
         ok: false,
@@ -3692,15 +2144,14 @@ export default function App() {
       existingWarga,
       assignedAdminRT || pengaturanKas.profilRT?.namaRT || '08'
     );
-
-    if (currentUser?.role === 'admin' && assignedAdminRT && assignedAdminRT !== 'SEMUA' && oldRT !== assignedAdminRT) {
-      const msg = `Admin RT ${assignedAdminRT} tidak memiliki izin melakukan upgrade KK milik RT ${oldRT}.`;
-      setCloudError(msg);
+    const perm = assertRtWriteAllowed(currentUser, oldRT);
+    if (!perm.ok) {
+      setCloudError(perm.message);
       return {
         ok: false,
         terminal: true,
         errorCode: 'permission-denied',
-        message: msg,
+        message: perm.message,
       };
     }
 
@@ -3717,13 +2168,13 @@ export default function App() {
     const oldNamaLower = oldNamaSafe.toLowerCase();
     const oldNoKKSafe = String(existingWarga.noKK || '').trim();
 
-    const oldTxs = prevTxs.filter((t) => {
+    const oldTxs = fullStore.transactions.filter((t) => {
       if (t.residentId && t.residentId === wargaId) return true;
       if (oldNoKKSafe && t.noKK && t.noKK === oldNoKKSafe) return true;
       const txSameScope =
         (!t.residentId || t.residentId === wargaId) &&
         (!oldNoKKSafe || !t.noKK || t.noKK === oldNoKKSafe) &&
-        getTransactionRTCode(t, prevWarga, oldRT) === oldRT;
+        getTransactionRTCode(t, fullStore.warga, oldRT) === oldRT;
       return Boolean(
         oldNamaLower &&
           t.namaWarga &&
@@ -3758,7 +2209,7 @@ export default function App() {
       id: 'rw_' + Date.now(),
       tanggal: new Date().toISOString().split('T')[0],
       alasan,
-      keterangan: keterangan || 'Pembaruan data KK melalui import Excel / edit langsung',
+      keterangan: keterangan || 'Pembaruan data KK melalui fitur Upgrade KK',
       noKKLama: oldNoKKSafe,
       noKKBaru: newKKData.noKK,
       kepalaKeluargaLama: oldNamaSafe,
@@ -3771,203 +2222,166 @@ export default function App() {
     const newHeadMember = newKKData.anggotaKeluarga.find(
       (m) => m.hubungan === 'Kepala Keluarga'
     );
-    const nowIso = new Date().toISOString();
-    const updatedWargaItem: Warga = {
-      ...existingWarga,
-      nama: newKKData.nama,
-      noKK: newKKData.noKK,
-      nik:
-        newHeadMember?.nik && newHeadMember.nik.length === 16
-          ? newHeadMember.nik
-          : existingWarga.nik,
-      rt: effectiveRT,
-      rw: effectiveRW,
-      alamat: newKKData.alamat || existingWarga.alamat,
-      kodePos: newKKData.kodePos || existingWarga.kodePos,
-      tanggalDikeluarkan: newKKData.tanggalDikeluarkan || existingWarga.tanggalDikeluarkan,
-      jenisKelamin: newKKData.jenisKelamin || existingWarga.jenisKelamin,
-      jumlahJiwa:
-        newKKData.anggotaKeluarga.length > 0
-          ? newKKData.anggotaKeluarga.length
-          : existingWarga.jumlahJiwa,
-      anggotaKeluarga: newKKData.anggotaKeluarga,
-      riwayatPerubahanKK: [riwayatBaru, ...(existingWarga.riwayatPerubahanKK || [])],
-      updatedAt: nowIso,
-    };
+    const actorName = currentUser?.username || 'system';
+    let savedWargaItem: Warga | undefined;
 
-    const nextWargaList = prevWarga.map((w) => (w.id === wargaId ? updatedWargaItem : w));
-    let nextTxList = prevTxs.map((t) => {
-      const matchesId = Boolean(t.residentId && t.residentId === wargaId);
-      const matchesKK = Boolean(oldNoKKSafe && t.noKK && t.noKK === oldNoKKSafe);
-      const txNamaLower = String(t.namaWarga || '').trim().toLowerCase();
-      const txSameScope =
-        (!t.residentId || t.residentId === wargaId) &&
-        (!oldNoKKSafe || !t.noKK || t.noKK === oldNoKKSafe) &&
-        getTransactionRTCode(t, prevWarga, oldRT) === oldRT;
-      const matchesHeadName = Boolean(oldNamaLower && txNamaLower === oldNamaLower && txSameScope);
-
-      if (matchesId || matchesKK || matchesHeadName) {
-        const baseKet = String(t.keterangan || '');
-        const nextKet =
-          oldNoKKSafe && oldNoKKSafe !== newKKData.noKK && !baseKet.includes('Dialihkan')
-            ? `${baseKet ? baseKet + ' ' : ''}(Dialihkan dari KK lama: ${oldNoKKSafe})`
-            : baseKet;
-        return {
-          ...t,
-          residentId: wargaId,
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        const updatedWargaItem: Warga = {
+          ...existingWarga,
+          nama: newKKData.nama,
           noKK: newKKData.noKK,
-          namaWarga: matchesHeadName || !t.namaWarga ? newKKData.nama : t.namaWarga,
-          rtScope: `RT ${effectiveRT} RW ${effectiveRW}`,
-          keterangan: nextKet,
+          nik:
+            newHeadMember?.nik && newHeadMember.nik.length === 16
+              ? newHeadMember.nik
+              : existingWarga.nik,
+          rt: effectiveRT,
+          rw: effectiveRW,
+          alamat: newKKData.alamat || existingWarga.alamat,
+          kodePos: newKKData.kodePos || existingWarga.kodePos,
+          tanggalDikeluarkan: newKKData.tanggalDikeluarkan || existingWarga.tanggalDikeluarkan,
+          jenisKelamin: newKKData.jenisKelamin || existingWarga.jenisKelamin,
+          jumlahJiwa:
+            newKKData.anggotaKeluarga.length > 0
+              ? newKKData.anggotaKeluarga.length
+              : existingWarga.jumlahJiwa,
+          anggotaKeluarga: newKKData.anggotaKeluarga,
+          riwayatPerubahanKK: [riwayatBaru, ...(existingWarga.riwayatPerubahanKK || [])],
           updatedAt: nowIso,
+          updatedBy: actorName,
         };
-      }
-      return t;
-    });
+        savedWargaItem = updatedWargaItem;
 
-    const nextBantuanList = prevBantuan.map((b) => {
-      const matchesKK = Boolean(oldNoKKSafe && b.noKK && b.noKK === oldNoKKSafe);
-      const bNamaLower = String(b.namaPenerima || '').trim().toLowerCase();
-      const bantuanSameScope =
-        (!oldNoKKSafe || !b.noKK || b.noKK === oldNoKKSafe) &&
-        (!b.rtScope || normalizeRTCode(b.rtScope) === oldRT);
-      const matchesHeadName = Boolean(oldNamaLower && bNamaLower === oldNamaLower && bantuanSameScope);
+        const allBeforeWarga = draft.warga;
+        draft.warga = draft.warga.map((w) => (w.id === wargaId ? updatedWargaItem : w));
 
-      if (matchesKK || matchesHeadName) {
-        return {
-          ...b,
-          namaPenerima: matchesHeadName ? newKKData.nama : b.namaPenerima,
-          noKK: newKKData.noKK,
-          rtScope: `RT ${effectiveRT} RW ${effectiveRW}`,
-          updatedAt: nowIso,
-        };
-      }
-      return b;
-    });
+        let txChanged = false;
+        draft.transactions = draft.transactions.map((t) => {
+          const matchesId = Boolean(t.residentId && t.residentId === wargaId);
+          const matchesKK = Boolean(oldNoKKSafe && t.noKK && t.noKK === oldNoKKSafe);
+          const txNamaLower = String(t.namaWarga || '').trim().toLowerCase();
+          const txSameScope =
+            (!t.residentId || t.residentId === wargaId) &&
+            (!oldNoKKSafe || !t.noKK || t.noKK === oldNoKKSafe) &&
+            getTransactionRTCode(t, allBeforeWarga, oldRT) === oldRT;
+          const matchesHeadName = Boolean(oldNamaLower && txNamaLower === oldNamaLower && txSameScope);
 
-    setWargaList(nextWargaList);
-    setTransactions(nextTxList);
-    setBantuanList(nextBantuanList);
-    latestStateRef.current = {
-      ...latestStateRef.current,
-      wargaList: nextWargaList,
-      transactions: nextTxList,
-      bantuanList: nextBantuanList,
-    };
+          if (matchesId || matchesKK || matchesHeadName) {
+            txChanged = true;
+            const baseKet = String(t.keterangan || '');
+            const nextKet =
+              oldNoKKSafe && oldNoKKSafe !== newKKData.noKK && !baseKet.includes('Dialihkan')
+                ? `${baseKet ? baseKet + ' ' : ''}(Dialihkan dari KK lama: ${oldNoKKSafe})`
+                : baseKet;
+            return {
+              ...t,
+              residentId: wargaId,
+              noKK: newKKData.noKK,
+              namaWarga: matchesHeadName || !t.namaWarga ? newKKData.nama : t.namaWarga,
+              rtScope: `RT ${effectiveRT} RW ${effectiveRW}`,
+              keterangan: nextKet,
+              updatedAt: nowIso,
+              updatedBy: actorName,
+            };
+          }
+          return t;
+        });
 
-    const mutId = generateClientMutationId('upgkk');
-    const upgradePayload = {
-      updatedWarga: updatedWargaItem,
-      historyRecord: riwayatBaru,
-      oldNoKK: oldNoKKSafe,
-      oldKepalaNama: oldNamaSafe,
-      catatSantunanKematian,
-      nominalSantunanKematian: catatSantunanKematian ? 200000 : undefined,
-      expectedVersion: existingWarga.version,
-      clientMutationId: mutId,
-    };
-    const upgradeOps: PendingSyncOp[] = [
-      {
-        opKey: `upgradekk:${wargaId}`,
-        kind: 'upgradeKK',
-        targetId: wargaId,
-        payload: upgradePayload,
-        clientMutationId: mutId,
+        if (catatSantunanKematian) {
+          txChanged = true;
+          const santunanTx: Transaction = {
+            id: toValidDocId(`tx_santunan_${Date.now()}`, 'tx'),
+            tanggal: new Date().toISOString().split('T')[0],
+            kategori: 'Santunan Kematian',
+            keterangan: `Santunan duka warga${namaMeninggal ? ` (Alm/Almh. ${namaMeninggal})` : ''} - KK ${newKKData.nama}`,
+            nominal: 200000,
+            tipe: 'keluar',
+            namaWarga: newKKData.nama,
+            noKK: newKKData.noKK,
+            residentId: wargaId,
+            tahun: tahunAktif,
+            rtScope: `RT ${effectiveRT} RW ${effectiveRW}`,
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          };
+          draft.transactions = [santunanTx, ...draft.transactions];
+        }
+
+        let bantuanChanged = false;
+        draft.bantuan = draft.bantuan.map((b) => {
+          const matchesKK = Boolean(oldNoKKSafe && b.noKK && b.noKK === oldNoKKSafe);
+          const bNamaLower = String(b.namaPenerima || '').trim().toLowerCase();
+          const bantuanSameScope =
+            (!oldNoKKSafe || !b.noKK || b.noKK === oldNoKKSafe) &&
+            (!b.rtScope || normalizeRTCode(b.rtScope) === oldRT);
+          const matchesHeadName = Boolean(oldNamaLower && bNamaLower === oldNamaLower && bantuanSameScope);
+
+          if (matchesKK || matchesHeadName) {
+            bantuanChanged = true;
+            return {
+              ...b,
+              namaPenerima: matchesHeadName ? newKKData.nama : b.namaPenerima,
+              noKK: newKKData.noKK,
+              rtScope: `RT ${effectiveRT} RW ${effectiveRW}`,
+              updatedAt: nowIso,
+              updatedBy: actorName,
+            };
+          }
+          return b;
+        });
+
+        const touched: MqttModuleTopic[] = ['warga'];
+        if (txChanged) touched.push('transactions');
+        if (bantuanChanged) touched.push('bantuan');
+        return touched;
       },
-    ];
-    const rollbackUpgrade = () => {
-      setWargaList(prevWarga);
-      setTransactions(prevTxs);
-      setBantuanList(prevBantuan);
-      latestStateRef.current = {
-        ...latestStateRef.current,
-        wargaList: prevWarga,
-        transactions: prevTxs,
-        bantuanList: prevBantuan,
-      };
-    };
+      {
+        user: currentUser,
+        action: 'UPGRADE_KK',
+        entityType: 'warga',
+        entityId: wargaId,
+        rtScope: `RT ${effectiveRT}`,
+        summary: `Upgrade KK ${oldNamaSafe} -> ${newKKData.nama} (alasan: ${alasan}, ${oldTxs.length} transaksi dialihkan)`,
+        notification: {
+          title: `Pembaruan / Upgrade KK (RT ${effectiveRT})`,
+          body: `Data KK ${oldNamaSafe} telah diperbarui ke ${newKKData.nama} dengan ${oldTxs.length} riwayat kas dipindahkan utuh.`,
+          category: 'warga',
+          entityType: 'warga',
+          entityId: wargaId,
+          targetRts: [effectiveRT],
+          targetRoles: ['server', 'admin'],
+          createdBy: actorName,
+        },
+      }
+    );
 
-    setSyncStatus('pending');
-    const res = await upgradeWargaKKOnServer({
-      wargaId,
-      ...upgradePayload,
+    if (res.synced) flashWriteSuccess();
+
+    setFloatingAnnouncement({
+      id: 'upgrade_' + Date.now(),
+      judul: res.synced ? 'Data KK Berhasil Diperbarui' : 'Upgrade KK Menunggu Sinkronisasi',
+      isi: res.synced
+        ? `Data KK atas nama ${oldNamaSafe} berhasil diperbarui menjadi ${newKKData.nama} (${newKKData.noKK}) dan tersinkron real-time. Seluruh riwayat kas (${oldTxs.length} transaksi senilai Rp ${totalKasDipindahkan.toLocaleString('id-ID')}) dialihkan utuh.`
+        : `Perubahan KK ${oldNamaSafe} -> ${newKKData.nama} (${newKKData.noKK}) disimpan lokal dan akan tersinkron otomatis ke cloud.`,
+      kategori: 'Umum',
+      tanggal: new Date().toISOString().split('T')[0],
+      tanggalBerakhir: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      penulis: 'Sistem Upgrade KK',
     });
 
-    if (res.ok && res.warga && isMountedRef.current) {
-      const serverWarga = res.warga;
-      const serverUpdTxs = res.updatedTransactions || [];
-      const serverNewTxs = res.createdTransactions || [];
-      const serverUpdBantuan = res.updatedBantuan || [];
-
-      const syncedWarga = latestStateRef.current.wargaList.map((w) =>
-        w.id === wargaId ? serverWarga : w
-      );
-      setWargaList(syncedWarga);
-
-      let syncedTxs = prevTxs;
-      if (serverUpdTxs.length > 0 || serverNewTxs.length > 0) {
-        const txMap = new Map(prevTxs.map((t) => [t.id, t]));
-        for (const t of [...serverUpdTxs, ...serverNewTxs]) {
-          txMap.set(t.id, t);
-        }
-        syncedTxs = Array.from(txMap.values()).sort((a, b) => b.tanggal.localeCompare(a.tanggal));
-        setTransactions(syncedTxs);
-      }
-
-      let syncedBantuan = prevBantuan;
-      if (serverUpdBantuan.length > 0) {
-        const bMap = new Map(prevBantuan.map((b) => [b.id, b]));
-        for (const b of serverUpdBantuan) {
-          bMap.set(b.id, b);
-        }
-        syncedBantuan = Array.from(bMap.values());
-        setBantuanList(syncedBantuan);
-      }
-
-      latestStateRef.current = {
-        ...latestStateRef.current,
-        wargaList: syncedWarga,
-        transactions: syncedTxs,
-        bantuanList: syncedBantuan,
-      };
-    }
-
-    const showUpgradeSuccessNotice = (isPending = false) => {
-      setFloatingAnnouncement({
-        id: 'upgrade_' + Date.now(),
-        judul: isPending ? 'Upgrade KK Menunggu Sinkronisasi' : 'Data KK Berhasil Diperbarui',
-        isi: isPending
-          ? `Perubahan KK ${oldNamaSafe} -> ${newKKData.nama} (${newKKData.noKK}) sedang dalam antrean sinkronisasi otomatis ke server.`
-          : `Data KK atas nama ${oldNamaSafe} berhasil diperbarui menjadi ${newKKData.nama} (${newKKData.noKK}) dan tersimpan di Database Server Pusat. Seluruh riwayat kas (${oldTxs.length} transaksi senilai Rp ${totalKasDipindahkan.toLocaleString('id-ID')}) dialihkan utuh.`,
-        kategori: 'Umum',
-        tanggal: new Date().toISOString().split('T')[0],
-        tanggalBerakhir: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        penulis: 'Sistem Upgrade KK',
-      });
-    };
-
-    await settleWriteBatch({
-      ops: upgradeOps,
-      results: [res],
-      rollback: rollbackUpgrade,
-      fallbackError: 'Gagal menyinkronkan upgrade KK ke Database Server Pusat.',
-      onConfirmed: () => showUpgradeSuccessNotice(false),
-    });
-
-    if (res.ok || !res.terminal) {
-      if (!res.ok) {
-        showUpgradeSuccessNotice(true);
-      }
-      setIsUpgradeModalOpen(false);
-      setUpgradeTargetWarga(null);
-    }
-
-    return res;
+    setIsUpgradeModalOpen(false);
+    setUpgradeTargetWarga(null);
+    return { ok: true, pending: !res.synced, warga: savedWargaItem };
   };
 
-  // Create Announcement (Server validates RT isolation & dispatches targeted Socket.IO + notifications)
+  // Create Announcement (Strict RT targeting + Cloud MQTT notification)
   const handleSavePengumuman = async (p: Omit<PengumumanRT, 'id'>) => {
-    const prevList = latestStateRef.current.pengumumanList;
+    const perm = assertRtWriteAllowed(currentUser);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
+    }
+
     const assignedRT =
       currentUser?.role === 'admin' ? normalizeRTCode(currentUser.rtScope) : '';
     const rawTargets = Array.isArray(p.targetRts) ? p.targetRts : [];
@@ -3975,361 +2389,401 @@ export default function App() {
       currentUser?.role === 'admin' && assignedRT
         ? [assignedRT]
         : rawTargets.length > 0
-        ? rawTargets
+        ? rawTargets.map((r) =>
+            String(r).toUpperCase() === 'SEMUA' || String(r).toUpperCase() === 'ALL'
+              ? 'SEMUA'
+              : normalizeRTCode(r) || r
+          )
         : ['SEMUA'];
 
-    const newP: PengumumanRT = {
-      ...p,
-      id: toValidDocId('p_' + Date.now(), 'p'),
-      targetRts: normalizedTargets,
-      rtScope:
-        currentUser?.role === 'admin' && assignedRT
-          ? `RT ${assignedRT} RW ${pengaturanKas.profilRT?.namaRW || '05'}`
-          : p.rtScope,
-      updatedAt: new Date().toISOString(),
-    };
-    const nextList = [newP, ...prevList];
-    setPengumumanList(nextList);
-    latestStateRef.current = { ...latestStateRef.current, pengumumanList: nextList };
-    setFloatingAnnouncement(newP);
-    setSyncStatus('pending');
+    const newId = toValidDocId('p_' + Date.now(), 'p');
+    const actorName = currentUser?.username || 'system';
+    const resolvedRtScope =
+      currentUser?.role === 'admin' && assignedRT
+        ? `RT ${assignedRT} RW ${pengaturanKas.profilRT?.namaRW || '05'}`
+        : normalizedTargets.includes('SEMUA')
+        ? 'Semua RT RW 05'
+        : normalizedTargets.map((rt) => `RT ${rt}`).join(', ');
 
-    const mutId = generateClientMutationId('peng');
-    const ops: PendingSyncOp[] = [
-      {
-        opKey: `pengumuman:${newP.id}`,
-        kind: 'savePengumuman',
-        payload: newP,
-        isUpdate: false,
-        clientMutationId: mutId,
+    let createdPengumuman: PengumumanRT | undefined;
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        const newP: PengumumanRT = {
+          ...p,
+          id: newId,
+          targetRts: normalizedTargets,
+          rtScope: resolvedRtScope,
+          updatedAt: nowIso,
+          updatedBy: actorName,
+        };
+        createdPengumuman = newP;
+        draft.pengumuman = [newP, ...draft.pengumuman];
+        return ['pengumuman'];
       },
-    ];
-    const rollback = () => {
-      setPengumumanList(prevList);
-      latestStateRef.current = { ...latestStateRef.current, pengumumanList: prevList };
-      setFloatingAnnouncement((cur) => (cur?.id === newP.id ? null : cur));
-    };
-    const res = await savePengumumanOnServer(newP, {
-      isUpdate: false,
-      clientMutationId: mutId,
-    });
-    if (res.ok && res.pengumuman && isMountedRef.current) {
-      setPengumumanList((prev) => {
-        const next = prev.map((item) => (item.id === newP.id ? res.pengumuman! : item));
-        latestStateRef.current = { ...latestStateRef.current, pengumumanList: next };
-        return next;
-      });
-      setFloatingAnnouncement((cur) => (cur?.id === newP.id ? res.pengumuman! : cur));
+      {
+        user: currentUser,
+        action: 'CREATE_PENGUMUMAN',
+        entityType: 'pengumuman',
+        entityId: newId,
+        rtScope: resolvedRtScope,
+        summary: `Menerbitkan pengumuman "${p.judul}" untuk target: ${normalizedTargets.join(', ')}`,
+        notification: {
+          title: `Warta Pengumuman: ${p.judul}`,
+          body: p.isi,
+          category: 'pengumuman',
+          entityType: 'pengumuman',
+          entityId: newId,
+          targetRts: normalizedTargets,
+          targetRoles: ['server', 'admin', 'warga'],
+          createdBy: actorName,
+        },
+      }
+    );
+
+    if (createdPengumuman) {
+      setFloatingAnnouncement(createdPengumuman);
     }
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal menyinkronkan pengumuman ke Database Server Pusat.',
-    });
+    if (res.synced) flashWriteSuccess();
   };
 
   // Delete Announcement
   const handleDeletePengumuman = async (id: string) => {
-    const prevList = latestStateRef.current.pengumumanList;
-    const nextList = prevList.filter((p) => p.id !== id);
-    setPengumumanList(nextList);
-    latestStateRef.current = { ...latestStateRef.current, pengumumanList: nextList };
+    const fullStore = mqttSync.getStore();
+    const target = fullStore.pengumuman.find((p) => p.id === id);
+    if (!target) return;
+    if (!isSuperAdminUser(currentUser)) {
+      const targetRt =
+        Array.isArray(target.targetRts) && target.targetRts.length === 1
+          ? normalizeRTCode(target.targetRts[0])
+          : normalizeRTCode(target.rtScope || '');
+      const isGlobal =
+        (Array.isArray(target.targetRts) && target.targetRts.includes('SEMUA')) ||
+        /semua/i.test(target.rtScope || '');
+      if (isGlobal) {
+        setCloudError('Hanya Super Admin RW 05 yang dapat menghapus pengumuman tingkat RW.');
+        return;
+      }
+      const perm = assertRtWriteAllowed(currentUser, targetRt);
+      if (!perm.ok) {
+        setCloudError(perm.message);
+        return;
+      }
+    }
+
+    const actorName = currentUser?.username || 'system';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.pengumuman = draft.pengumuman.filter((p) => p.id !== id);
+        mqttSync.addTombstone(draft, 'pengumuman', id, nowIso, actorName);
+        return ['pengumuman', 'tombstones'];
+      },
+      {
+        user: currentUser,
+        action: 'DELETE_PENGUMUMAN',
+        entityType: 'pengumuman',
+        entityId: id,
+        rtScope: target.rtScope,
+        summary: `Menghapus pengumuman: ${target.judul}`,
+      }
+    );
+
     setDismissedNotificationIds((prev) => Array.from(new Set([...prev, id])));
     if (floatingAnnouncement?.id === id) {
       setFloatingAnnouncement(null);
     }
-    setSyncStatus('pending');
-
-    const ops: PendingSyncOp[] = [
-      { opKey: `pengumuman:${id}`, kind: 'deletePengumuman', targetId: id },
-    ];
-    const rollback = () => {
-      setPengumumanList(prevList);
-      latestStateRef.current = { ...latestStateRef.current, pengumumanList: prevList };
-    };
-    const res = await deletePengumumanOnServer(id);
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal menghapus pengumuman dari Database Server Pusat.',
-    });
+    if (res.synced) flashWriteSuccess();
   };
 
-  // Server: Admin RT Accounts Management (Authoritative PostgreSQL)
+  // Super Admin RW 05: Admin RT Accounts Management (Synced via MQTT)
   const handleAddAdminAccount = async (acc: Omit<AdminRTAccount, 'id'>) => {
-    const prevAdmins = latestStateRef.current.adminAccounts;
-    const newAcc: AdminRTAccount = {
-      ...acc,
-      id: toValidDocId('adm_' + Date.now(), 'adm'),
-      updatedAt: new Date().toISOString(),
-    };
-    const nextAdmins = [newAcc, ...prevAdmins];
-    setAdminAccounts(nextAdmins);
-    setServerAdminAccounts(nextAdmins);
-    latestStateRef.current = { ...latestStateRef.current, adminAccounts: nextAdmins };
-    setSyncStatus('pending');
-
-    const ops: PendingSyncOp[] = [
-      { opKey: `admin:${newAcc.id}`, kind: 'saveAdmin', payload: newAcc, isUpdate: false },
-    ];
-    const rollback = () => {
-      setAdminAccounts(prevAdmins);
-      setServerAdminAccounts(prevAdmins);
-      latestStateRef.current = { ...latestStateRef.current, adminAccounts: prevAdmins };
-    };
-    const saveRes = await createAdminAccountOnServer(newAcc);
-    if (saveRes.ok && saveRes.account && isMountedRef.current) {
-      setAdminAccounts((prev) => {
-        const next = prev.map((a) => (a.id === newAcc.id ? saveRes.account! : a));
-        setServerAdminAccounts(next);
-        latestStateRef.current = { ...latestStateRef.current, adminAccounts: next };
-        return next;
-      });
+    if (!isSuperAdminUser(currentUser)) {
+      setCloudError('Hanya Super Admin RW 05 yang dapat menambah akun Admin RT.');
+      return;
     }
-    await settleWriteBatch({
-      ops,
-      results: [saveRes],
-      rollback,
-      fallbackError: 'Gagal menyimpan akun Admin RT ke Database Server Pusat.',
-    });
+    const newId = toValidDocId('adm_' + Date.now(), 'adm');
+    const actorName = currentUser?.username || 'adminrw05';
+    const rtCode = normalizeRTCode(acc.rt) || '08';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        const newAcc: AdminRTAccount = {
+          ...acc,
+          id: newId,
+          rt: acc.role === 'super_admin' ? 'ALL' : rtCode,
+          rw: normalizeRWCode(acc.rw, '05'),
+          role: acc.role || (rtCode === 'ALL' ? 'super_admin' : 'admin_rt'),
+          rtId: formatRtId(acc.role === 'super_admin' ? 'ALL' : rtCode),
+          updatedAt: nowIso,
+          updatedBy: actorName,
+        };
+        draft.accounts = [newAcc, ...draft.accounts];
+        return ['accounts'];
+      },
+      {
+        user: currentUser,
+        action: 'ADD_ADMIN_ACCOUNT',
+        entityType: 'accounts',
+        entityId: newId,
+        rtScope: `RT ${rtCode}`,
+        summary: `Menambahkan akun Admin RT ${rtCode}: ${acc.username}`,
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
   const handleUpdateAdminAccount = async (id: string, updated: Partial<AdminRTAccount>) => {
-    const prevAdmins = latestStateRef.current.adminAccounts;
-    const nowIso = new Date().toISOString();
-    const oldAcc = prevAdmins.find((a) => a.id === id);
-    if (!oldAcc) return;
-    const mergedAcc: AdminRTAccount = { ...oldAcc, ...updated, updatedAt: nowIso };
-    const nextAdmins = prevAdmins.map((a) => (a.id === id ? mergedAcc : a));
-    setAdminAccounts(nextAdmins);
-    setServerAdminAccounts(nextAdmins);
-    latestStateRef.current = { ...latestStateRef.current, adminAccounts: nextAdmins };
-    setSyncStatus('pending');
-
-    const ops: PendingSyncOp[] = [
-      {
-        opKey: `admin:${mergedAcc.id}`,
-        kind: 'saveAdmin',
-        payload: mergedAcc,
-        isUpdate: true,
-        expectedVersion: oldAcc.version,
-      },
-    ];
-    const rollback = () => {
-      setAdminAccounts(prevAdmins);
-      setServerAdminAccounts(prevAdmins);
-      latestStateRef.current = { ...latestStateRef.current, adminAccounts: prevAdmins };
-    };
-    const saveRes = await updateAdminAccountOnServer(mergedAcc, oldAcc.version);
-    if (saveRes.ok && saveRes.account && isMountedRef.current) {
-      setAdminAccounts((prev) => {
-        const next = prev.map((a) => (a.id === id ? saveRes.account! : a));
-        setServerAdminAccounts(next);
-        latestStateRef.current = { ...latestStateRef.current, adminAccounts: next };
-        return next;
-      });
+    if (!isSuperAdminUser(currentUser)) {
+      setCloudError('Hanya Super Admin RW 05 yang dapat mengubah akun pengurus.');
+      return;
     }
-    await settleWriteBatch({
-      ops,
-      results: [saveRes],
-      rollback,
-      fallbackError: 'Gagal memperbarui akun Admin RT di Database Server Pusat.',
-    });
+    const actorName = currentUser?.username || 'adminrw05';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.accounts = draft.accounts.map((a) => {
+          if (a.id !== id) return a;
+          const nextRt = updated.rt !== undefined ? updated.rt : a.rt;
+          const isSuper =
+            updated.role === 'super_admin' ||
+            a.role === 'super_admin' ||
+            String(nextRt).toUpperCase() === 'ALL';
+          const normalizedRt = isSuper ? 'ALL' : normalizeRTCode(nextRt) || a.rt;
+          return {
+            ...a,
+            ...updated,
+            rt: normalizedRt,
+            role: isSuper ? 'super_admin' : 'admin_rt',
+            rtId: isSuper ? 'ALL' : formatRtId(normalizedRt),
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          };
+        });
+        return ['accounts'];
+      },
+      {
+        user: currentUser,
+        action: 'UPDATE_ADMIN_ACCOUNT',
+        entityType: 'accounts',
+        entityId: id,
+        summary: `Memperbarui akun pengurus (${id})`,
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
   const handleDeleteAdminAccount = async (id: string) => {
-    const prevAdmins = latestStateRef.current.adminAccounts;
-    const nextAdmins = prevAdmins.filter((a) => a.id !== id);
-    setAdminAccounts(nextAdmins);
-    setServerAdminAccounts(nextAdmins);
-    latestStateRef.current = { ...latestStateRef.current, adminAccounts: nextAdmins };
-    setSyncStatus('pending');
-
-    const ops: PendingSyncOp[] = [{ opKey: `admin:${id}`, kind: 'deleteAdmin', targetId: id }];
-    const rollback = () => {
-      setAdminAccounts(prevAdmins);
-      setServerAdminAccounts(prevAdmins);
-      latestStateRef.current = { ...latestStateRef.current, adminAccounts: prevAdmins };
-    };
-    const res = await deleteAdminAccountOnServer(id);
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal menghapus akun Admin RT di Database Server Pusat.',
-    });
+    if (!isSuperAdminUser(currentUser)) {
+      setCloudError('Hanya Super Admin RW 05 yang dapat menghapus akun Admin RT.');
+      return;
+    }
+    const actorName = currentUser?.username || 'adminrw05';
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.accounts = draft.accounts.filter((a) => a.id !== id);
+        mqttSync.addTombstone(draft, 'accounts', id, nowIso, actorName);
+        return ['accounts', 'tombstones'];
+      },
+      {
+        user: currentUser,
+        action: 'DELETE_ADMIN_ACCOUNT',
+        entityType: 'accounts',
+        entityId: id,
+        summary: `Menghapus akun pengurus (${id})`,
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
   // Server: Update verification status of monthly submission
-  const handleUpdateStatusLaporan = async (id: string, status: PembaruanBulananRT['statusVerifikasi']) => {
-    const prevLaporan = latestStateRef.current.laporanBulananRT;
-    const nowIso = new Date().toISOString();
-    const existing = prevLaporan.find((lap) => lap.id === id);
+  const handleUpdateStatusLaporan = async (
+    id: string,
+    status: PembaruanBulananRT['statusVerifikasi']
+  ) => {
+    if (!isSuperAdminUser(currentUser)) {
+      setCloudError('Hanya Super Admin RW 05 yang dapat memverifikasi laporan bulanan RT.');
+      return;
+    }
+    const existing = mqttSync.getStore().laporan.find((lap) => lap.id === id);
     if (!existing) return;
-    const updatedLap: PembaruanBulananRT = { ...existing, statusVerifikasi: status, updatedAt: nowIso };
-    const nextLaporan = prevLaporan.map((lap) => (lap.id === id ? updatedLap : lap));
-    setLaporanBulananRT(nextLaporan);
-    latestStateRef.current = { ...latestStateRef.current, laporanBulananRT: nextLaporan };
-    setSyncStatus('pending');
-
-    const ops: PendingSyncOp[] = [
-      { opKey: `laporan:${updatedLap.id}`, kind: 'saveLaporan', payload: updatedLap },
-    ];
-    const rollback = () => {
-      setLaporanBulananRT(prevLaporan);
-      latestStateRef.current = { ...latestStateRef.current, laporanBulananRT: prevLaporan };
-    };
-    const res = await saveLaporanOnServer(updatedLap);
-    if (res.ok && res.laporan && isMountedRef.current) {
-      setLaporanBulananRT((prev) => {
-        const next = prev.map((lap) => (lap.id === id ? res.laporan! : lap));
-        latestStateRef.current = { ...latestStateRef.current, laporanBulananRT: next };
-        return next;
-      });
-    }
-    await settleWriteBatch({
-      ops,
-      results: [res],
-      rollback,
-      fallbackError: 'Gagal memperbarui status laporan di Database Server Pusat.',
-    });
+    const actorName = currentUser?.username || 'adminrw05';
+    const targetRt = normalizeRTCode(existing.rt);
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.laporan = draft.laporan.map((lap) =>
+          lap.id === id
+            ? { ...lap, statusVerifikasi: status, updatedAt: nowIso, updatedBy: actorName }
+            : lap
+        );
+        return ['laporan'];
+      },
+      {
+        user: currentUser,
+        action: 'VERIFY_LAPORAN_RT',
+        entityType: 'laporan',
+        entityId: id,
+        rtScope: `RT ${targetRt}`,
+        summary: `Mengubah status verifikasi laporan RT ${targetRt} (${existing.bulanTahun}) menjadi ${status}`,
+        notification: {
+          title: `Verifikasi Laporan RT ${targetRt}`,
+          body: `Laporan periode ${existing.bulanTahun} berstatus: ${status}.`,
+          category: 'laporan',
+          entityType: 'laporan',
+          entityId: id,
+          targetRts: targetRt ? [targetRt] : ['SEMUA'],
+          targetRoles: ['server', 'admin'],
+          createdBy: actorName,
+        },
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
-  // Admin RT: Send monthly update to Server
+  // Admin RT: Send monthly update to RW 05
   const handleKirimLaporanBulanan = async (laporan: PembaruanBulananRT) => {
-    const prevLaporan = latestStateRef.current.laporanBulananRT;
-    const prevAdmins = latestStateRef.current.adminAccounts;
-    const nowIso = new Date().toISOString();
-    const nowLabel = formatWaktuSyncID();
-    const stamped: PembaruanBulananRT = {
-      ...laporan,
-      id: toValidDocId(laporan.id || 'lap_' + Date.now(), 'lap'),
-      updatedAt: nowIso,
-    };
-    const nextLaporan = [stamped, ...prevLaporan];
-    setLaporanBulananRT(nextLaporan);
-    latestStateRef.current = { ...latestStateRef.current, laporanBulananRT: nextLaporan };
-
-    let updatedAdminAcc: AdminRTAccount | null = null;
-    if (currentUser?.role === 'admin') {
-      const nextAdmins = prevAdmins.map((acc) => {
-        if (acc.username.toLowerCase() === currentUser.username.toLowerCase()) {
-          updatedAdminAcc = {
-            ...acc,
-            terakhirSinkronisasi: `Tersinkron ${nowLabel}`,
-            updatedAt: nowIso,
-          };
-          return updatedAdminAcc;
-        }
-        return acc;
-      });
-      setAdminAccounts(nextAdmins);
-      latestStateRef.current = { ...latestStateRef.current, adminAccounts: nextAdmins };
+    const targetRt = normalizeRTCode(laporan.rt) || normalizeRTCode(currentUser?.rtScope) || '08';
+    const perm = assertRtWriteAllowed(currentUser, targetRt);
+    if (!perm.ok) {
+      setCloudError(perm.message);
+      return;
     }
 
-    const stampedAdminAcc = updatedAdminAcc as AdminRTAccount | null;
-    setSyncStatus('pending');
+    const lapId = toValidDocId(laporan.id || 'lap_' + Date.now(), 'lap');
+    const nowLabel = formatWaktuSyncID();
+    const actorName = currentUser?.username || 'system';
 
-    const ops: PendingSyncOp[] = [
-      { opKey: `laporan:${stamped.id}`, kind: 'saveLaporan', payload: stamped },
-      ...(stampedAdminAcc
-        ? [
-            {
-              opKey: `admin:${stampedAdminAcc.id}`,
-              kind: 'saveAdmin' as const,
-              payload: stampedAdminAcc,
-              isUpdate: true,
-              expectedVersion: stampedAdminAcc.version,
-            },
-          ]
-        : []),
-    ];
-    const rollback = () => {
-      setLaporanBulananRT(prevLaporan);
-      setAdminAccounts(prevAdmins);
-      latestStateRef.current = {
-        ...latestStateRef.current,
-        laporanBulananRT: prevLaporan,
-        adminAccounts: prevAdmins,
-      };
-    };
-
-    const res = await saveLaporanOnServer(stamped);
-    const adminRes: ServerWriteResult = stampedAdminAcc
-      ? await updateAdminAccountOnServer(stampedAdminAcc, stampedAdminAcc.version)
-      : { ok: true };
-
-    await settleWriteBatch({
-      ops,
-      results: stampedAdminAcc ? [res, adminRes] : [res],
-      rollback,
-      fallbackError: 'Gagal mengirim laporan bulanan ke Database Server Pusat.',
-    });
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        const stamped: PembaruanBulananRT = {
+          ...laporan,
+          id: lapId,
+          rt: targetRt,
+          updatedAt: nowIso,
+          updatedBy: actorName,
+        };
+        draft.laporan = [stamped, ...draft.laporan];
+        const touched: MqttModuleTopic[] = ['laporan'];
+        if (currentUser?.role === 'admin') {
+          let accUpdated = false;
+          draft.accounts = draft.accounts.map((acc) => {
+            if (acc.username.toLowerCase() === currentUser.username.toLowerCase()) {
+              accUpdated = true;
+              return {
+                ...acc,
+                terakhirSinkronisasi: `Tersinkron ${nowLabel}`,
+                updatedAt: nowIso,
+                updatedBy: actorName,
+              };
+            }
+            return acc;
+          });
+          if (accUpdated) touched.push('accounts');
+        }
+        return touched;
+      },
+      {
+        user: currentUser,
+        action: 'KIRIM_LAPORAN_BULANAN',
+        entityType: 'laporan',
+        entityId: lapId,
+        rtScope: `RT ${targetRt}`,
+        summary: `Mengirim laporan rekap bulanan RT ${targetRt} (${laporan.bulanTahun})`,
+        notification: {
+          title: `Laporan Bulanan RT ${targetRt} Masuk`,
+          body: `${laporan.namaAdminPengirim} mengirim laporan periode ${laporan.bulanTahun}.`,
+          category: 'laporan',
+          entityType: 'laporan',
+          entityId: lapId,
+          targetRts: ['SEMUA'],
+          targetRoles: ['server'],
+          createdBy: actorName,
+        },
+      }
+    );
+    if (res.synced) flashWriteSuccess();
   };
 
-  // Restore entire database from backup JSON -> writes directly to PostgreSQL Server
+  // Restore entire database from backup JSON -> merges & publishes across MQTT
   const handleRestoreDatabase = async (dbData: AppDatabaseSchema) => {
-    const nowIso = new Date().toISOString();
-    const stampAll = <T extends { updatedAt?: string }>(list?: T[]): T[] =>
+    const actorName = currentUser?.username || 'system';
+    const stampAll = <T extends { updatedAt?: string }>(list: T[] | undefined, nowIso: string): T[] =>
       Array.isArray(list) ? list.map((item) => ({ ...item, updatedAt: item.updatedAt || nowIso })) : [];
 
-    const restored: AppDatabaseSchema = {
-      version: 2,
-      lastUpdated: nowIso,
-      tahunAktif: dbData.tahunAktif || tahunAktif,
-      pengaturanKas: dbData.pengaturanKas
-        ? { ...dbData.pengaturanKas, updatedAt: nowIso }
-        : pengaturanKas,
-      wargaList: stampAll(dbData.wargaList),
-      transactions: stampAll(dbData.transactions),
-      bantuanList: stampAll(dbData.bantuanList),
-      pengumumanList: stampAll(dbData.pengumumanList),
-      dokumenList: stampAll(dbData.dokumenList),
-      adminAccounts: stampAll(dbData.adminAccounts),
-      laporanBulananRT: stampAll(dbData.laporanBulananRT),
-    };
-
-    setTahunAktif(restored.tahunAktif);
-    setPengaturanKas(restored.pengaturanKas);
-    setWargaList(restored.wargaList);
-    setTransactions(restored.transactions);
-    setBantuanList(restored.bantuanList);
-    setPengumumanList(restored.pengumumanList);
-    setDokumenList(restored.dokumenList);
-    setAdminAccounts(restored.adminAccounts);
-    setLaporanBulananRT(restored.laporanBulananRT);
-
-    setSyncStatus('connecting');
-    const migRes = await saveAppData(restored, { isHardReset: false });
-    if (migRes.ok) {
-      if (migRes.serverData) {
-        applyAuthoritativeSnapshot(migRes.serverData);
-      } else {
-        await refreshAuthoritativeSnapshot().catch(() => false);
+    const res = await mqttSync.mutate(
+      (draft, nowIso) => {
+        draft.warga = mergeModuleLists(draft.warga, stampAll(dbData.wargaList, nowIso));
+        draft.transactions = mergeModuleLists(
+          draft.transactions,
+          stampAll(dbData.transactions, nowIso)
+        );
+        draft.bantuan = mergeModuleLists(draft.bantuan, stampAll(dbData.bantuanList, nowIso));
+        draft.pengumuman = mergeModuleLists(
+          draft.pengumuman,
+          stampAll(dbData.pengumumanList, nowIso)
+        );
+        draft.dokumen = mergeModuleLists(draft.dokumen, stampAll(dbData.dokumenList, nowIso));
+        draft.laporan = mergeModuleLists(
+          draft.laporan,
+          stampAll(dbData.laporanBulananRT, nowIso)
+        );
+        draft.accounts = mergeAccountsWithSeeds(
+          draft.accounts,
+          stampAll(dbData.adminAccounts, nowIso)
+        );
+        if (dbData.pengaturanKas) {
+          draft.settings = {
+            pengaturanKas: {
+              ...DEFAULT_PENGATURAN_KAS,
+              ...dbData.pengaturanKas,
+              updatedAt: nowIso,
+              updatedBy: actorName,
+            },
+            tahunAktif: dbData.tahunAktif || dbData.pengaturanKas.tahunAktif || tahunAktif,
+            updatedAt: nowIso,
+            updatedBy: actorName,
+          };
+        }
+        return [
+          'warga',
+          'transactions',
+          'bantuan',
+          'pengumuman',
+          'dokumen',
+          'laporan',
+          'accounts',
+          'settings',
+        ];
+      },
+      {
+        user: currentUser,
+        action: 'RESTORE_JSON_BACKUP',
+        entityType: 'system',
+        entityId: `restore_${Date.now()}`,
+        rtScope: currentUser?.rtScope || 'SEMUA',
+        summary: `Memulihkan cadangan JSON (${dbData.wargaList?.length || 0} KK, ${dbData.transactions?.length || 0} transaksi)`,
       }
-      applyWriteSuccessStatus(false);
+    );
+
+    if (res.synced) {
+      flashWriteSuccess();
       setRolloverNotice(
-        `Database berhasil dipulihkan & disinkronkan ke Server Pusat (${restored.wargaList.length} KK, ${restored.transactions.length} transaksi)!`
+        `Database berhasil dipulihkan & disinkronkan ke cloud (${dbData.wargaList?.length || 0} KK, ${dbData.transactions?.length || 0} transaksi)!`
       );
     } else {
-      setSyncStatus('error');
-      setCloudError(migRes.message || 'Gagal memulihkan cadangan JSON ke Database Server Pusat.');
+      setRolloverNotice(
+        `Cadangan JSON dipulihkan ke cache lokal (${dbData.wargaList?.length || 0} KK) dan menunggu sinkronisasi otomatis.`
+      );
     }
     setTimeout(() => setRolloverNotice(null), 5000);
   };
 
   // Handle Login
   const handleLoginSuccess = (user: AuthUser) => {
-    lastRevisionRef.current = 0;
     setAuthReady(true);
     setCurrentUser(user);
+    saveAuthSession(user);
     setIsLoginModalOpen(false);
     setIsPinLocked(false);
     setCloudError(null);
-    setServerConnected(true);
     setLastActivity(Date.now());
+    applyScopedStoreToUI(mqttSync.getStore(), user);
     if (user.role === 'server') {
       setCurrentView('server-kontrol');
     } else if (user.role === 'warga') {
@@ -4339,30 +2793,19 @@ export default function App() {
     }
   };
 
-  // Handle Explicit Logout -> revokes server token, closes Socket.IO, & clears state
+  // Handle Explicit Logout -> clears active session while keeping cloud sync alive
   const handleLogout = async () => {
-    if (retryTimerRef.current) {
-      clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
     if (successFlashTimerRef.current) {
       clearTimeout(successFlashTimerRef.current);
       successFlashTimerRef.current = null;
     }
-    retryAttemptRef.current = 0;
-    lastRevisionRef.current = 0;
-    disconnectSocket();
     await logoutFromServer();
-    setDataLoadedReady(false);
-    setSseConnected(false);
     setCurrentUser(null);
     setWargaList([]);
     setTransactions([]);
     setBantuanList([]);
     setPengumumanList([]);
     setDokumenList([]);
-    setAdminAccounts([]);
-    setServerAdminAccounts([]);
     setLaporanBulananRT([]);
     setNotifications([]);
     setUnreadCount(0);
@@ -4371,55 +2814,67 @@ export default function App() {
     setIsPinLocked(false);
     setIsSidebarOpen(false);
     setCloudError(null);
-    setPendingOpsCount(0);
     setIsLoginModalOpen(true);
   };
 
   // Quick switch role helper (only triggered from inside Server control view)
   const handleSwitchToRole = (targetRole: 'server' | 'admin' | 'warga', targetRtScope?: string) => {
+    const fullAccounts = mqttSync.getStore().accounts;
     if (targetRole === 'server') {
+      const superAcc =
+        fullAccounts.find((a) => a.role === 'super_admin' || a.rtId === 'ALL') ||
+        fullAccounts[0];
       const nextUser: AuthUser = {
         role: 'server',
-        username: 'RW05GLEMPANG',
-        nama: 'Super Admin Server RW 05 Glempang',
-        rtScope: 'Semua RT se-RW 05 Glempang',
+        username: superAcc?.username || 'adminrw05',
+        nama: superAcc?.nama || 'Super Admin RW 05',
+        rtScope: 'Semua RT',
+        rtId: 'ALL',
         isPinAuthenticated: true,
       };
       setCurrentUser(nextUser);
+      saveAuthSession(nextUser);
       setCurrentView('server-kontrol');
     } else if (targetRole === 'admin') {
       const targetRTCode = normalizeRTCode(targetRtScope);
       const matchedAcc = targetRTCode
-        ? adminAccounts.find((a) => normalizeRTCode(a.rt) === targetRTCode)
+        ? fullAccounts.find((a) => normalizeRTCode(a.rt) === targetRTCode)
         : undefined;
-      const rtStr = matchedAcc?.rt || targetRTCode || pengaturanKas.profilRT?.namaRT || '08';
+      const rtStr =
+        normalizeRTCode(matchedAcc?.rt) || targetRTCode || pengaturanKas.profilRT?.namaRT || '08';
       const rwStr = matchedAcc?.rw || pengaturanKas.profilRT?.namaRW || '05';
       const ketuaStr = matchedAcc?.nama || pengaturanKas.kontakKetuaRT?.nama?.trim();
       const nextUser: AuthUser = {
         role: 'admin',
-        username: matchedAcc?.username || 'Admin',
+        username: matchedAcc?.username || `adminrt${rtStr}`,
         nama: matchedAcc
           ? `${matchedAcc.nama} (${matchedAcc.jabatan || `Ketua RT ${rtStr}`})`
           : ketuaStr
           ? `${ketuaStr} (Ketua RT ${rtStr})`
-          : `Administrator RT ${rtStr} RW ${rwStr}`,
+          : `Admin RT ${rtStr} RW ${rwStr}`,
         rtScope: `RT ${rtStr} RW ${rwStr}`,
+        rtId: `RT${rtStr}`,
         isPinAuthenticated: true,
       };
       setCurrentUser(nextUser);
+      saveAuthSession(nextUser);
       setCurrentView('beranda');
     } else {
-      const sampleWarga = wargaList[0];
+      const sampleWarga = wargaList[0] || mqttSync.getStore().warga[0];
+      const wRt = normalizeRTCode(sampleWarga?.rt) || '08';
+      const wRw = sampleWarga?.rw || '05';
       const nextUser: AuthUser = {
         role: 'warga',
         username: sampleWarga?.nama || 'Warga',
         nama: sampleWarga?.nama || 'Warga',
         noKK: sampleWarga?.noKK || '',
         wargaId: sampleWarga?.id || '',
-        rtScope: sampleWarga ? `RT ${sampleWarga.rt || '08'} RW ${sampleWarga.rw || '05'}` : 'RT 08 RW 05',
+        rtScope: `RT ${wRt} RW ${wRw}`,
+        rtId: `RT${wRt}`,
         isPinAuthenticated: true,
       };
       setCurrentUser(nextUser);
+      saveAuthSession(nextUser);
       setCurrentView('dasbor-warga');
     }
   };
@@ -4741,16 +3196,14 @@ export default function App() {
               ></span>
               <span>
                 {!serverConnected || syncStatus === 'error'
-                  ? 'Gagal'
+                  ? 'Mode Offline'
                   : cloudSyncBusy ||
                     syncStatus === 'connecting' ||
                     syncStatus === 'pending' ||
                     pendingOpsCount > 0 ||
                     getPendingServerWriteCount() > 0
-                  ? 'Menunggu Sinkronisasi'
-                  : syncStatus === 'success'
-                  ? 'Berhasil'
-                  : 'Terhubung'}
+                  ? 'Menyinkronkan...'
+                  : 'Terhubung & Tersinkron'}
               </span>
             </span>
             <button
@@ -4925,7 +3378,7 @@ export default function App() {
                   ? 'bg-amber-50 border-amber-200 text-amber-700'
                   : 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100'
               }`}
-              title="Status Sinkronisasi Database Server Pusat & Socket.IO (Klik untuk sinkronkan ulang)"
+              title="Status Sinkronisasi Cloud Real-Time (Klik untuk sinkronkan ulang)"
             >
               {!serverConnected || syncStatus === 'error' ? (
                 <AlertCircle size={13} />
@@ -4944,16 +3397,14 @@ export default function App() {
               )}
               <span className="hidden xs:inline">
                 {!serverConnected || syncStatus === 'error'
-                  ? 'Gagal'
+                  ? 'Mode Offline'
                   : cloudSyncBusy ||
                     syncStatus === 'connecting' ||
                     syncStatus === 'pending' ||
                     pendingOpsCount > 0 ||
                     getPendingServerWriteCount() > 0
-                  ? 'Menunggu Sinkronisasi'
-                  : syncStatus === 'success'
-                  ? 'Berhasil'
-                  : 'Terhubung'}
+                  ? 'Menyinkronkan...'
+                  : 'Terhubung & Tersinkron'}
               </span>
             </button>
 
@@ -5289,6 +3740,11 @@ export default function App() {
                   onOpenPrivacyPolicy={() => setCurrentView('kebijakan-privasi')}
                   onResetEmpty={handleResetEmpty}
                   onLoadSample={handleLoadSample}
+                  onDownloadBackup={async () => {
+                    const snap = await fetchServerSnapshot();
+                    if (snap) downloadBackupJSON(snap);
+                  }}
+                  onRestoreDatabase={handleRestoreDatabase}
                   onBack={() => setCurrentView('server-kontrol')}
                 />
               ) : (
@@ -5319,26 +3775,20 @@ export default function App() {
                   currentUser={currentUser}
                   currentPin={currentPin}
                   onUpdatePin={async (pin) => {
-                    const prevPin = currentPin;
                     setCurrentPin(pin);
                     const targetWargaId = currentUser?.wargaId || wargaList[0]?.id;
                     if (!targetWargaId) return;
-                    setSyncStatus('pending');
-                    const res = await updateWargaSelfOnServer({ pin });
-                    if (!isMountedRef.current) return;
-                    if (!res.ok) {
-                      if (res.terminal) {
-                        setCurrentPin(prevPin);
-                      }
-                      setSyncStatus('error');
-                      setCloudError(
-                        formatFriendlyFirestoreError(
-                          res,
-                          'Gagal menyimpan PIN baru ke Database Server Pusat.'
-                        )
+                    const actorName = currentUser?.username || 'warga';
+                    const res = await mqttSync.mutate((draft, nowIso) => {
+                      draft.warga = draft.warga.map((w) =>
+                        w.id === targetWargaId
+                          ? { ...w, pin, updatedAt: nowIso, updatedBy: actorName }
+                          : w
                       );
-                    } else {
-                      applyWriteSuccessStatus(false);
+                      return ['warga'];
+                    });
+                    if (res.synced) {
+                      flashWriteSuccess();
                     }
                   }}
                   onUpdatePengaturan={handleUpdatePengaturan}
@@ -5521,6 +3971,11 @@ export default function App() {
                     onOpenPrivacyPolicy={() => setCurrentView('kebijakan-privasi')}
                     onResetEmpty={handleResetEmpty}
                     onLoadSample={handleLoadSample}
+                    onDownloadBackup={async () => {
+                      const snap = await fetchServerSnapshot();
+                      if (snap) downloadBackupJSON(snap);
+                    }}
+                    onRestoreDatabase={handleRestoreDatabase}
                     onBack={() => setCurrentView('beranda')}
                   />
                 )}
@@ -5625,18 +4080,17 @@ export default function App() {
         onClose={() => setIsNotificationOpen(false)}
         notifications={notifications}
         unreadCount={unreadCount}
-        onMarkRead={async (id) => {
-          setNotifications((prev) => {
-            const next = prev.map((n) => (n.id === id ? { ...n, isRead: true } : n));
-            setUnreadCount(next.filter((n) => !n.isRead).length);
-            return next;
-          });
-          await markNotificationReadOnServer(id);
+        onMarkRead={(id) => {
+          const ids = readUserReadNotifIds(currentUser);
+          ids.add(id);
+          writeUserReadNotifIds(currentUser, ids);
+          applyScopedStoreToUI(mqttSync.getStore(), currentUser);
         }}
-        onMarkAllRead={async () => {
-          setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
-          setUnreadCount(0);
-          await markAllNotificationsReadOnServer();
+        onMarkAllRead={() => {
+          const ids = readUserReadNotifIds(currentUser);
+          notifications.forEach((n) => ids.add(n.id));
+          writeUserReadNotifIds(currentUser, ids);
+          applyScopedStoreToUI(mqttSync.getStore(), currentUser);
         }}
       />
 
@@ -5721,7 +4175,10 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() =>
-                        triggerServerExcelDownload(excelDownloadNotice.serverUrl)
+                        shareOrSaveExcelFile(
+                          excelDownloadNotice.blob,
+                          excelDownloadNotice.filename
+                        )
                       }
                       className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-[11px] font-bold text-[#0B5D3F] hover:bg-emerald-100 active:scale-95 transition-all cursor-pointer"
                     >
